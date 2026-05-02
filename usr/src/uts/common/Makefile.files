@@ -2393,6 +2393,13 @@ IGC_CORE_OBJS += igc_api.o igc_base.o igc_i225.o igc_mac.o igc_nvm.o igc_phy.o
 IGC_OBJS += $(IGC_CORE_OBJS) igc.o igc_osdep.o igc_gld.o igc_ring.o igc_stat.o
 
 #
+# re(4D)
+#
+RE_CORE_OBJS += re_chip.o if_re_hw.o if_re_microcode_8125.o if_re_microcode_8126.o if_re_microcode_8127.o
+RE_OBJS += $(RE_CORE_OBJS) re.o re_sensor.o re_ring.o re_rss.o re_kstat.o re_intr.o re_gld.o
+
+
+#
 # The Kernel Test driver.
 #
 KTEST_OBJS += ktest.o

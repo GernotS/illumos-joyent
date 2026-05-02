@@ -1,0 +1,17 @@
+Files in this directory contain material derived from the FreeBSD Project.
+
+Primary upstream sources include:
+
+    src/sys/dev/rge/
+
+Used for:
+
+    - Realtek hardware register definitions
+    - PHY initialization sequences
+    - descriptor formats
+    - device revision handling
+    - PHY definitions
+
+License:
+
+    BSD 2-Clause License

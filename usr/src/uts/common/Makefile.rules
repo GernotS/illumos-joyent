@@ -1134,6 +1134,14 @@ $(OBJS_DIR)/%.o:		$(UTSBASE)/common/io/ral/%.c
 	$(COMPILE.c) -o $@ $<
 	$(CTFCONVERT_O)
 
+$(OBJS_DIR)/%.o:		$(UTSBASE)/common/io/re/%.c
+	$(COMPILE.c) -o $@ $<
+	$(CTFCONVERT_O)
+
+$(OBJS_DIR)/%.o:		$(UTSBASE)/common/io/re/core/%.c
+	$(COMPILE.c) -o $@ $<
+	$(CTFCONVERT_O)
+
 $(OBJS_DIR)/%.o:		$(UTSBASE)/common/io/rge/%.c
 	$(COMPILE.c) -o $@ $<
 	$(CTFCONVERT_O)

@@ -119,6 +119,7 @@ _MANFILES=	aac.4d		\
 		qlc.4d		\
 		ramdisk.4d	\
 		random.4d	\
+		re.4d		\
 		rge.4d		\
 		rtls.4d		\
 		sad.4d		\

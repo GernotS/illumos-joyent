@@ -1,0 +1,104 @@
+.\"
+.\" This file and its contents are supplied under the terms of the
+.\" Common Development and Distribution License ("CDDL"), version 1.0.
+.\" You may only use this file in accordance with the terms of version
+.\" 1.0 of the CDDL.
+.\"
+.\" A full copy of the text of the CDDL should have accompanied this
+.\" source.  A copy of the CDDL is also available via the Internet at
+.\" http://www.illumos.org/license/CDDL.
+.\"
+.\" Copyright 2026 Eduard Siboshvili
+.\"
+.Dd April 27, 2026
+.Dt RE 4D
+.Os
+.Sh NAME
+.Nm re
+.Nd Realtek RTL8125/RTL8126/RTL8127 Ethernet driver
+.Sh SYNOPSIS
+.Pa /dev/net/re*
+.Sh DESCRIPTION
+The
+.Nm
+driver is a GLDv3 NIC driver for modern Realtek PCIe Ethernet
+controllers.
+Supported devices include:
+.Bl -bullet
+.It
+RTL8125 2.5GbE controllers
+.It
+RTL8126 5GbE controllers
+.It
+RTL8127 10GbE controllers
+.El
+.Pp
+The driver supports checksum offload, MSI/MSI-X interrupts, multiple
+RX/TX queues, RSS, jumbo frames, auto-negotiation, and pause frames.
+Jumbo frames are supported up to 9216 bytes.
+.Pp
+A device instance is exposed as
+.Pa /dev/net/re0 ,
+.Pa /dev/net/re1 ,
+and so on.
+The device supports
+.Xr dlpi 4P
+and can be used through
+.Xr libdlpi 3LIB .
+.Sh LINK CONFIGURATION
+Link configuration is managed using
+.Xr dladm 8 .
+.Pp
+Auto-negotiation is always enabled.
+Link speed is determined by the advertised capabilities of the
+controller and link partner.
+Supported link speeds depend on the controller, link partner, and
+cabling.
+.Sh INTERRUPTS
+The driver supports MSI-X interrupts and falls back to MSI when MSI-X
+resources are not available.
+MSI-X allows per-queue interrupt handling and is the preferred mode.
+.Sh TIMER INTERRUPT MODE
+The driver provides an optional timer-based interrupt mode configured in
+.Pa re.conf .
+.Pp
+In this mode, the device generates interrupts periodically.
+This mode is intended as a fallback for systems where regular device
+interrupts are missed or unreliable.
+.Pp
+The
+.Sy timer_count
+property controls the interrupt interval.
+Higher values reduce the interrupt rate, and lower values increase it.
+.Sh CONFIGURATION
+Driver settings are configured in
+.Pa /kernel/drv/re.conf .
+.Pp
+Supported properties:
+.Bl -tag -width Sy
+.It Sy force_msi
+Force MSI/MSI-X interrupt mode.
+The default value is 0.
+.It Sy timer_int_enable
+Enable timer interrupt mode.
+The default value is 0.
+.It Sy timer_count
+Set the timer interrupt interval.
+Higher values reduce the interrupt rate.
+.El
+.Sh TEMPERATURE MONITORING
+Some controllers provide a temperature sensor exposed through FMA.
+Temperature monitoring is supported on RTL8125B and newer devices.
+.Sh FILES
+.Bl -tag -width Pa
+.It Pa /kernel/drv/amd64/re
+Device driver
+.It Pa /kernel/drv/re.conf
+Driver configuration
+.It Pa /dev/net/re*
+Device nodes
+.El
+.Sh SEE ALSO
+.Xr libdlpi 3LIB ,
+.Xr dlpi 4P ,
+.Xr dladm 8

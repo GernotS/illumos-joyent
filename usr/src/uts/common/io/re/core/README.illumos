@@ -1,0 +1,143 @@
+This driver provides support for modern Realtek multi-gigabit Ethernet
+controllers (RTL8125, RTL8126, RTL8127).
+
+It is implemented as a separate driver rather than extending rge(4D)
+due to differences in hardware initialization, DMA behavior, interrupt
+handling, and descriptor formats.
+
+The driver integrates with the illumos GLDv3 MAC framework and supports
+MSI/MSI-X interrupts, multi-queue RX/TX rings, and basic offload
+capabilities.
+
+
+Initialization model
+--------------------
+
+Hardware initialization is divided into two stages:
+
+1. Vendor initialization
+2. Driver-controlled initialization
+
+Vendor initialization consists of sequences derived from reference
+implementations and is treated as opaque.  This code is not modified
+unless required for correct operation.
+
+Driver-controlled initialization includes:
+
+- interrupt setup
+- ring allocation
+- DMA setup
+- MAC configuration
+
+This separation simplifies maintenance and reduces risk when updating
+support for new hardware revisions.
+
+
+Interrupt model
+---------------
+
+The driver supports the following interrupt modes:
+
+- MSI-X (preferred)
+- MSI
+- MSI with timer-based interrupt fallback
+
+Timer mode generates periodic interrupts and may provide stable
+throughput, but can limit maximum packet rate under high PPS workloads.
+
+Under load, interrupt frequency may decrease when operating in
+timer-based mode.
+
+
+Hardware considerations
+-----------------------
+
+Known hardware-specific behaviors include:
+
+- Variation in interrupt register layout across revisions
+- DMA ordering constraints on certain revisions
+- UDP checksum offload limitations on early RTL8125 devices
+
+
+Stop and shutdown
+-----------------
+
+The stop sequence is ordered to avoid deadlocks:
+
+1. Mark device as stopping
+2. Disable interrupts
+3. Release driver mutex
+4. Wait for taskq and interrupt handlers to complete
+5. Drain RX/TX rings
+6. Re-acquire mutex and release resources
+
+Waiting for taskq completion must not be performed while holding the
+driver mutex, as interrupt handlers may require the same lock.
+
+
+Driver development notes
+------------------------
+
+Parts of the initialization logic are derived from existing drivers,
+including:
+
+- FreeBSD kernel (src/sys/dev/rge/)
+- FreeBSD re_kmod
+- Linux rtl8125/rtl8126/rtl8127 drivers
+- Vendor-provided driver sources
+
+The code in the "core" directory is organized into two categories:
+
+1. Directly imported code with naming adjustments
+2. Modified or reimplemented functionality
+
+The following files are derived from FreeBSD sources with naming
+adaptation (rge_ → re_, RGE_ → RE_):
+
+    if_re_hw.h
+    if_re_hw.c
+    if_re_microcode.h
+    if_re_vendor.h
+    if_rereg.h
+    if_revar.h
+
+Some files may include minor adjustments (e.g. logging or additional
+register definitions).
+
+Modified or reimplemented components include:
+
+    re_chip.h
+    re_chip.c
+
+
+Implementation details
+----------------------
+
+FreeBSD MII register definitions have been replaced with illumos MII
+definitions.
+
+The following functions are based on or derived from existing drivers:
+
+- re_check_mac_version()
+  Derived from FreeBSD re_kmod and identification logic in rge_attach().
+
+- re_setup_interrupt_mask()
+  Implemented to match behavior observed in vendor drivers RTL8125/8126/8127.
+
+- re_init_software_variable()
+  Derived from vendor driver logic; configuration values must match
+  hardware expectations.
+
+The following functions originate from the FreeBSD rge(4) driver and have
+been adapted for illumos:
+
+- re_init_locked()
+- re_stop_locked()
+
+These implementations were modified to integrate with the illumos driver
+model, including changes to locking, interrupt handling, and datapath
+control. Additional adjustments were made based on analysis of behavior
+observed in vendor drivers.
+
+Other parts of the driver are derived from vendor implementations and
+adapted for illumos integration.
