@@ -290,6 +290,7 @@ struct spa {
 	 * vdev_resilver_deferred is set.
 	 */
 	boolean_t	spa_resilver_deferred;
+	boolean_t	spa_active_ddt_prune;	/* ddt prune process active */
 	kmutex_t	spa_async_lock;		/* protect async state */
 	kthread_t	*spa_async_thread;	/* thread doing async task */
 	int		spa_async_suspended;	/* async tasks suspended */
@@ -359,8 +360,10 @@ struct spa {
 	uint64_t	spa_bootsize;		/* efi system partition size */
 	ddt_t		*spa_ddt[ZIO_CHECKSUM_FUNCTIONS]; /* in-core DDTs */
 	uint64_t	spa_ddt_stat_object;	/* DDT statistics */
-	uint64_t	spa_dedup_ditto;	/* dedup ditto threshold */
 	uint64_t	spa_dedup_checksum;	/* default dedup checksum */
+	uint64_t	spa_dedup_table_quota;	/* property DDT maximum size */
+	uint64_t	spa_dedup_class_full_txg; /* txg dedup class was full */
+	uint64_t	spa_dedup_dsize;	/* cached on-disk DDT size */
 	uint64_t	spa_dspace;		/* dspace in normal class */
 	kmutex_t	spa_vdev_top_lock;	/* dueling offline/remove */
 	kmutex_t	spa_proc_lock;		/* protects spa_proc* */

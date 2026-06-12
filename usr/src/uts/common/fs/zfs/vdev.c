@@ -4021,6 +4021,21 @@ vdev_stat_update(zio_t *zio, uint64_t psize)
 	if (zio->io_vd == NULL && (zio->io_flags & ZIO_FLAG_DONT_PROPAGATE))
 		return;
 
+	/*
+	 * A DDT extend child that cannot merge its new DVAs into the entry
+	 * fails with EAGAIN (see zio_write_gang_block() and
+	 * zio_ddt_child_write_extend_ready()), and zio_done() reissues the
+	 * logical write as a plain non-deduplicated block.  That EAGAIN is
+	 * an internal control signal, not an I/O failure, and no device was
+	 * involved: io_vd is NULL, so it would be charged to the root vdev
+	 * and surface as a phantom pool-level write error with every leaf
+	 * reading zero.  zio_done() clears it on the logical zio before
+	 * calling us; skip it here for the DDT child that raised it.
+	 */
+	if (zio->io_vd == NULL && zio->io_error == EAGAIN &&
+	    (zio->io_flags & ZIO_FLAG_DDT_CHILD))
+		return;
+
 	mutex_enter(&vd->vdev_stat_lock);
 	if (type == ZIO_TYPE_READ && !vdev_is_dead(vd)) {
 		if (zio->io_error == ECKSUM)

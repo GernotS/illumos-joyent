@@ -935,3 +935,13 @@ vdev_queue_last_offset(vdev_t *vd)
 {
 	return (vd->vdev_queue.vq_last_offset);
 }
+
+boolean_t
+vdev_queue_pool_busy(spa_t *spa)
+{
+	dsl_pool_t *dp = spa_get_dsl(spa);
+	uint64_t min_bytes = zfs_dirty_data_max *
+	    zfs_vdev_async_write_active_min_dirty_percent / 100;
+
+	return (dp->dp_dirty_total > min_bytes);
+}

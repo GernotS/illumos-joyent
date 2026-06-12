@@ -186,7 +186,7 @@ unsigned int zfs_resilver_min_time_ms = 3000;
 int zfs_scan_suspend_progress = 0; /* set to prevent scans from progressing */
 boolean_t zfs_no_scrub_io = B_FALSE; /* set to disable scrub i/o */
 boolean_t zfs_no_scrub_prefetch = B_FALSE; /* set to disable scrub prefetch */
-enum ddt_class zfs_scrub_ddt_class_max = DDT_CLASS_DUPLICATE;
+ddt_class_t zfs_scrub_ddt_class_max = DDT_CLASS_DUPLICATE;
 /* max number of blocks to free in a single TXG */
 uint64_t zfs_async_block_max_blocks = UINT64_MAX;
 /*
@@ -605,6 +605,8 @@ dsl_scan_init(dsl_pool_t *dp, uint64_t txg)
 		zap_cursor_fini(&zc);
 	}
 
+	ddt_walk_init(spa, scn->scn_phys.scn_max_txg);
+
 	spa_scan_stat_init(spa);
 	return (0);
 }
@@ -804,6 +806,8 @@ dsl_scan_setup_sync(void *arg, dmu_tx_t *tx)
 	    ot ? ot : DMU_OT_SCAN_QUEUE, DMU_OT_NONE, 0, tx);
 
 	bcopy(&scn->scn_phys, &scn->scn_phys_cached, sizeof (scn->scn_phys));
+
+	ddt_walk_init(spa, scn->scn_phys.scn_max_txg);
 
 	dsl_scan_sync_state(scn, tx, SYNC_MANDATORY);
 
@@ -1335,7 +1339,8 @@ dsl_scan_check_suspend(dsl_scan_t *scn, const zbookmark_phys_t *zb)
 	    txg_sync_waiting(scn->scn_dp) ||
 	    NSEC2SEC(sync_time_ns) >= zfs_txg_timeout)) ||
 	    spa_shutting_down(scn->scn_dp->dp_spa) ||
-	    (zfs_scan_strict_mem_lim && dsl_scan_should_clear(scn))) {
+	    (zfs_scan_strict_mem_lim && dsl_scan_should_clear(scn)) ||
+	    !ddt_walk_ready(scn->scn_dp->dp_spa)) {
 		if (zb) {
 			dprintf_zfs("suspending at bookmark "
 			    "%llx/%llx/%llx/%llx\n",
@@ -2489,10 +2494,10 @@ enqueue_cb(dsl_pool_t *dp, dsl_dataset_t *hds, void *arg)
 /* ARGSUSED */
 void
 dsl_scan_ddt_entry(dsl_scan_t *scn, enum zio_checksum checksum,
-    ddt_entry_t *dde, dmu_tx_t *tx)
+    ddt_t *ddt, ddt_lightweight_entry_t *ddlwe, dmu_tx_t *tx)
 {
-	const ddt_key_t *ddk = &dde->dde_key;
-	ddt_phys_t *ddp = dde->dde_phys;
+	const ddt_key_t *ddk = &ddlwe->ddlwe_key;
+	ddt_univ_phys_t *ddp = &ddlwe->ddlwe_phys;
 	blkptr_t bp;
 	zbookmark_phys_t zb = { 0 };
 	int p;
@@ -2514,11 +2519,14 @@ dsl_scan_ddt_entry(dsl_scan_t *scn, enum zio_checksum checksum,
 	if (scn->scn_done_txg != 0)
 		return;
 
-	for (p = 0; p < DDT_PHYS_TYPES; p++, ddp++) {
-		if (ddp->ddp_phys_birth == 0 ||
-		    ddp->ddp_phys_birth > scn->scn_phys.scn_max_txg)
+	int nphys = DDT_NPHYS(ddt);
+	for (p = 0; p < nphys; p++) {
+		ddt_phys_variant_t v = DDT_PHYS_VARIANT(ddt, p);
+		ddt_phys_t *slot = DDT_PHYS_SLOT(ddp, v);
+		if (slot->ddp_phys_birth == 0 ||
+		    slot->ddp_phys_birth > scn->scn_phys.scn_max_txg)
 			continue;
-		ddt_bp_create(checksum, ddk, ddp, &bp);
+		ddt_bp_create(checksum, ddk, ddp, v, &bp);
 
 		scn->scn_visited_this_txg++;
 		scan_funcs[scn->scn_phys.scn_func](scn->scn_dp, &bp, &zb);
@@ -2531,7 +2539,7 @@ dsl_scan_ddt_entry(dsl_scan_t *scn, enum zio_checksum checksum,
  * If there are N references to a deduped block, we don't want to scrub it
  * N times -- ideally, we should scrub it exactly once.
  *
- * We leverage the fact that the dde's replication class (enum ddt_class)
+ * We leverage the fact that the dde's replication class (ddt_class_t)
  * is ordered from highest replication class (DDT_CLASS_DITTO) to lowest
  * (DDT_CLASS_UNIQUE) so that we may walk the DDT in that order.
  *
@@ -2562,11 +2570,14 @@ static void
 dsl_scan_ddt(dsl_scan_t *scn, dmu_tx_t *tx)
 {
 	ddt_bookmark_t *ddb = &scn->scn_phys.scn_ddt_bookmark;
-	ddt_entry_t dde = { 0 };
+	uint64_t ddebuf[DDT_ENTRY_BUF_WORDS] = { 0 };
+	ddt_entry_t *dde = (ddt_entry_t *)ddebuf;
 	int error;
 	uint64_t n = 0;
 
-	while ((error = ddt_walk(scn->scn_dp->dp_spa, ddb, &dde)) == 0) {
+	while ((error = ddt_walk(scn->scn_dp->dp_spa, ddb, dde)) == 0) {
+		ddt_t *ddt;
+
 		if (ddb->ddb_class > scn->scn_phys.scn_ddt_class_max)
 			break;
 		dprintf_zfs("visiting ddb=%llu/%llu/%llu/%llx\n",
@@ -2585,16 +2596,36 @@ dsl_scan_ddt(dsl_scan_t *scn, dmu_tx_t *tx)
 		 * class or drop it, never move it to a class the walk has
 		 * already passed.
 		 */
-		dsl_scan_ddt_entry(scn, ddb->ddb_checksum, &dde, tx);
+		ddt = scn->scn_dp->dp_spa->spa_ddt[ddb->ddb_checksum];
+
+		ddt_lightweight_entry_t ddlwe;
+		ddlwe.ddlwe_key = dde->dde_key;
+		ddlwe.ddlwe_type = dde->dde_type;
+		ddlwe.ddlwe_class = dde->dde_class;
+		memcpy(&ddlwe.ddlwe_phys, dde->dde_phys, DDT_PHYS_SIZE(ddt));
+		dsl_scan_ddt_entry(scn, ddb->ddb_checksum, ddt, &ddlwe, tx);
 		n++;
 
 		if (dsl_scan_check_suspend(scn, NULL))
 			break;
 	}
 
-	zfs_dbgmsg("scanned %llu ddt entries with class_max = %u; "
-	    "suspending=%u", (longlong_t)n,
-	    (int)scn->scn_phys.scn_ddt_class_max, (int)scn->scn_suspending);
+	if (error == EAGAIN) {
+		/* Forced log flush still running; see ddt_walk_init(). */
+		(void) dsl_scan_check_suspend(scn, NULL);
+		error = 0;
+
+		zfs_dbgmsg("waiting for ddt to become ready for scan "
+		    "on %s with class_max = %u; suspending=%u",
+		    scn->scn_dp->dp_spa->spa_name,
+		    (int)scn->scn_phys.scn_ddt_class_max,
+		    (int)scn->scn_suspending);
+	} else {
+		zfs_dbgmsg("scanned %llu ddt entries with class_max = %u; "
+		    "suspending=%u", (longlong_t)n,
+		    (int)scn->scn_phys.scn_ddt_class_max,
+		    (int)scn->scn_suspending);
+	}
 
 	ASSERT(error == 0 || error == ENOENT);
 	ASSERT(error != ENOENT ||

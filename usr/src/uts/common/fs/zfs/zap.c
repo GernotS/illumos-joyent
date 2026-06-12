@@ -22,6 +22,10 @@
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2012, 2018 by Delphix. All rights reserved.
  * Copyright (c) 2014 Spectra Logic Corporation, All rights reserved.
+ * Copyright 2017 Nexenta Systems, Inc.
+ * Copyright 2023 Alexander Stetsenko <alex.stetsenko@gmail.com>
+ * Copyright (c) 2024, Klara, Inc.
+ * Copyright (c) 2026, TrueNAS.
  */
 
 /*
@@ -41,6 +45,7 @@
 
 #include <sys/spa.h>
 #include <sys/dmu.h>
+#include <sys/dnode.h>
 #include <sys/zfs_context.h>
 #include <sys/zfs_znode.h>
 #include <sys/fs/zfs.h>
@@ -79,11 +84,53 @@
  */
 boolean_t zap_iterate_prefetch = B_TRUE;
 
+/*
+ * When a remove empties a fat-ZAP leaf whose sibling is also empty,
+ * zap_shrink() merges the two leaves and frees a block.  Unlike OpenZFS,
+ * which shrinks every fat ZAP, we shrink only dedup table ZAPs
+ * (DMU_OT_DDT_ZAP): dedup_table_quota and DDT pruning need the space back.
+ * Other ZAPs keep the historic never-shrink behavior, in part because
+ * the boot loader (usr/src/boot/libsa/zfs) can't list a shrunk ZAP: it
+ * reads leaves from blocks 1..zap_num_leafs, so after a shrink it misses
+ * entries.
+ *
+ * zap_no_shrink:  never shrink, not even DDT ZAPs (DDT space is then not
+ *                 reclaimed, and dedup_table_quota can stay exceeded).
+ * zap_shrink_all: testing only; shrink every fat ZAP, as OpenZFS does.
+ *                 Not for pools the loader boots from.
+ */
+boolean_t zap_no_shrink = B_FALSE;
+boolean_t zap_shrink_all = B_FALSE;
+
 int fzap_default_block_shift = 14; /* 16k blocksize */
 
 extern inline zap_phys_t *zap_f_phys(zap_t *zap);
 
 static uint64_t zap_allocate_blocks(zap_t *zap, int nblocks);
+static int zap_shrink(zap_name_t *zn, zap_leaf_t *l, dmu_tx_t *tx);
+static void zap_trunc(zap_t *zap);
+
+/*
+ * Called only after a remove has emptied a leaf, so the dnode lookup is
+ * off the common path.  Use the on-disk type (dn_type), not the in-core
+ * dn_storage_type, which ddt_log.c sets on objects that are not ZAPs.
+ */
+static boolean_t
+zap_shrink_allowed(zap_t *zap)
+{
+	dnode_t *dn;
+	boolean_t ddt;
+
+	if (zap_no_shrink)
+		return (B_FALSE);
+	if (zap_shrink_all)
+		return (B_TRUE);
+
+	dn = dmu_buf_dnode_enter(zap->zap_dbuf);
+	ddt = DMU_OT_IS_DDT(dn->dn_type);
+	dmu_buf_dnode_exit(zap->zap_dbuf);
+	return (ddt);
+}
 
 void
 fzap_byteswap(void *vbuf, size_t size)
@@ -425,20 +472,37 @@ zap_leaf_evict_sync(void *dbu)
 static zap_leaf_t *
 zap_create_leaf(zap_t *zap, dmu_tx_t *tx)
 {
-	zap_leaf_t *l = kmem_zalloc(sizeof (zap_leaf_t), KM_SLEEP);
-
 	ASSERT(RW_WRITE_HELD(&zap->zap_rwlock));
 
-	rw_init(&l->l_rwlock, 0, 0, 0);
-	rw_enter(&l->l_rwlock, RW_WRITER);
-	l->l_blkid = zap_allocate_blocks(zap, 1);
-	l->l_dbuf = NULL;
+	uint64_t blkid = zap_allocate_blocks(zap, 1);
+	dmu_buf_t *db = NULL;
 
 	VERIFY0(dmu_buf_hold(zap->zap_objset, zap->zap_object,
-	    l->l_blkid << FZAP_BLOCK_SHIFT(zap), NULL, &l->l_dbuf,
+	    blkid << FZAP_BLOCK_SHIFT(zap), NULL, &db,
 	    DMU_READ_NO_PREFETCH));
-	dmu_buf_init_user(&l->l_dbu, zap_leaf_evict_sync, NULL, &l->l_dbuf);
-	VERIFY3P(NULL, ==, dmu_buf_set_user(l->l_dbuf, &l->l_dbu));
+
+	/*
+	 * Create the leaf structure and stash it on the dbuf.  If the zap
+	 * was recently shrunk and truncated (see zap_trunc()), this block id
+	 * may have been used before: the dbuf might have been sitting in the
+	 * cache waiting to be evicted, and so still have the old leaf attached
+	 * to it.  If so, just reuse it.
+	 */
+	zap_leaf_t *l = dmu_buf_get_user(db);
+	if (l == NULL) {
+		l = kmem_zalloc(sizeof (zap_leaf_t), KM_SLEEP);
+		l->l_blkid = blkid;
+		l->l_dbuf = db;
+		rw_init(&l->l_rwlock, 0, 0, 0);
+		dmu_buf_init_user(&l->l_dbu, zap_leaf_evict_sync, NULL,
+		    &l->l_dbuf);
+		dmu_buf_set_user(l->l_dbuf, &l->l_dbu);
+	} else {
+		ASSERT3U(l->l_blkid, ==, blkid);
+		ASSERT3P(l->l_dbuf, ==, db);
+	}
+
+	rw_enter(&l->l_rwlock, RW_WRITER);
 	dmu_buf_will_dirty(l->l_dbuf, tx);
 
 	zap_leaf_init(l, zap->zap_normflags != 0);
@@ -586,6 +650,95 @@ zap_set_idx_to_blk(zap_t *zap, uint64_t idx, uint64_t blk, dmu_tx_t *tx)
 		return (zap_table_store(zap, &zap_f_phys(zap)->zap_ptrtbl,
 		    idx, blk, tx));
 	}
+}
+
+/*
+ * Point the nptrs pointer-table entries starting at idx, which all point at
+ * oldblk, at blk instead.  Either every entry is changed and 0 is returned,
+ * or none is and the error is returned: the caller frees oldblk only on
+ * success, and an entry left pointing at a freed leaf corrupts the ZAP.
+ */
+static int
+zap_set_idx_range_to_blk(zap_t *zap, uint64_t idx, uint64_t nptrs, uint64_t blk,
+    uint64_t oldblk, dmu_tx_t *tx)
+{
+	zap_table_phys_t *tbl = &zap_f_phys(zap)->zap_ptrtbl;
+	uint64_t epb = 1ULL << (FZAP_BLOCK_SHIFT(zap) - 3); /* entries/block */
+	int err;
+
+	ASSERT(tx != NULL);
+	ASSERT(RW_WRITE_HELD(&zap->zap_rwlock));
+
+	/*
+	 * Read every pointer-table block in the range first, so that an i/o
+	 * error fails before anything is changed.  zap_table_load() also
+	 * reads the matching block of the next table while the table is
+	 * being doubled; that table has two entries per index, so step by
+	 * half a block then.  The range is a power of two aligned to its
+	 * size, so these steps reach every block it touches.  (Upstream
+	 * OpenZFS does the same check, stepping by FZAP_BLOCK_SHIFT() >> 3
+	 * entries.)
+	 */
+	uint64_t step = (tbl->zt_nextblk != 0) ? MAX(epb / 2, 1) : epb;
+	for (uint64_t i = 0; i < nptrs; i += step) {
+		uint64_t b;
+		if ((err = zap_idx_to_blk(zap, idx + i, &b)) != 0)
+			return (err);
+	}
+
+	for (uint64_t i = 0; i < nptrs; i++) {
+		err = zap_set_idx_to_blk(zap, idx + i, blk, tx);
+		if (err != 0) {
+			/*
+			 * A block read above was evicted and could not be
+			 * read back.  Put back the entries already changed:
+			 * their blocks are dirty in this txg and cannot be
+			 * evicted, so this cannot fail.
+			 */
+			for (uint64_t j = 0; j < i; j++) {
+				VERIFY0(zap_set_idx_to_blk(zap, idx + j,
+				    oldblk, tx));
+			}
+			return (err);
+		}
+	}
+
+	return (0);
+}
+
+#define	ZAP_PREFIX_HASH(pref, pref_len)	((pref) << (64 - (pref_len)))
+
+/*
+ * Each leaf has a single range of entries (block pointers) in the ZAP ptrtbl.
+ * If two leaves are siblings, their ranges are adjacent and contain the same
+ * number of entries.  To find out whether a leaf has a sibling, check the
+ * range corresponding to the sibling leaf.  There is no need to check all
+ * entries in the range, only the first and the last one: if they are the
+ * same block, that block is the sibling.  Returns its blkid, or 0.
+ */
+static uint64_t
+zap_check_leaf_by_ptrtbl(zap_t *zap, uint64_t prefix, uint64_t prefix_len)
+{
+	ASSERT(RW_LOCK_HELD(&zap->zap_rwlock));
+
+	uint64_t h = ZAP_PREFIX_HASH(prefix, prefix_len);
+	uint64_t idx = ZAP_HASH_IDX(h, zap_f_phys(zap)->zap_ptrtbl.zt_shift);
+	uint64_t pref_diff = zap_f_phys(zap)->zap_ptrtbl.zt_shift - prefix_len;
+	uint64_t nptrs = (1ULL << pref_diff);
+	uint64_t first;
+	uint64_t last;
+
+	ASSERT3U(idx+nptrs, <=, (1ULL << zap_f_phys(zap)->zap_ptrtbl.zt_shift));
+
+	if (zap_idx_to_blk(zap, idx, &first) != 0)
+		return (0);
+
+	if (zap_idx_to_blk(zap, idx+nptrs-1, &last) != 0)
+		return (0);
+
+	if (first != last)
+		return (0);
+	return (first);
 }
 
 static int
@@ -779,7 +932,8 @@ fzap_check(zap_name_t *zn, uint64_t integer_size, uint64_t num_integers)
 int
 fzap_lookup(zap_name_t *zn,
     uint64_t integer_size, uint64_t num_integers, void *buf,
-    char *realname, int rn_len, boolean_t *ncp)
+    char *realname, int rn_len, boolean_t *ncp,
+    uint64_t *actual_num_integers)
 {
 	zap_leaf_t *l;
 	zap_entry_handle_t zeh;
@@ -799,6 +953,8 @@ fzap_lookup(zap_name_t *zn,
 		}
 
 		err = zap_entry_read(&zeh, integer_size, num_integers, buf);
+		if (err == 0 && actual_num_integers != NULL)
+			*actual_num_integers = zeh.zeh_num_integers;
 		(void) zap_entry_read_name(zn->zn_zap, &zeh, rn_len, realname);
 		if (ncp) {
 			*ncp = zap_entry_normalization_conflict(&zeh,
@@ -950,6 +1106,20 @@ fzap_remove(zap_name_t *zn, dmu_tx_t *tx)
 	if (err == 0) {
 		zap_entry_remove(&zeh);
 		zap_increment_num_entries(zn->zn_zap, -1, tx);
+
+		if (zap_leaf_phys(l)->l_hdr.lh_nentries == 0 &&
+		    zap_shrink_allowed(zn->zn_zap)) {
+			/*
+			 * The entry is removed whatever happens next.
+			 * Shrinking is only an optimisation and leaves the
+			 * ZAP intact when it fails, so don't fail the
+			 * removal: a caller that saw an error would think
+			 * the entry is still there.  (Upstream OpenZFS
+			 * returns the shrink error.)
+			 */
+			(void) zap_shrink(zn, l, tx);
+			return (0);
+		}
 	}
 	zap_put_leaf(l);
 	return (err);
@@ -1213,13 +1383,19 @@ fzap_cursor_retrieve(zap_t *zap, zap_cursor_t *zc, zap_attribute_t *za)
 		    ZIO_PRIORITY_ASYNC_READ);
 	}
 
-	if (zc->zc_leaf &&
-	    (ZAP_HASH_IDX(zc->zc_hash,
-	    zap_leaf_phys(zc->zc_leaf)->l_hdr.lh_prefix_len) !=
-	    zap_leaf_phys(zc->zc_leaf)->l_hdr.lh_prefix)) {
+	if (zc->zc_leaf) {
 		rw_enter(&zc->zc_leaf->l_rwlock, RW_READER);
-		zap_put_leaf(zc->zc_leaf);
-		zc->zc_leaf = NULL;
+
+		/*
+		 * The leaf was either shrunk or splitted.
+		 */
+		if ((zap_leaf_phys(zc->zc_leaf)->l_hdr.lh_block_type == 0) ||
+		    (ZAP_HASH_IDX(zc->zc_hash,
+		    zap_leaf_phys(zc->zc_leaf)->l_hdr.lh_prefix_len) !=
+		    zap_leaf_phys(zc->zc_leaf)->l_hdr.lh_prefix)) {
+			zap_put_leaf(zc->zc_leaf);
+			zc->zc_leaf = NULL;
+		}
 	}
 
 again:
@@ -1228,8 +1404,6 @@ again:
 		    &zc->zc_leaf);
 		if (err != 0)
 			return (err);
-	} else {
-		rw_enter(&zc->zc_leaf->l_rwlock, RW_READER);
 	}
 	l = zc->zc_leaf;
 
@@ -1350,4 +1524,276 @@ fzap_get_stats(zap_t *zap, zap_stats_t *zs)
 			}
 		}
 	}
+}
+
+/*
+ * Lower zap_freeblk to just past the last block still in use, so that
+ * the block ids of leaves freed by zap_shrink() at the end of the object
+ * are allocated again instead of the object growing without bound.  A
+ * block is in use if it holds the pointer table or the pointer table
+ * refers to it.  If the pointer table can't be read, leave things as
+ * they are.  From OpenZFS zap_trunc().
+ */
+static void
+zap_trunc(zap_t *zap)
+{
+	zap_table_phys_t *zt = &zap_f_phys(zap)->zap_ptrtbl;
+	uint64_t nentries = (zt->zt_blk > 0 ? (1ULL << zt->zt_shift) :
+	    (1ULL << ZAP_EMBEDDED_PTRTBL_SHIFT(zap)));
+	uint64_t lastblk;
+
+	ASSERT(RW_WRITE_HELD(&zap->zap_rwlock));
+
+	/* Find the last block allocated to the pointer table. */
+	if (zt->zt_nextblk > 0) {
+		/* The pointer table is growing. */
+		lastblk = zt->zt_nextblk + (zt->zt_numblks * 2) - 1;
+	} else if (zt->zt_blk > 0) {
+		/* External pointer table. */
+		lastblk = zt->zt_blk + zt->zt_numblks - 1;
+	} else {
+		/* Embedded pointer table. */
+		lastblk = 0;
+	}
+
+	for (uint64_t idx = 0; idx < nentries; idx++) {
+		uint64_t blk;
+
+		if (zap_idx_to_blk(zap, idx, &blk) != 0)
+			return;
+		if (blk > lastblk)
+			lastblk = blk;
+	}
+
+	ASSERT3U(lastblk, <, zap_f_phys(zap)->zap_freeblk);
+
+	zap_f_phys(zap)->zap_freeblk = lastblk + 1;
+}
+
+/*
+ * ZAP Shrinking Algorithm:
+ *
+ * We shrink ZAP recursively removing empty leaves.
+ * If the removing succeed, we get some new empty leaf.
+ * We repeat the procedure for the new leaf until it fails.
+ * We implement the algorithm iteratively, rather than recursively.
+ *
+ * ZAP Leaf Removing Algorithm:
+ *
+ * Any ZAP leaf might have a sibling - a leaf with the same prefix length and
+ * with the prefix, which differes only by 1 least significant (sibling) bit.
+ * If both leaves are empty, we can remove one of them. For simplicity, we
+ * always remove the leaf with sibling bit == 1.
+ *
+ * 1. Check if a sibling leaf exists.
+ * 2. Check if the sibling leaf is empty.
+ * 3. If sibling bit of the initial leaf is not 0, release it.
+ *    In order to avoid deadlock, we always dereference leaves in the same order
+ *    - the leaf with sibling bit 0 first, then the leaf with sl_bit 1.
+ * 4. Upgrade zapdir lock to WRITER (once).
+ * 5. Deref leaves if needed.
+ * 6. Recheck both leaves if required.
+ * 7. Update ptrtbl pointers of the leaf with sl_bit 1 (sibling leaf)to point to
+ *    the leaf with sl_bit 0.
+ * 8. Free disk space of the sibling leaf (dmu_free_range).
+ * 9. Update prefix and prefix_len of the remaining leaf.
+ *    Now we have some new leaf, so we repeat the removing procedure for it.
+ */
+static int
+zap_shrink(zap_name_t *zn, zap_leaf_t *l, dmu_tx_t *tx)
+{
+	zap_t *zap = zn->zn_zap;
+	uint64_t hash = zn->zn_hash;
+	uint64_t prefix = zap_leaf_phys(l)->l_hdr.lh_prefix;
+	uint64_t prefix_len = zap_leaf_phys(l)->l_hdr.lh_prefix_len;
+	boolean_t trunc = B_FALSE;
+	int nshrunk = 0;
+	int err = 0;
+
+	ASSERT3U(zap_leaf_phys(l)->l_hdr.lh_nentries, ==, 0);
+	ASSERT3U(prefix_len, <=, zap_f_phys(zap)->zap_ptrtbl.zt_shift);
+	ASSERT(RW_LOCK_HELD(&zap->zap_rwlock));
+	ASSERT3U(ZAP_HASH_IDX(hash, prefix_len), ==, prefix);
+
+	boolean_t writer = B_FALSE;
+
+	DTRACE_PROBE(zap__shrink__start);
+
+	/*
+	 * To avoid deadlock always deref leaves in same order - l0, l1.
+	 */
+	while (prefix_len) {
+		zap_leaf_t *sl;
+		uint64_t sl_prefix = prefix ^ 1;
+		uint64_t sl_hash = ZAP_PREFIX_HASH(sl_prefix, prefix_len);
+		int slbit = prefix & 1;
+
+		ASSERT3S(zap_leaf_phys(l)->l_hdr.lh_nentries, ==, 0);
+
+
+		/*
+		 * Check if there is sibling by reading corresponding tbl ptrs.
+		 */
+		if (zap_check_leaf_by_ptrtbl(zap, sl_prefix, prefix_len) == 0)
+			break;
+
+		/*
+		 * This is l1 leaf - have to unlock before locking the sibling.
+		 */
+		if (slbit == 1) {
+			zap_put_leaf(l);
+			l = NULL;
+		}
+
+		/*
+		 * Deref sibling leaf and check if it is empty.
+		 */
+		if ((err = zap_deref_leaf(zap, sl_hash, tx, RW_READER,
+		    &sl)) != 0)
+			break;
+
+		ASSERT3U(ZAP_HASH_IDX(sl_hash, prefix_len), ==, sl_prefix);
+
+		/*
+		 * Check if we have an empty sibling.
+		 */
+		if (zap_leaf_phys(sl)->l_hdr.lh_prefix_len != prefix_len ||
+		    zap_leaf_phys(sl)->l_hdr.lh_nentries != 0) {
+			zap_put_leaf(sl);
+			break;
+		}
+
+		zap_put_leaf(sl);
+
+		/*
+		 * We need writer lock to modify ZAP ptrtbl.
+		 */
+		if (!writer && (writer = zap_tryupgradedir(zap, tx)) == 0) {
+			/* We failed to upgrade */
+			if (l != NULL) {
+				zap_put_leaf(l);
+				l = NULL;
+			}
+
+			/*
+			 * Instead of calling zap_unlockdir(); zap_lockdir();
+			 * we do it in more optimized way.
+			 */
+			rw_exit(&zap->zap_rwlock);
+			rw_enter(&zap->zap_rwlock, RW_WRITER);
+			dmu_buf_will_dirty(zap->zap_dbuf, tx);
+
+			writer = B_TRUE;
+		}
+
+		/*
+		 * Swap hash/prefix, so the leaves will be dereferenced in
+		 * correct order (slbit == 0 first).
+		 */
+		if (slbit == 1) {
+			ASSERT3P(l, ==, NULL);
+
+			hash ^= sl_hash;
+			sl_hash ^= hash;
+			hash ^= sl_hash;
+
+			sl_prefix = prefix;
+			prefix ^= 0x1;
+		}
+
+		ASSERT(RW_WRITE_HELD(&zap->zap_rwlock));
+		ASSERT3U(ZAP_HASH_IDX(hash, prefix_len), ==, prefix);
+
+		if (l == NULL) {
+			if ((err = zap_deref_leaf(zap, hash, tx, RW_WRITER,
+			    &l)) != 0)
+				break;
+
+			/*
+			 * The leaf isn't empty anymore or
+			 * it was shrunk/expanded while our locks were down.
+			 */
+			if (zap_leaf_phys(l)->l_hdr.lh_nentries != 0 ||
+			    zap_leaf_phys(l)->l_hdr.lh_prefix_len !=
+			    prefix_len)
+				break;
+		}
+
+		if ((err = zap_deref_leaf(zap, sl_hash, tx, RW_WRITER,
+		    &sl)) != 0)
+			break;
+
+		/*
+		 * The leaf isn't empty anymore or
+		 * it was shrunk/expaned while our locks were down.
+		 */
+		if (zap_leaf_phys(sl)->l_hdr.lh_nentries != 0 ||
+		    zap_leaf_phys(sl)->l_hdr.lh_prefix_len !=
+		    prefix_len) {
+			zap_put_leaf(sl);
+			break;
+		}
+
+		/*
+		 * If we got here - we have leaf to shrink.
+		 *
+		 * Take the table's shift now, not on entry: the pointer
+		 * table may have been doubled while our locks were down
+		 * above.  (Upstream OpenZFS re-reads the shift there but
+		 * keeps using the range size computed before, so after such
+		 * a doubling it redirects the wrong entries.)
+		 */
+		uint64_t prefix_diff =
+		    zap_f_phys(zap)->zap_ptrtbl.zt_shift - prefix_len;
+		uint64_t idx = sl_prefix << prefix_diff;
+		uint64_t nptrs = (1ULL << prefix_diff);
+
+		/*
+		 * Point sl's range at l.  Only if every entry was changed
+		 * may sl be freed.
+		 */
+		if ((err = zap_set_idx_range_to_blk(zap, idx, nptrs,
+		    l->l_blkid, sl->l_blkid, tx)) != 0) {
+			zap_put_leaf(sl);
+			break;
+		}
+
+		/*
+		 * Free sl leaf disk space.
+		 */
+		int bs = FZAP_BLOCK_SHIFT(zap);
+		if (sl->l_blkid == zap_f_phys(zap)->zap_freeblk - 1)
+			trunc = B_TRUE;
+		(void) dmu_free_range(zap->zap_objset, zap->zap_object,
+		    sl->l_blkid << bs, 1 << bs, tx);
+		zap_put_leaf(sl);
+
+		nshrunk++;
+		zap_f_phys(zap)->zap_num_leafs--;
+
+		/*
+		 * Update prefix and prefix_len.
+		 */
+		zap_leaf_phys(l)->l_hdr.lh_prefix >>= 1;
+		zap_leaf_phys(l)->l_hdr.lh_prefix_len--;
+
+		prefix = zap_leaf_phys(l)->l_hdr.lh_prefix;
+		prefix_len = zap_leaf_phys(l)->l_hdr.lh_prefix_len;
+	}
+
+	/*
+	 * If the last block of the object was freed, give its block id (and
+	 * those of any freed blocks below it) back.  trunc is only set once
+	 * the directory lock is held as writer.  From OpenZFS zap_shrink().
+	 */
+	if (trunc)
+		zap_trunc(zap);
+
+	DTRACE_PROBE3(zap__shrink__done, zap_t *, zap,
+	    int, nshrunk, uint64_t, zap_f_phys(zap)->zap_num_leafs);
+
+	if (l != NULL)
+		zap_put_leaf(l);
+
+	return (err);
 }

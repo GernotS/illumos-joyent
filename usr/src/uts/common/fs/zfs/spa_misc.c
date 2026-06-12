@@ -30,6 +30,7 @@
  * Copyright (c) 2017, Intel Corporation.
  * Copyright 2020 Joyent, Inc.
  * Copyright 2022 Oxide Computer Company
+ * Copyright (c) 2023, 2024, Klara Inc.
  */
 
 #include <sys/zfs_context.h>
@@ -480,8 +481,9 @@ spa_config_tryenter(spa_t *spa, int locks, void *tag, krw_t rw)
 	return (1);
 }
 
-void
-spa_config_enter(spa_t *spa, int locks, void *tag, krw_t rw)
+static void
+spa_config_enter_impl(spa_t *spa, int locks, void *tag, krw_t rw,
+    boolean_t priority)
 {
 	int wlocks_held = 0;
 
@@ -495,7 +497,8 @@ spa_config_enter(spa_t *spa, int locks, void *tag, krw_t rw)
 			continue;
 		mutex_enter(&scl->scl_lock);
 		if (rw == RW_READER) {
-			while (scl->scl_writer || scl->scl_write_wanted) {
+			while (scl->scl_writer ||
+			    (!priority && scl->scl_write_wanted)) {
 				cv_wait(&scl->scl_cv, &scl->scl_lock);
 			}
 		} else {
@@ -511,6 +514,23 @@ spa_config_enter(spa_t *spa, int locks, void *tag, krw_t rw)
 		mutex_exit(&scl->scl_lock);
 	}
 	ASSERT3U(wlocks_held, <=, locks);
+}
+
+void
+spa_config_enter(spa_t *spa, int locks, void *tag, krw_t rw)
+{
+	spa_config_enter_impl(spa, locks, tag, rw, B_FALSE);
+}
+
+/*
+ * Like spa_config_enter(), but a reader ignores pending writers
+ * (scl_write_wanted) and cuts in front of them.  Breaks the ddtprune
+ * SCL_ZIO re-entrancy deadlock (#17793).
+ */
+void
+spa_config_enter_priority(spa_t *spa, int locks, void *tag, krw_t rw)
+{
+	spa_config_enter_impl(spa, locks, tag, rw, B_TRUE);
 }
 
 void
@@ -670,6 +690,8 @@ spa_add(const char *name, nvlist_t *config, const char *altroot)
 	spa->spa_load_max_txg = UINT64_MAX;
 	spa->spa_proc = &p0;
 	spa->spa_proc_state = SPA_PROC_NONE;
+	spa->spa_dedup_table_quota =
+	    zpool_prop_default_numeric(ZPOOL_PROP_DEDUP_TABLE_QUOTA);
 	spa->spa_trust_config = B_TRUE;
 
 	hdlr.cyh_func = spa_deadman;
@@ -1899,13 +1921,31 @@ spa_dedup_class(spa_t *spa)
 	return (spa->spa_dedup_class);
 }
 
+boolean_t
+spa_special_has_ddt(spa_t *spa)
+{
+	return (zfs_ddt_data_is_special &&
+	    spa->spa_special_class->mc_groups != 0);
+}
+
 /*
  * Locate an appropriate allocation class
  */
 metaslab_class_t *
-spa_preferred_class(spa_t *spa, uint64_t size, dmu_object_type_t objtype,
-    uint_t level, uint_t special_smallblk)
+spa_preferred_class(spa_t *spa, const zio_t *zio)
 {
+	const zio_prop_t *zp = &zio->io_prop;
+
+	/*
+	 * Override object type for the purposes of selecting a storage class.
+	 * Primarily for DMU_OTN_ types where we can't explicitly control their
+	 * storage class; instead, choose a static type most closely matches
+	 * what we want.
+	 */
+	dmu_object_type_t objtype =
+	    zp->zp_storage_type == DMU_OT_NONE ?
+	    zp->zp_type : zp->zp_storage_type;
+
 	if (DMU_OT_IS_ZIL(objtype)) {
 		if (spa->spa_log_class->mc_groups != 0)
 			return (spa_log_class(spa));
@@ -1925,14 +1965,15 @@ spa_preferred_class(spa_t *spa, uint64_t size, dmu_object_type_t objtype,
 	}
 
 	/* Indirect blocks for user data can land in special if allowed */
-	if (level > 0 && (DMU_OT_IS_FILE(objtype) || objtype == DMU_OT_ZVOL)) {
+	if (zp->zp_level > 0 &&
+	    (DMU_OT_IS_FILE(objtype) || objtype == DMU_OT_ZVOL)) {
 		if (has_special_class && zfs_user_indirect_is_special)
 			return (spa_special_class(spa));
 		else
 			return (spa_normal_class(spa));
 	}
 
-	if (DMU_OT_IS_METADATA(objtype) || level > 0) {
+	if (DMU_OT_IS_METADATA(objtype) || zp->zp_level > 0) {
 		if (has_special_class)
 			return (spa_special_class(spa));
 		else
@@ -1945,7 +1986,7 @@ spa_preferred_class(spa_t *spa, uint64_t size, dmu_object_type_t objtype,
 	 * zfs_special_class_metadata_reserve_pct exclusively for metadata.
 	 */
 	if (DMU_OT_IS_FILE(objtype) &&
-	    has_special_class && size <= special_smallblk) {
+	    has_special_class && zio->io_size <= zp->zp_zpl_smallblk) {
 		metaslab_class_t *special = spa_special_class(spa);
 		uint64_t alloc = metaslab_class_get_alloc(special);
 		uint64_t space = metaslab_class_get_space(special);
@@ -2270,6 +2311,7 @@ spa_init(int mode)
 	metaslab_stat_init();
 	zio_init();
 	dmu_init();
+	ddt_init();
 	zil_init();
 	vdev_cache_stat_init();
 	vdev_mirror_stat_init();
@@ -2296,6 +2338,7 @@ spa_fini(void)
 	vdev_raidz_math_fini();
 	fletcher_4_fini();
 	zil_fini();
+	ddt_fini();
 	dmu_fini();
 	zio_fini();
 	metaslab_stat_fini();

@@ -1391,6 +1391,8 @@ ZFS_COMMON_OBJS +=		\
 	cityhash.o		\
 	dbuf.o			\
 	ddt.o			\
+	ddt_log.o		\
+	ddt_stats.o		\
 	ddt_zap.o		\
 	dmu.o			\
 	dmu_diff.o		\

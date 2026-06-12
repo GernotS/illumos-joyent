@@ -28,6 +28,7 @@
  * Copyright (c) 2017 Datto Inc.
  * Copyright (c) 2017, Intel Corporation.
  * Copyright 2025 Edgecast Cloud LLC.
+ * Copyright 2026 Gernot Strasser.
  */
 
 /* Portions Copyright 2010 Robert Milkowski */
@@ -246,6 +247,8 @@ typedef enum {
 	ZPOOL_PROP_MULTIHOST,
 	ZPOOL_PROP_ASHIFT,
 	ZPOOL_PROP_AUTOTRIM,
+	ZPOOL_PROP_DEDUP_TABLE_SIZE,
+	ZPOOL_PROP_DEDUP_TABLE_QUOTA,
 	ZPOOL_NUM_PROPS
 } zpool_prop_t;
 
@@ -1152,6 +1155,18 @@ typedef struct ddt_histogram {
 	ddt_stat_t	ddh_stat[64];	/* power-of-two histogram buckets */
 } ddt_histogram_t;
 
+/*
+ * Pruning unit selector for zpool ddtprune.
+ *  AGE        -- prune entries older than N seconds
+ *  PERCENTAGE -- prune the oldest N% of entries (1-100)
+ *  NONE       -- placeholder/no-op
+ */
+typedef enum {
+	ZPOOL_DDT_PRUNE_NONE,
+	ZPOOL_DDT_PRUNE_AGE,		/* in seconds */
+	ZPOOL_DDT_PRUNE_PERCENTAGE,	/* 1-100 */
+} zpool_ddt_prune_unit_t;
+
 #define	ZVOL_DRIVER	"zvol"
 #define	ZFS_DRIVER	"zfs"
 #define	ZFS_DEV		"/dev/zfs"
@@ -1267,6 +1282,8 @@ typedef enum zfs_ioc {
 	ZFS_IOC_REDACT,				/* 0x5a50 */
 	ZFS_IOC_GET_BOOKMARK_PROPS,		/* 0x5a51 */
 	ZFS_IOC_WAIT,				/* 0x5a52 */
+	ZFS_IOC_POOL_PREFETCH,			/* 0x5a53 */
+	ZFS_IOC_DDT_PRUNE,			/* 0x5a54 */
 
 	/*
 	 * Per-platform (Optional) - 8/128 numbers reserved.
@@ -1347,6 +1364,11 @@ typedef enum {
 	ZPOOL_WAIT_NUM_ACTIVITIES
 } zpool_wait_activity_t;
 
+typedef enum {
+	ZPOOL_PREFETCH_NONE = 0,
+	ZPOOL_PREFETCH_DDT
+} zpool_prefetch_type_t;
+
 /*
  * Bookmark name values.
  */
@@ -1403,6 +1425,17 @@ typedef enum {
 #define	ZPOOL_WAIT_ACTIVITY		"wait_activity"
 #define	ZPOOL_WAIT_TAG			"wait_tag"
 #define	ZPOOL_WAIT_WAITED		"wait_waited"
+
+/*
+ * The following are names used when invoking ZFS_IOC_POOL_PREFETCH.
+ */
+#define	ZPOOL_PREFETCH_TYPE		"prefetch_type"
+
+/*
+ * Names used when invoking ZFS_IOC_DDT_PRUNE.
+ */
+#define	ZPOOL_DDT_PRUNE_UNIT		"ddt_prune_unit"
+#define	ZPOOL_DDT_PRUNE_AMOUNT		"ddt_prune_amount"
 
 /*
  * Flags for ZFS_IOC_VDEV_SET_STATE

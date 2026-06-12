@@ -818,6 +818,21 @@ zap_evict_sync(void *dbu)
 }
 
 int
+zap_prefetch_object(objset_t *os, uint64_t zapobj)
+{
+	int error;
+	dmu_object_info_t doi;
+
+	error = dmu_object_info(os, zapobj, &doi);
+	if (error == 0 && DMU_OT_BYTESWAP(doi.doi_type) != DMU_BSWAP_ZAP)
+		error = SET_ERROR(EINVAL);
+	if (error == 0)
+		dmu_prefetch_wait(os, zapobj, 0, doi.doi_max_offset);
+
+	return (error);
+}
+
+int
 zap_count(objset_t *os, uint64_t zapobj, uint64_t *count)
 {
 	zap_t *zap;
@@ -901,7 +916,7 @@ zap_lookup_impl(zap_t *zap, const char *name,
 
 	if (!zap->zap_ismicro) {
 		err = fzap_lookup(zn, integer_size, num_integers, buf,
-		    realname, rn_len, ncp);
+		    realname, rn_len, ncp, NULL);
 	} else {
 		mzap_ent_t *mze = mze_find(zn);
 		if (mze == NULL) {
@@ -1010,7 +1025,7 @@ zap_lookup_uint64(objset_t *os, uint64_t zapobj, const uint64_t *key,
 	}
 
 	err = fzap_lookup(zn, integer_size, num_integers, buf,
-	    NULL, 0, NULL);
+	    NULL, 0, NULL, NULL);
 	zap_name_free(zn);
 	zap_unlockdir(zap, FTAG);
 	return (err);
@@ -1075,6 +1090,168 @@ zap_length_uint64(objset_t *os, uint64_t zapobj, const uint64_t *key,
 		return (SET_ERROR(ENOTSUP));
 	}
 	err = fzap_length(zn, integer_size, num_integers);
+	zap_name_free(zn);
+	zap_unlockdir(zap, FTAG);
+	return (err);
+}
+
+/*
+ * uint64-keyed _by_dnode ZAP variants.  Identical to the objset+object
+ * forms above, but take an already-held dnode_t so callers that operate on
+ * the same ZAP object repeatedly (e.g. the DDT store objects) can skip the
+ * per-call object -> dnode resolution done by zap_lockdir().  Modeled on
+ * the existing object-based uint64 functions; used by ddt_zap.c.
+ */
+int
+zap_count_by_dnode(dnode_t *dn, uint64_t *count)
+{
+	zap_t *zap;
+
+	int err = zap_lockdir_by_dnode(dn, NULL, RW_READER, TRUE, FALSE,
+	    FTAG, &zap);
+	if (err != 0)
+		return (err);
+	if (!zap->zap_ismicro) {
+		err = fzap_count(zap, count);
+	} else {
+		*count = zap->zap_m.zap_num_entries;
+	}
+	zap_unlockdir(zap, FTAG);
+	return (err);
+}
+
+int
+zap_lookup_uint64_by_dnode(dnode_t *dn, const uint64_t *key, int key_numints,
+    uint64_t integer_size, uint64_t num_integers, void *buf)
+{
+	zap_t *zap;
+
+	int err = zap_lockdir_by_dnode(dn, NULL, RW_READER, TRUE, FALSE,
+	    FTAG, &zap);
+	if (err != 0)
+		return (err);
+	zap_name_t *zn = zap_name_alloc_uint64(zap, key, key_numints);
+	if (zn == NULL) {
+		zap_unlockdir(zap, FTAG);
+		return (SET_ERROR(ENOTSUP));
+	}
+	err = fzap_lookup(zn, integer_size, num_integers, buf, NULL, 0, NULL,
+	    NULL);
+	zap_name_free(zn);
+	zap_unlockdir(zap, FTAG);
+	return (err);
+}
+
+/*
+ * Like zap_lookup_uint64_by_dnode(), but also returns the number of
+ * integers actually stored, so a caller that doesn't know the value size
+ * up front (the DDT, whose entries are compressed) can read it with a
+ * single lookup into a buffer sized for the maximum instead of a
+ * zap_length_uint64_by_dnode() + zap_lookup_uint64_by_dnode() pair.
+ */
+int
+zap_lookup_length_uint64_by_dnode(dnode_t *dn, const uint64_t *key,
+    int key_numints, uint64_t integer_size, uint64_t num_integers, void *buf,
+    uint64_t *actual_num_integers)
+{
+	zap_t *zap;
+
+	int err = zap_lockdir_by_dnode(dn, NULL, RW_READER, TRUE, FALSE,
+	    FTAG, &zap);
+	if (err != 0)
+		return (err);
+	zap_name_t *zn = zap_name_alloc_uint64(zap, key, key_numints);
+	if (zn == NULL) {
+		zap_unlockdir(zap, FTAG);
+		return (SET_ERROR(ENOTSUP));
+	}
+	err = fzap_lookup(zn, integer_size, num_integers, buf, NULL, 0, NULL,
+	    actual_num_integers);
+	zap_name_free(zn);
+	zap_unlockdir(zap, FTAG);
+	return (err);
+}
+
+int
+zap_length_uint64_by_dnode(dnode_t *dn, const uint64_t *key, int key_numints,
+    uint64_t *integer_size, uint64_t *num_integers)
+{
+	zap_t *zap;
+
+	int err = zap_lockdir_by_dnode(dn, NULL, RW_READER, TRUE, FALSE,
+	    FTAG, &zap);
+	if (err != 0)
+		return (err);
+	zap_name_t *zn = zap_name_alloc_uint64(zap, key, key_numints);
+	if (zn == NULL) {
+		zap_unlockdir(zap, FTAG);
+		return (SET_ERROR(ENOTSUP));
+	}
+	err = fzap_length(zn, integer_size, num_integers);
+	zap_name_free(zn);
+	zap_unlockdir(zap, FTAG);
+	return (err);
+}
+
+int
+zap_prefetch_uint64_by_dnode(dnode_t *dn, const uint64_t *key, int key_numints)
+{
+	zap_t *zap;
+
+	int err = zap_lockdir_by_dnode(dn, NULL, RW_READER, TRUE, FALSE,
+	    FTAG, &zap);
+	if (err != 0)
+		return (err);
+	zap_name_t *zn = zap_name_alloc_uint64(zap, key, key_numints);
+	if (zn == NULL) {
+		zap_unlockdir(zap, FTAG);
+		return (SET_ERROR(ENOTSUP));
+	}
+	fzap_prefetch(zn);
+	zap_name_free(zn);
+	zap_unlockdir(zap, FTAG);
+	return (err);
+}
+
+int
+zap_update_uint64_by_dnode(dnode_t *dn, const uint64_t *key, int key_numints,
+    int integer_size, uint64_t num_integers, const void *val, dmu_tx_t *tx)
+{
+	zap_t *zap;
+
+	int err = zap_lockdir_by_dnode(dn, tx, RW_WRITER, TRUE, TRUE,
+	    FTAG, &zap);
+	if (err != 0)
+		return (err);
+	zap_name_t *zn = zap_name_alloc_uint64(zap, key, key_numints);
+	if (zn == NULL) {
+		zap_unlockdir(zap, FTAG);
+		return (SET_ERROR(ENOTSUP));
+	}
+	err = fzap_update(zn, integer_size, num_integers, val, FTAG, tx);
+	zap = zn->zn_zap;	/* fzap_update() may change zap */
+	zap_name_free(zn);
+	if (zap != NULL)
+		zap_unlockdir(zap, FTAG);
+	return (err);
+}
+
+int
+zap_remove_uint64_by_dnode(dnode_t *dn, const uint64_t *key, int key_numints,
+    dmu_tx_t *tx)
+{
+	zap_t *zap;
+
+	int err = zap_lockdir_by_dnode(dn, tx, RW_WRITER, TRUE, FALSE,
+	    FTAG, &zap);
+	if (err != 0)
+		return (err);
+	zap_name_t *zn = zap_name_alloc_uint64(zap, key, key_numints);
+	if (zn == NULL) {
+		zap_unlockdir(zap, FTAG);
+		return (SET_ERROR(ENOTSUP));
+	}
+	err = fzap_remove(zn, tx);
 	zap_name_free(zn);
 	zap_unlockdir(zap, FTAG);
 	return (err);

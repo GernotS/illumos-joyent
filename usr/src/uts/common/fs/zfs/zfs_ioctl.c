@@ -40,6 +40,7 @@
  * Copyright 2021 The University of Queensland
  * Copyright 2025 Edgecast Cloud LLC.
  * Copyright 2026 Oxide Computer Company
+ * Copyright (c) 2019, 2021, 2023, 2024, Klara Inc.
  */
 
 /*
@@ -177,6 +178,7 @@
 #include <sys/vdev.h>
 #include <sys/priv_impl.h>
 #include <sys/dmu.h>
+#include <sys/ddt.h>
 #include <sys/dsl_dir.h>
 #include <sys/dsl_dataset.h>
 #include <sys/dsl_prop.h>
@@ -4016,6 +4018,86 @@ zfs_ioc_destroy(zfs_cmd_t *zc)
 	return (err);
 }
 
+static int
+zfs_ioc_pool_prefetch(const char *poolname, nvlist_t *innvl, nvlist_t *outnvl)
+{
+	(void) outnvl;
+
+	int error;
+	spa_t *spa;
+	int32_t type;
+
+	/*
+	 * Currently, only ZPOOL_PREFETCH_DDT is supported
+	 */
+	if (nvlist_lookup_int32(innvl, ZPOOL_PREFETCH_TYPE, &type) != 0 ||
+	    type != ZPOOL_PREFETCH_DDT) {
+		return (EINVAL);
+	}
+
+	error = spa_open(poolname, &spa, FTAG);
+	if (error != 0)
+		return (error);
+
+	hrtime_t start_time = gethrtime();
+
+	ddt_prefetch_all(spa);
+
+	zfs_dbgmsg("pool '%s': loaded ddt into ARC in %llu ms", spa->spa_name,
+	    (u_longlong_t)NSEC2MSEC(gethrtime() - start_time));
+
+	spa_close(spa, FTAG);
+
+	return (error);
+}
+
+static const zfs_ioc_key_t zfs_keys_pool_prefetch[] = {
+	{ZPOOL_PREFETCH_TYPE,	DATA_TYPE_INT32,	0},
+};
+
+/*
+ * innvl: {
+ *     "ddt_prune_unit"   -> int32 (zpool_ddt_prune_unit_t)
+ *     "ddt_prune_amount" -> uint64 (seconds for AGE, percent for PERCENTAGE)
+ * }
+ * outnvl: <none>
+ */
+/* ARGSUSED */
+static int
+zfs_ioc_ddt_prune(const char *poolname, nvlist_t *innvl, nvlist_t *outnvl)
+{
+	spa_t *spa;
+	int32_t unit;
+	uint64_t amount;
+	int error;
+
+	if (nvlist_lookup_int32(innvl, ZPOOL_DDT_PRUNE_UNIT, &unit) != 0 ||
+	    nvlist_lookup_uint64(innvl, ZPOOL_DDT_PRUNE_AMOUNT, &amount) != 0)
+		return (SET_ERROR(EINVAL));
+
+	error = spa_open(poolname, &spa, FTAG);
+	if (error != 0)
+		return (error);
+
+	/* Only fast dedup tables can be pruned, as upstream OpenZFS. */
+	if (!spa_feature_is_enabled(spa, SPA_FEATURE_FAST_DEDUP)) {
+		spa_close(spa, FTAG);
+		return (SET_ERROR(ENOTSUP));
+	}
+
+	/* ddt_prune_unique_entries() validates unit and amount. */
+	error = ddt_prune_unique_entries(spa,
+	    (zpool_ddt_prune_unit_t)unit, amount);
+
+	spa_close(spa, FTAG);
+	return (error);
+}
+
+static const zfs_ioc_key_t zfs_keys_ddt_prune[] = {
+	{ZPOOL_DDT_PRUNE_UNIT,		DATA_TYPE_INT32,	0},
+	{ZPOOL_DDT_PRUNE_AMOUNT,	DATA_TYPE_UINT64,	0},
+};
+
 /*
  * innvl: {
  *     "initialize_command" -> POOL_INITIALIZE_{CANCEL|START|SUSPEND} (uint64)
@@ -6971,6 +7053,18 @@ zfs_ioctl_init(void)
 	    zfs_ioc_pool_initialize, zfs_secpolicy_config, POOL_NAME,
 	    POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY, B_TRUE, B_TRUE,
 	    zfs_keys_pool_initialize, ARRAY_SIZE(zfs_keys_pool_initialize));
+
+	zfs_ioctl_register("zpool_prefetch",
+	    ZFS_IOC_POOL_PREFETCH, zfs_ioc_pool_prefetch,
+	    zfs_secpolicy_config, POOL_NAME,
+	    POOL_CHECK_SUSPENDED, B_TRUE, B_TRUE,
+	    zfs_keys_pool_prefetch, ARRAY_SIZE(zfs_keys_pool_prefetch));
+
+	zfs_ioctl_register("ddt_prune",
+	    ZFS_IOC_DDT_PRUNE, zfs_ioc_ddt_prune,
+	    zfs_secpolicy_config, POOL_NAME,
+	    POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY, B_TRUE, B_TRUE,
+	    zfs_keys_ddt_prune, ARRAY_SIZE(zfs_keys_ddt_prune));
 
 	zfs_ioctl_register("trim", ZFS_IOC_POOL_TRIM,
 	    zfs_ioc_pool_trim, zfs_secpolicy_config, POOL_NAME,

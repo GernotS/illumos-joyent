@@ -29,6 +29,8 @@
  * Copyright (c) 2018 DilOS
  * Copyright 2026 Oxide Computer Company
  * Copyright (c) 2019 Datto Inc.
+ * Copyright (c) 2019, 2023, Klara Inc.
+ * Portions Copyright (c) 2024, iXsystems, Inc.
  */
 
 #include <sys/dmu.h>
@@ -762,6 +764,102 @@ dmu_prefetch(objset_t *os, uint64_t object, int64_t level, uint64_t offset,
 	rw_exit(&dn->dn_struct_rwlock);
 
 	dnode_rele(dn, FTAG);
+}
+
+typedef struct {
+	kmutex_t	dpa_lock;
+	kcondvar_t	dpa_cv;
+	uint64_t	dpa_pending_io;
+} dmu_prefetch_arg_t;
+
+static void
+dmu_prefetch_done(void *arg, boolean_t issued)
+{
+	(void) issued;
+	dmu_prefetch_arg_t *dpa = arg;
+
+	mutex_enter(&dpa->dpa_lock);
+	ASSERT3U(dpa->dpa_pending_io, >, 0);
+	if (--dpa->dpa_pending_io == 0)
+		cv_broadcast(&dpa->dpa_cv);
+	mutex_exit(&dpa->dpa_lock);
+}
+
+static void
+dmu_prefetch_wait_by_dnode(dnode_t *dn, uint64_t offset, uint64_t len)
+{
+	dmu_prefetch_arg_t dpa;
+
+	mutex_init(&dpa.dpa_lock, NULL, MUTEX_DEFAULT, NULL);
+	cv_init(&dpa.dpa_cv, NULL, CV_DEFAULT, NULL);
+
+	rw_enter(&dn->dn_struct_rwlock, RW_READER);
+
+	uint64_t start = dbuf_whichblock(dn, 0, offset);
+	uint64_t end = dbuf_whichblock(dn, 0, offset + len - 1) + 1;
+	dpa.dpa_pending_io = end - start;
+
+	for (uint64_t blk = start; blk < end; blk++) {
+		(void) dbuf_prefetch_impl(dn, 0, blk, ZIO_PRIORITY_ASYNC_READ,
+		    0, dmu_prefetch_done, &dpa);
+	}
+
+	rw_exit(&dn->dn_struct_rwlock);
+
+	/* wait for prefetch L0 reads to finish */
+	mutex_enter(&dpa.dpa_lock);
+	while (dpa.dpa_pending_io > 0)
+		cv_wait(&dpa.dpa_cv, &dpa.dpa_lock);
+	mutex_exit(&dpa.dpa_lock);
+
+	mutex_destroy(&dpa.dpa_lock);
+	cv_destroy(&dpa.dpa_cv);
+}
+
+/*
+ * Issue prefetch I/Os for the given L0 block range and wait for the I/O
+ * to complete. This does not enforce dmu_prefetch_max and will prefetch
+ * the entire range. The blocks are read from disk into the ARC but no
+ * decompression occurs (i.e., the dbuf cache is not required).
+ */
+int
+dmu_prefetch_wait(objset_t *os, uint64_t object, uint64_t offset, uint64_t size)
+{
+	dnode_t *dn;
+	int err = 0;
+
+	err = dnode_hold(os, object, FTAG, &dn);
+	if (err != 0)
+		return (err);
+
+	/*
+	 * Chunk the requests (16 indirects worth) so that we can be interrupted
+	 */
+	uint64_t chunksize;
+	if (dn->dn_indblkshift) {
+		uint64_t nbps = 1ULL << (dn->dn_indblkshift - SPA_BLKPTRSHIFT);
+		chunksize = (nbps * 16) << dn->dn_datablkshift;
+	} else {
+		chunksize = dn->dn_datablksz;
+	}
+
+	while (size > 0) {
+		uint64_t mylen = MIN(size, chunksize);
+
+		dmu_prefetch_wait_by_dnode(dn, offset, mylen);
+
+		offset += mylen;
+		size -= mylen;
+
+		if (issig(JUSTLOOKING) && issig(FORREAL)) {
+			err = SET_ERROR(EINTR);
+			break;
+		}
+	}
+
+	dnode_rele(dn, FTAG);
+
+	return (err);
 }
 
 /*
@@ -2358,6 +2456,13 @@ dmu_object_set_compress(objset_t *os, uint64_t object, uint8_t compress,
  */
 int zfs_redundant_metadata_most_ditto_level = 2;
 
+/*
+ * Override copies= for dedup state objects (DDT ZAPs and the dedup log).
+ * 0 means the traditional behaviour, i.e. the default for the containing
+ * objset, which is 3 for the MOS.
+ */
+uint_t dmu_ddt_copies = 0;
+
 void
 dmu_write_policy(objset_t *os, dnode_t *dn, int level, int wp, zio_prop_t *zp)
 {
@@ -2407,6 +2512,27 @@ dmu_write_policy(objset_t *os, dnode_t *dn, int level, int wp, zio_prop_t *zp)
 		    (level >= zfs_redundant_metadata_most_ditto_level ||
 		    DMU_OT_IS_METADATA(type) || (wp & WP_SPILL))))
 			copies++;
+
+		if (dmu_ddt_copies > 0) {
+			/*
+			 * If this tunable is set and this is a write for a
+			 * dedup entry store (ZAP or log), treat it like
+			 * redundant_metadata=most on a regular dataset: this
+			 * many copies, and one more for higher indirect
+			 * blocks.  Needed because dedup objects live in the
+			 * MOS, which always gets the highest possible copies.
+			 */
+			dmu_object_type_t stype =
+			    dn ? dn->dn_storage_type : DMU_OT_NONE;
+			if (stype == DMU_OT_NONE)
+				stype = type;
+			if (stype == DMU_OT_DDT_ZAP) {
+				copies = dmu_ddt_copies;
+				if (level >=
+				    zfs_redundant_metadata_most_ditto_level)
+					copies++;
+			}
+		}
 	} else if (wp & WP_NOFILL) {
 		ASSERT(level == 0);
 
@@ -2486,9 +2612,11 @@ dmu_write_policy(objset_t *os, dnode_t *dn, int level, int wp, zio_prop_t *zp)
 	zp->zp_copies = MIN(copies, spa_max_replication(os->os_spa));
 	zp->zp_dedup = dedup;
 	zp->zp_dedup_verify = dedup && dedup_verify;
+	zp->zp_no_gang = B_FALSE;
 	zp->zp_nopwrite = nopwrite;
 	zp->zp_zpl_smallblk = DMU_OT_IS_FILE(zp->zp_type) ?
 	    os->os_zpl_special_smallblock : 0;
+	zp->zp_storage_type = dn ? dn->dn_storage_type : DMU_OT_NONE;
 	zp->zp_encrypt = encrypt;
 	zp->zp_byteorder = ZFS_HOST_BYTEORDER;
 	bzero(zp->zp_salt, ZIO_DATA_SALT_LEN);

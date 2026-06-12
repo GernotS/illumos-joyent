@@ -27,6 +27,10 @@
  * Copyright (c) 2017, Intel Corporation.
  * Copyright 2020 Joyent, Inc.
  * Copyright 2026 Oxide Computer Company
+ * Copyright (c) 2021, Datto, Inc.
+ * Copyright (c) 2021, 2024 by George Melikov. All rights reserved.
+ * Copyright 2026 Gernot Strasser
+ * Copyright (c) 2019, 2023, 2024, Klara Inc.
  */
 
 #include <sys/sysmacros.h>
@@ -1560,8 +1564,7 @@ zio_write_compress(zio_t *zio)
 		if (psize == 0 || psize == lsize) {
 			compress = ZIO_COMPRESS_OFF;
 			zio_buf_free(cbuf, lsize);
-		} else if (!zp->zp_dedup && !zp->zp_encrypt &&
-		    psize <= BPE_PAYLOAD_SIZE &&
+		} else if (psize <= BPE_PAYLOAD_SIZE && !zp->zp_encrypt &&
 		    zp->zp_level == 0 && !DMU_OT_HAS_FILL(zp->zp_type) &&
 		    spa_feature_is_enabled(spa, SPA_FEATURE_EMBEDDED_DATA)) {
 			encode_embedded_bp_compressed(bp,
@@ -1687,6 +1690,30 @@ zio_free_bp_init(zio_t *zio)
 	blkptr_t *bp = zio->io_bp;
 
 	if (zio->io_child_type == ZIO_CHILD_LOGICAL) {
+		/*
+		 * Assign, do NOT OR.  ZIO_DDT_FREE_PIPELINE
+		 * deliberately contains no freeing stage: a dedup
+		 * free must only decref the DDT entry, and the
+		 * space is released later by ddt_sync() ->
+		 * ddt_phys_free() once the refcount reaches zero.
+		 *
+		 * ORing extra stages in -- notably ZIO_GANG_STAGES,
+		 * which zio_create() adds for a gang BP -- makes the
+		 * dedup free release the gang members immediately
+		 * while the DDT still holds a reference.  The later
+		 * ddt_phys_free() then frees the same extents again,
+		 * panicking in the range trees from metaslab_sync()
+		 * and metaslab_sync_done().
+		 *
+		 * Upstream OpenZFS does OR here (#18819, a8458ef36),
+		 * but its ZIO_DDT_FREE_PIPELINE also carries the plain
+		 * free stages, and zio_ddt_free() cuts the pipeline to
+		 * ZIO_INTERLOCK_PIPELINE on a successful decref so the
+		 * gang stages never run.  Here the pruned-entry fallback
+		 * in zio_ddt_free() instead issues a separate zio_free()
+		 * of the non-dedup BP, which picks up the gang stages
+		 * itself; the gang members are freed either way.
+		 */
 		if (BP_GET_DEDUP(bp))
 			zio->io_pipeline = ZIO_DDT_FREE_PIPELINE;
 	}
@@ -2514,6 +2541,23 @@ zio_write_gang_block(zio_t *pio)
 	boolean_t has_data = !(pio->io_flags & ZIO_FLAG_NODATA);
 
 	/*
+	 * A DDT child write that only needs to grow an existing entry by a
+	 * few DVAs (the flat-slot "extend" path in zio_ddt_write()) must not
+	 * gang: merging a gang DVA into a slot that holds non-gang DVAs would
+	 * create an illegal mixed blkptr, and dropping the gang header's
+	 * space later leaks it.  The extend child sets zp_no_gang; bail here
+	 * with EAGAIN before allocating the gang header.  zio_done() catches
+	 * the EAGAIN and reissues the parent as a plain (non-dedup) write.
+	 * Adapted from upstream OpenZFS 5f5321e (which uses zp_gang_copies==0
+	 * for the same signal; this tree has no zp_gang_copies).
+	 */
+	if (gio->io_prop.zp_no_gang) {
+		ASSERT(gio->io_flags & ZIO_FLAG_DDT_CHILD);
+		pio->io_error = SET_ERROR(EAGAIN);
+		return (pio);
+	}
+
+	/*
 	 * encrypted blocks need DVA[2] free so encrypted gang headers can't
 	 * have a third copy.
 	 */
@@ -2592,7 +2636,7 @@ zio_write_gang_block(zio_t *pio)
 
 		zp.zp_checksum = gio->io_prop.zp_checksum;
 		zp.zp_compress = ZIO_COMPRESS_OFF;
-		zp.zp_type = DMU_OT_NONE;
+		zp.zp_type = zp.zp_storage_type = DMU_OT_NONE;
 		zp.zp_level = 0;
 		zp.zp_copies = gio->io_prop.zp_copies;
 		zp.zp_dedup = B_FALSE;
@@ -2714,17 +2758,21 @@ static void
 zio_ddt_child_read_done(zio_t *zio)
 {
 	blkptr_t *bp = zio->io_bp;
+	ddt_t *ddt = ddt_select(zio->io_spa, bp);
 	ddt_entry_t *dde = zio->io_private;
-	ddt_phys_t *ddp;
+	ddt_phys_variant_t v;
 	zio_t *pio = zio_unique_parent(zio);
 
 	mutex_enter(&pio->io_lock);
-	ddp = ddt_phys_select(dde, bp);
-	if (zio->io_error == 0)
-		ddt_phys_clear(ddp);	/* this ddp doesn't need repair */
+	v = ddt_phys_select(ddt, dde, bp);
+	if (zio->io_error == 0 && v != DDT_PHYS_NONE)
+		/* this ddp doesn't need repair */
+		ddt_phys_clear(dde->dde_phys, v);
 
-	if (zio->io_error == 0 && dde->dde_repair_abd == NULL)
-		dde->dde_repair_abd = zio->io_abd;
+	if (zio->io_error == 0 && DDE_REPAIR_ABD(dde) == NULL) {
+		ddt_io_alloc(dde);
+		dde->dde_io->dde_repair_abd = zio->io_abd;
+	}
 	else
 		abd_free(zio->io_abd);
 	mutex_exit(&pio->io_lock);
@@ -2742,20 +2790,23 @@ zio_ddt_read_start(zio_t *zio)
 	if (zio->io_child_error[ZIO_CHILD_DDT]) {
 		ddt_t *ddt = ddt_select(zio->io_spa, bp);
 		ddt_entry_t *dde = ddt_repair_start(ddt, bp);
-		ddt_phys_t *ddp = dde->dde_phys;
-		ddt_phys_t *ddp_self = ddt_phys_select(dde, bp);
+		ddt_univ_phys_t *ddp = dde->dde_phys;
+		ddt_phys_variant_t v_self = ddt_phys_select(ddt, dde, bp);
 		blkptr_t blk;
 
 		ASSERT(zio->io_vsd == NULL);
 		zio->io_vsd = dde;
 
-		if (ddp_self == NULL)
+		if (v_self == DDT_PHYS_NONE)
 			return (zio);
 
-		for (int p = 0; p < DDT_PHYS_TYPES; p++, ddp++) {
-			if (ddp->ddp_phys_birth == 0 || ddp == ddp_self)
+		int nphys = DDT_NPHYS(ddt);
+		for (int p = 0; p < nphys; p++) {
+			ddt_phys_variant_t v = DDT_PHYS_VARIANT(ddt, p);
+			ddt_phys_t *slot = DDT_PHYS_SLOT(ddp, v);
+			if (slot->ddp_phys_birth == 0 || v == v_self)
 				continue;
-			ddt_bp_create(ddt->ddt_checksum, &dde->dde_key, ddp,
+			ddt_bp_create(ddt->ddt_checksum, &dde->dde_key, ddp, v,
 			    &blk);
 			zio_nowait(zio_read(zio, zio->io_spa, &blk,
 			    abd_alloc_for_io(zio->io_size, B_TRUE),
@@ -2798,8 +2849,8 @@ zio_ddt_read_done(zio_t *zio)
 			zio_taskq_dispatch(zio, ZIO_TASKQ_ISSUE, B_FALSE);
 			return (NULL);
 		}
-		if (dde->dde_repair_abd != NULL) {
-			abd_copy(zio->io_abd, dde->dde_repair_abd,
+		if (DDE_REPAIR_ABD(dde) != NULL) {
+			abd_copy(zio->io_abd, dde->dde_io->dde_repair_abd,
 			    zio->io_size);
 			zio->io_child_error[ZIO_CHILD_DDT] = 0;
 		}
@@ -2833,30 +2884,62 @@ zio_ddt_collision(zio_t *zio, ddt_t *ddt, ddt_entry_t *dde)
 	 * loaded).
 	 */
 
-	for (int p = DDT_PHYS_SINGLE; p <= DDT_PHYS_TRIPLE; p++) {
-		zio_t *lio = dde->dde_lead_zio[p];
+	/*
+	 * Compare against any in-flight lead write for this entry.  We must
+	 * hold dde_io_lock across the read of dde_lead_zio and the abd_cmp:
+	 * the DDT write path completes under dde_io_lock (not the global
+	 * ddt_lock we hold here), so without it the lead zio could finish and
+	 * free its ABD while we compare against it -- a use-after-free panic
+	 * in abd_cmp().  Ported from upstream OpenZFS PR #18720.
+	 *
+	 * dde_lead_zio[] is indexed by DDT_PHYS_FOR_COPIES(): a flat table
+	 * keeps its one in-flight write in slot 0, a traditional table one
+	 * per copies value in slots 1-3, with slot 0 its (never written)
+	 * ditto slot.  Checking only slots 1-3 missed every in-flight write
+	 * on a flat table, so two different blocks with the same checksum
+	 * could share one location without being compared.
+	 */
+	if (dde->dde_io != NULL) {
+		mutex_enter(&dde->dde_io->dde_io_lock);
+		for (int p = 0; p < DDT_NPHYS(ddt); p++) {
+			if (DDT_PHYS_IS_DITTO(ddt, p))
+				continue;
+			zio_t *lio = dde->dde_io->dde_lead_zio[p];
+			if (lio == NULL)
+				continue;
 
-		if (lio != NULL && do_raw) {
-			return (lio->io_size != zio->io_size ||
-			    abd_cmp(zio->io_abd, lio->io_abd,
-			    zio->io_size) != 0);
-		} else if (lio != NULL) {
-			return (lio->io_orig_size != zio->io_orig_size ||
-			    abd_cmp(zio->io_orig_abd, lio->io_orig_abd,
-			    zio->io_orig_size) != 0);
+			boolean_t collision;
+			if (do_raw) {
+				collision = lio->io_size != zio->io_size ||
+				    abd_cmp(zio->io_abd, lio->io_abd,
+				    zio->io_size) != 0;
+			} else {
+				collision =
+				    lio->io_orig_size != zio->io_orig_size ||
+				    abd_cmp(zio->io_orig_abd, lio->io_orig_abd,
+				    zio->io_orig_size) != 0;
+			}
+			mutex_exit(&dde->dde_io->dde_io_lock);
+			return (collision);
 		}
+		mutex_exit(&dde->dde_io->dde_io_lock);
 	}
 
-	for (int p = DDT_PHYS_SINGLE; p <= DDT_PHYS_TRIPLE; p++) {
-		ddt_phys_t *ddp = &dde->dde_phys[p];
+	int pstart = (ddt->ddt_flags & DDT_FLAG_FLAT) ? DDT_PHYS_FLAT :
+	    DDT_PHYS_SINGLE;
+	int pend = (ddt->ddt_flags & DDT_FLAG_FLAT) ? DDT_PHYS_FLAT :
+	    DDT_PHYS_TRIPLE;
+	for (int p = pstart; p <= pend; p++) {
+		ddt_univ_phys_t *ddp = dde->dde_phys;
+		ddt_phys_t *slot = DDT_PHYS_SLOT(ddp, p);
 
-		if (ddp->ddp_phys_birth != 0 && do_raw) {
+		if (slot->ddp_phys_birth != 0 && do_raw) {
 			blkptr_t blk = *zio->io_bp;
 			uint64_t psize;
 			abd_t *tmpabd;
 			int error;
 
-			ddt_bp_fill(ddp, &blk, ddp->ddp_phys_birth);
+			ddt_bp_fill(ddp, p, &blk, slot->ddp_phys_birth);
 			psize = BP_GET_PSIZE(&blk);
 
 			if (psize != zio->io_size)
@@ -2879,14 +2962,14 @@ zio_ddt_collision(zio_t *zio, ddt_t *ddt, ddt_entry_t *dde)
 			abd_free(tmpabd);
 			ddt_enter(ddt);
 			return (error != 0);
-		} else if (ddp->ddp_phys_birth != 0) {
+		} else if (slot->ddp_phys_birth != 0) {
 			arc_buf_t *abuf = NULL;
 			arc_flags_t aflags = ARC_FLAG_WAIT;
 			int zio_flags = ZIO_FLAG_CANFAIL | ZIO_FLAG_SPECULATIVE;
 			blkptr_t blk = *zio->io_bp;
 			int error;
 
-			ddt_bp_fill(ddp, &blk, ddp->ddp_phys_birth);
+			ddt_bp_fill(ddp, p, &blk, slot->ddp_phys_birth);
 
 			if (BP_GET_LSIZE(&blk) != zio->io_orig_size)
 				return (B_TRUE);
@@ -2935,23 +3018,43 @@ zio_ddt_child_write_ready(zio_t *zio)
 	int p = zio->io_prop.zp_copies;
 	ddt_t *ddt = ddt_select(zio->io_spa, zio->io_bp);
 	ddt_entry_t *dde = zio->io_private;
-	ddt_phys_t *ddp = &dde->dde_phys[p];
+	ddt_univ_phys_t *ddp = dde->dde_phys;
+	ddt_phys_variant_t v = DDT_PHYS_VARIANT(ddt, p);
+	int lead_idx = DDT_PHYS_FOR_COPIES(ddt, p);
 	zio_t *pio;
 
 	if (zio->io_error)
 		return;
 
-	ddt_enter(ddt);
+	/*
+	 * dde_io_lock (not the global ddt_lock) serialises dde_phys and
+	 * dde_lead_zio against zio_ddt_write() and zio_ddt_child_write_done().
+	 */
+	mutex_enter(&dde->dde_io->dde_io_lock);
 
-	ASSERT(dde->dde_lead_zio[p] == zio);
+	/*
+	 * This write may no longer be the lead: zio_ddt_write() can chain a
+	 * shortfall write on top of it (see there), which then becomes the
+	 * lead.  A from-scratch write is only ever issued against an empty
+	 * slot, so it is always the bottom of any chain, and as the chain's
+	 * child it reaches READY before anything stacked on it -- filling
+	 * the slot outright here is still correct.
+	 */
+	ASSERT(DDE_LEAD_ZIO(dde, lead_idx) != NULL);
 
-	ddt_phys_fill(ddp, zio->io_bp);
+	ddt_phys_fill(ddp, v, zio->io_bp);
 
 	zio_link_t *zl = NULL;
-	while ((pio = zio_walk_parents(zio, &zl)) != NULL)
-		ddt_bp_fill(ddp, pio->io_bp, zio->io_txg);
+	while ((pio = zio_walk_parents(zio, &zl)) != NULL) {
+		/*
+		 * Only the logical parents need the deduped DVAs copied into
+		 * their BPs; a chained DDT child write must not.
+		 */
+		if (!(pio->io_flags & ZIO_FLAG_DDT_CHILD))
+			ddt_bp_fill(ddp, v, pio->io_bp, zio->io_txg);
+	}
 
-	ddt_exit(ddt);
+	mutex_exit(&dde->dde_io->dde_io_lock);
 }
 
 static void
@@ -2960,52 +3063,242 @@ zio_ddt_child_write_done(zio_t *zio)
 	int p = zio->io_prop.zp_copies;
 	ddt_t *ddt = ddt_select(zio->io_spa, zio->io_bp);
 	ddt_entry_t *dde = zio->io_private;
-	ddt_phys_t *ddp = &dde->dde_phys[p];
+	ddt_univ_phys_t *ddp = dde->dde_phys;
+	ddt_phys_variant_t v = DDT_PHYS_VARIANT(ddt, p);
+	int lead_idx = DDT_PHYS_FOR_COPIES(ddt, p);
+	ddt_univ_phys_t *orig = &dde->dde_io->dde_orig_phys;
 
-	ddt_enter(ddt);
+	mutex_enter(&dde->dde_io->dde_io_lock);
 
-	ASSERT(ddp->ddp_refcnt == 0);
-	ASSERT(dde->dde_lead_zio[p] == zio);
-	dde->dde_lead_zio[p] = NULL;
+	/*
+	 * If a shortfall write was chained on top of us it is now the lead,
+	 * and it is our parent, so it cannot complete before we do.  Only
+	 * clear the lead if it is still us.
+	 */
+	if (DDE_LEAD_ZIO(dde, lead_idx) == zio)
+		dde->dde_io->dde_lead_zio[lead_idx] = NULL;
 
-	if (zio->io_error == 0) {
+	if (zio->io_error != 0) {
+		/*
+		 * Write failed.  Revert dde_phys[v] to the last known-good
+		 * state in orig -- the slot as it was before the first write
+		 * of this chain was issued, or as a lower chain member left
+		 * it if that one completed -- then drop the optimistic
+		 * reference that zio_ddt_write() took for each (non-DDT-child)
+		 * parent on this chain.  This matches upstream OpenZFS: the
+		 * references are taken at write-issue and released here on
+		 * failure -- they are NOT taken at write-completion.
+		 */
+		ddt_phys_unextend(ddp, orig, v);
+		/*
+		 * A write chained on top of us inherits our error and will
+		 * revert to orig as well, so orig must outlive us until the
+		 * last member of the chain is done.  Clearing it here would
+		 * have that write revert to an empty slot, wiping settled
+		 * DVAs that existing BPs still reference.
+		 */
+		if (DDE_LEAD_ZIO(dde, lead_idx) == NULL)
+			ddt_phys_clear(orig, v);
+		mutex_exit(&dde->dde_io->dde_io_lock);
+
+		ddt_enter(ddt);
+		zio_t *pio;
 		zio_link_t *zl = NULL;
-		while (zio_walk_parents(zio, &zl) != NULL)
-			ddt_phys_addref(ddp);
-	} else {
-		ddt_phys_clear(ddp);
+		while ((pio = zio_walk_parents(zio, &zl)) != NULL) {
+			if (!(pio->io_flags & ZIO_FLAG_DDT_CHILD))
+				ddt_phys_decref(ddp, v);
+		}
+		ddt_exit(ddt);
+		return;
 	}
 
-	ddt_exit(ddt);
+	/*
+	 * Write succeeded.  The optimistic references taken in
+	 * zio_ddt_write() are now correct, so there is nothing to add here.
+	 * If nothing else is in flight, discard the saved state.  If a
+	 * chained write is still outstanding, advance the revert point by
+	 * exactly the DVAs this write committed -- not by snapshotting the
+	 * slot: a chained write only waits for our READY, not our DONE, so
+	 * it has usually extended the slot with its own, not yet written,
+	 * DVAs by now, and a revert point that included them would leave
+	 * them in the slot after that write failed and they were freed.
+	 * A from-scratch write is the bottom of its chain (orig is empty),
+	 * so this is a fill.
+	 */
+	if (DDE_LEAD_ZIO(dde, lead_idx) == NULL)
+		ddt_phys_clear(orig, v);
+	else
+		ddt_phys_fill(orig, v, zio->io_bp);
+
+	mutex_exit(&dde->dde_io->dde_io_lock);
+}
+
+/*
+ * Ready/done callbacks for an "extend" write: a dedup hit found an existing
+ * entry with fewer DVAs than the current write's zp_copies requires, so
+ * zio_ddt_write() issued a child write allocating only the shortfall, to
+ * be merged into the existing slot rather than replacing it.
+ *
+ * This path is only reachable in flat mode (DDT_FLAG_FLAT): a trad-mode
+ * slot is dedicated to one exact copies value and is always filled
+ * all-or-nothing by zio_ddt_child_write_done(), so it can never be found
+ * with "too few" DVAs for its own p.  That means v and lead_idx are always
+ * DDT_PHYS_FLAT / 0 here -- there is no "real p" to recover, unlike the
+ * non-extend callbacks which serve every copies value via one function.
+ *
+ * zio->io_private here is the same dde used by the non-extend path.
+ * dde_io->dde_orig_phys is the revert point for a failed write: it is
+ * snapshotted via ddt_phys_copy() when the first write of a chain is
+ * issued, advanced by each chain member's own DVAs as it completes, and
+ * kept until the last member is done (see zio_ddt_child_write_done()).
+ * ddt_phys_extend() itself needs no snapshot, since it discovers empty
+ * DVA slots directly.
+ */
+static void
+zio_ddt_child_write_extend_ready(zio_t *zio)
+{
+	ddt_entry_t *dde = zio->io_private;
+	ddt_univ_phys_t *ddp = dde->dde_phys;
+	const ddt_phys_variant_t v = DDT_PHYS_FLAT;
+	const int lead_idx = 0;
+	zio_t *pio;
+
+	if (zio->io_error)
+		return;
+
+	mutex_enter(&dde->dde_io->dde_io_lock);
+
+	ASSERT(DDE_LEAD_ZIO(dde, lead_idx) != NULL);
+
+	/*
+	 * If this write was chained behind an in-flight write (see
+	 * zio_ddt_write()), that write may have produced a gang block.  Our
+	 * DVAs are non-gang (zp_no_gang), and merging them into a gang slot
+	 * would build an illegal mixed blkptr.  Give up: fail with EAGAIN and
+	 * zio_done() reissues the logical parent as a plain write.  Our DVAs
+	 * are freed by zio_done() via zio_dva_unallocate(), and the class
+	 * reservation by zio_ready(); the per-group allocation-throttle
+	 * charge would normally be dropped as our vdev children complete,
+	 * which now never happens, so drop it here.  Upstream OpenZFS
+	 * zio_ddt_child_write_extend_ready() does the same.
+	 */
+	if (ddt_phys_is_gang(ddp, v)) {
+		if (zio->io_flags & ZIO_FLAG_IO_ALLOCATING) {
+			for (int d = 0; d < BP_GET_NDVAS(zio->io_bp); d++) {
+				metaslab_group_alloc_decrement(zio->io_spa,
+				    DVA_GET_VDEV(&zio->io_bp->blk_dva[d]), zio,
+				    METASLAB_ASYNC_ALLOC, zio->io_allocator,
+				    B_FALSE);
+			}
+		}
+		zio->io_error = SET_ERROR(EAGAIN);
+		mutex_exit(&dde->dde_io->dde_io_lock);
+		return;
+	}
+
+	/*
+	 * ddt_phys_extend() discovers which DVA positions are still empty
+	 * itself (via DVA_IS_VALID()), so it needs no separate have_count
+	 * argument -- it stays correct even if the slot's state has moved
+	 * since zio_ddt_write() last inspected it.
+	 */
+	ddt_phys_extend(ddp, v, zio->io_bp);
+
+	zio_link_t *zl = NULL;
+	while ((pio = zio_walk_parents(zio, &zl)) != NULL) {
+		/*
+		 * Fill from the (now-merged) slot, not from zio->io_bp --
+		 * this child's bp is a scratch blkptr_t holding only the
+		 * newly-allocated DVAs, never the full set a parent needs.
+		 */
+		if (!(pio->io_flags & ZIO_FLAG_DDT_CHILD))
+			ddt_bp_fill(ddp, v, pio->io_bp, zio->io_txg);
+	}
+
+	mutex_exit(&dde->dde_io->dde_io_lock);
 }
 
 static void
-zio_ddt_ditto_write_done(zio_t *zio)
+zio_ddt_child_write_extend_done(zio_t *zio)
 {
-	int p = DDT_PHYS_DITTO;
-	zio_prop_t *zp = &zio->io_prop;
-	blkptr_t *bp = zio->io_bp;
-	ddt_t *ddt = ddt_select(zio->io_spa, bp);
+	ddt_t *ddt = ddt_select(zio->io_spa, zio->io_bp);
 	ddt_entry_t *dde = zio->io_private;
-	ddt_phys_t *ddp = &dde->dde_phys[p];
-	ddt_key_t *ddk = &dde->dde_key;
+	ddt_univ_phys_t *ddp = dde->dde_phys;
+	const ddt_phys_variant_t v = DDT_PHYS_FLAT;
+	const int lead_idx = 0;
+	ddt_univ_phys_t *orig = &dde->dde_io->dde_orig_phys;
 
-	ddt_enter(ddt);
+	mutex_enter(&dde->dde_io->dde_io_lock);
 
-	ASSERT(ddp->ddp_refcnt == 0);
-	ASSERT(dde->dde_lead_zio[p] == zio);
-	dde->dde_lead_zio[p] = NULL;
+	/* Only the current lead clears it; see zio_ddt_child_write_done(). */
+	if (DDE_LEAD_ZIO(dde, lead_idx) == zio)
+		dde->dde_io->dde_lead_zio[lead_idx] = NULL;
 
-	if (zio->io_error == 0) {
-		ASSERT(ZIO_CHECKSUM_EQUAL(bp->blk_cksum, ddk->ddk_cksum));
-		ASSERT(zp->zp_copies < SPA_DVAS_PER_BP);
-		ASSERT(zp->zp_copies == BP_GET_NDVAS(bp) - BP_IS_GANG(bp));
-		if (ddp->ddp_phys_birth != 0)
-			ddt_phys_free(ddt, ddk, ddp, zio->io_txg);
-		ddt_phys_fill(ddp, bp);
+	if (zio->io_error != 0) {
+		/*
+		 * Extend write failed.  ddt_phys_unextend() restores the
+		 * slot's DVAs to the last known-good state in orig: the
+		 * pre-extend state snapshotted when the first write of the
+		 * chain was issued, or the state a lower chain member left
+		 * if it completed successfully before us.  If we were
+		 * chained on a from-scratch write that itself failed, orig
+		 * is empty and so is the slot.
+		 */
+		ddt_phys_unextend(ddp, orig, v);
+		/* Keep orig for the rest of the chain; see the fresh done. */
+		if (DDE_LEAD_ZIO(dde, lead_idx) == NULL)
+			ddt_phys_clear(orig, v);
+		mutex_exit(&dde->dde_io->dde_io_lock);
+
+		ddt_enter(ddt);
+		zio_t *pio;
+		zio_link_t *zl = NULL;
+		while ((pio = zio_walk_parents(zio, &zl)) != NULL) {
+			if (!(pio->io_flags & ZIO_FLAG_DDT_CHILD))
+				ddt_phys_decref(ddp, v);
+		}
+		ddt_exit(ddt);
+		return;
 	}
 
-	ddt_exit(ddt);
+	/*
+	 * As zio_ddt_child_write_done(): advance the revert point by just
+	 * our own DVAs.  Chain members complete in the order they reached
+	 * READY, so these land in the same positions they took in the slot.
+	 */
+	if (DDE_LEAD_ZIO(dde, lead_idx) == NULL)
+		ddt_phys_clear(orig, v);
+	else
+		ddt_phys_extend(orig, v, zio->io_bp);
+
+	mutex_exit(&dde->dde_io->dde_io_lock);
+}
+
+/*
+ * Build the scratch blkptr for a DDT extend write from the parent's bp.
+ *
+ * The DDT child write pipeline has no WRITE_BP_INIT, WRITE_COMPRESS or
+ * CHECKSUM_GENERATE stages, so nothing downstream will stamp this bp: it
+ * must reach zio_dva_allocate() already carrying the parent's block
+ * properties (lsize/psize/type/checksum/compress/dedup), exactly as
+ * upstream's DDT children do by writing through the parent's stamped bp.
+ * Start from a copy and clear only the allocation-specific fields.
+ *
+ * On an encrypted bp, blk_dva[2] is not a DVA: it holds the salt and the
+ * first half of the IV, and ddt_phys_extend() copies it into the slot.
+ * Clearing it would leave every BP later filled from that slot with a
+ * zero salt/IV and unreadable data, so keep it.
+ */
+static void
+zio_ddt_extend_bp(const zio_t *zio, blkptr_t *ebp)
+{
+	*ebp = *zio->io_bp;
+
+	int ndvas = BP_IS_ENCRYPTED(ebp) ?
+	    SPA_DVAS_PER_BP - 1 : SPA_DVAS_PER_BP;
+	bzero(ebp->blk_dva, ndvas * sizeof (dva_t));
+	BP_SET_BIRTH(ebp, 0, 0);
+	ASSERT3U(BP_GET_PSIZE(ebp), ==, zio->io_size);
 }
 
 static zio_t *
@@ -3016,12 +3309,10 @@ zio_ddt_write(zio_t *zio)
 	uint64_t txg = zio->io_txg;
 	zio_prop_t *zp = &zio->io_prop;
 	int p = zp->zp_copies;
-	int ditto_copies;
 	zio_t *cio = NULL;
-	zio_t *dio = NULL;
 	ddt_t *ddt = ddt_select(spa, bp);
 	ddt_entry_t *dde;
-	ddt_phys_t *ddp;
+	ddt_univ_phys_t *ddp;
 
 	ASSERT(BP_GET_DEDUP(bp));
 	ASSERT(BP_GET_CHECKSUM(bp) == zp->zp_checksum);
@@ -3029,8 +3320,27 @@ zio_ddt_write(zio_t *zio)
 	ASSERT(!(zio->io_bp_override && (zio->io_flags & ZIO_FLAG_RAW)));
 
 	ddt_enter(ddt);
-	dde = ddt_lookup(ddt, bp, B_TRUE);
-	ddp = &dde->dde_phys[p];
+	/*
+	 * Search the DDT for a matching entry.  Skip DVA verification here:
+	 * DVAs in this BP can only come from an override BP, which can never
+	 * carry the dedup flag, so they cannot be confused with a pruned DDT
+	 * entry's stale DVAs.  (Upstream #17120.)
+	 */
+	IMPLY(zio->io_bp_override, !BP_GET_DEDUP(zio->io_bp_override));
+	dde = ddt_lookup(ddt, bp, B_FALSE);
+	if (dde == NULL) {
+		/*
+		 * DDT is over quota; we can't create a new entry, so convert
+		 * this into a regular (non-dedup) write.
+		 */
+		zp->zp_dedup = B_FALSE;
+		BP_SET_DEDUP(bp, B_FALSE);
+		if (zio->io_bp_override == NULL)
+			zio->io_pipeline = ZIO_WRITE_PIPELINE;
+		ddt_exit(ddt);
+		return (zio);
+	}
+	ddp = dde->dde_phys;
 
 	if (zp->zp_dedup_verify && zio_ddt_collision(zio, ddt, dde)) {
 		/*
@@ -3055,53 +3365,314 @@ zio_ddt_write(zio_t *zio)
 		return (zio);
 	}
 
-	ditto_copies = ddt_ditto_copies_needed(ddt, dde, ddp);
-	ASSERT(ditto_copies < SPA_DVAS_PER_BP);
+	ddt_phys_variant_t v = DDT_PHYS_VARIANT(ddt, p);
+	ddt_phys_t *slot = DDT_PHYS_SLOT(ddp, v);
+	int lead_idx = DDT_PHYS_FOR_COPIES(ddt, p);
+	/*
+	 * Serialise our inspection/modification of dde_phys and
+	 * dde_lead_zio against the in-flight child write's ready/done
+	 * callbacks.  Without this, a write between READY and DONE can be
+	 * extending dde_phys while we read it, and ddt_bp_fill() below can
+	 * copy a half-written or zeroed DVA into our BP -- which later
+	 * reads back as a checksum error.  The lock is only required once
+	 * dde_io exists (a write is or has been in flight); a brand-new
+	 * entry has no concurrent accessors yet.
+	 */
+	ddt_entry_io_t *dde_io = dde->dde_io;
+	if (dde_io != NULL)
+		mutex_enter(&dde_io->dde_io_lock);
 
-	if (ditto_copies > ddt_ditto_copies_present(dde) &&
-	    dde->dde_lead_zio[DDT_PHYS_DITTO] == NULL) {
-		zio_prop_t czp = *zp;
+	/*
+	 * Determine whether the existing slot already has enough DVAs to
+	 * satisfy this write's zp_copies.  In FDT-FLAT mode the slot can
+	 * hold up to SPA_DVAS_PER_BP DVAs regardless of which zp_copies
+	 * value first created it; trad-mode slots are per-copies and are
+	 * always all-or-nothing, so `sufficient` is trivially true for
+	 * them by the time we reach this point.
+	 */
+	boolean_t encrypted = zp->zp_encrypt;
+	int max_dvas = encrypted ? SPA_DVAS_PER_BP - 1 : SPA_DVAS_PER_BP;
+	boolean_t sufficient;
 
-		czp.zp_copies = ditto_copies;
-
+	if (ddt->ddt_flags & DDT_FLAG_FLAT) {
 		/*
-		 * If we arrived here with an override bp, we won't have run
-		 * the transform stack, so we won't have the data we need to
-		 * generate a child i/o.  So, toss the override bp and restart.
-		 * This is safe, because using the override bp is just an
-		 * optimization; and it's rare, so the cost doesn't matter.
+		 * ddt_phys_dva_count() takes the entry's phys BASE and
+		 * dereferences the requested variant itself.  (The previous
+		 * code passed `slot`, which only worked for FLAT because
+		 * the flat slot IS the base; for trad it read the wrong
+		 * slot and made every trad dedup hit look insufficient.)
 		 */
-		if (zio->io_bp_override) {
-			zio_pop_transforms(zio);
-			zio->io_stage = ZIO_STAGE_OPEN;
-			zio->io_pipeline = ZIO_WRITE_PIPELINE;
-			zio->io_bp_override = NULL;
-			BP_ZERO(bp);
-			ddt_exit(ddt);
-			return (zio);
-		}
-
-		dio = zio_write(zio, spa, txg, bp, zio->io_orig_abd,
-		    zio->io_orig_size, zio->io_orig_size, &czp, NULL, NULL,
-		    NULL, zio_ddt_ditto_write_done, dde, zio->io_priority,
-		    ZIO_DDT_CHILD_FLAGS(zio), &zio->io_bookmark);
-
-		zio_push_transform(dio, zio->io_abd, zio->io_size, 0, NULL);
-		dde->dde_lead_zio[DDT_PHYS_DITTO] = dio;
+		int have_count = (slot->ddp_phys_birth != 0) ?
+		    ddt_phys_dva_count(ddp, v, encrypted) : 0;
+		/*
+		 * A gang slot's DVAs are copies of the gang header, not of
+		 * the data.  zio_write_gang_block() gives the header one copy
+		 * more than the gang members, capped at spa_max_replication()
+		 * (and at two for encrypted blocks).  So the data has at least
+		 * have_count - 1 copies, and always at least one: exactly that
+		 * unless the cap was hit, and we cannot tell more without
+		 * reading the header.  Use the lower bound.  A write that may
+		 * need more copies than the members have is then written
+		 * without dedup by the gang fallback below, instead of
+		 * silently sharing a block with less redundancy than it asked
+		 * for.  This is OpenZFS issue 17070, cases 2 and 4, still open
+		 * upstream, where the raw DVA count is used.  Trad slots are
+		 * per-copies and need no such care.
+		 */
+		if (have_count > 1 && ddt_phys_is_gang(ddp, v))
+			have_count--;
+		sufficient = (have_count >= MIN(p, max_dvas));
+	} else {
+		/*
+		 * Trad slots are per-copies and all-or-nothing: an existing
+		 * slot fully satisfies this write, a missing slot gets a
+		 * fresh full write.  Trad entries must NEVER take the
+		 * extend path below: its ready/done callbacks operate on
+		 * DDT_PHYS_FLAT, which aliases trad slot 0 -- the DITTO
+		 * slot.  The mis-write left a freshly allocated block in
+		 * the ditto slot, filled the parent BP from it, and
+		 * ddt_sync_entry() then freed the slot immediately (ditto
+		 * slots are always freed at sync), leaving the BP pointing
+		 * at freed space -- a later free of that BP was a double
+		 * free (metaslab_check_free / zfs_btree_remove panics).
+		 */
+		sufficient = B_TRUE;
 	}
 
-	if (ddp->ddp_phys_birth != 0 || dde->dde_lead_zio[p] != NULL) {
-		if (ddp->ddp_phys_birth != 0)
-			ddt_bp_fill(ddp, bp, txg);
-		if (dde->dde_lead_zio[p] != NULL)
-			zio_add_child(zio, dde->dde_lead_zio[p]);
-		else
-			ddt_phys_addref(ddp);
+	/*
+	 * If a write is already in flight for this entry, work out how many
+	 * DVAs the slot will hold once it -- and anything chained on it --
+	 * completes.  Every logical parent of the lead either issued a write
+	 * sized to bring the slot up to its own zp_copies, or joined the
+	 * chain because the chain already promised enough; so the promise is
+	 * the largest zp_copies among them.
+	 *
+	 * Take the maximum over all of them rather than reading the first
+	 * parent: zio_add_child() inserts at the head of io_parent_list, so
+	 * the first parent is the most recent joiner, which may have asked
+	 * for fewer copies than the write that issued the lead.  (Upstream
+	 * OpenZFS reads only the first parent.)
+	 *
+	 * The lead's parent list is stable here: parents are only added
+	 * under dde_io_lock, which we hold, and only removed after the lead's
+	 * done callback has cleared it from dde_lead_zio, which needs the
+	 * same lock.
+	 *
+	 * Trad slots are per-copies and always sufficient by this point, so
+	 * this only ever does anything for flat tables.
+	 */
+	zio_t *lead = DDE_LEAD_ZIO(dde, lead_idx);
+	int want_dvas = MIN(p, max_dvas);
+	int chain_dvas = 0;
+
+	if (lead != NULL && !sufficient) {
+		ASSERT(ddt->ddt_flags & DDT_FLAG_FLAT);
+		zio_link_t *lzl = NULL;
+		zio_t *lpio;
+		while ((lpio = zio_walk_parents(lead, &lzl)) != NULL) {
+			if (lpio->io_flags & ZIO_FLAG_DDT_CHILD)
+				continue;
+			chain_dvas = MAX(chain_dvas,
+			    MIN(lpio->io_prop.zp_copies, max_dvas));
+		}
+	}
+
+	/*
+	 * Join the in-flight chain if the slot already satisfies us, or the
+	 * chain will once it completes.  Otherwise a lead that promises
+	 * fewer DVAs than we need must not simply be waited on: that is how
+	 * a copies=3 write arriving behind an in-flight copies=1 write used
+	 * to complete with a single DVA.
+	 *
+	 * Never join on the chain's promise when the slot already holds a
+	 * gang block.  It was filled by a lead that is past READY, so
+	 * nothing would fill our bp: a joiner that isn't sufficient by
+	 * itself would finish as a hole.  The promise counts the data
+	 * copies the writers asked for, but a gang slot that isn't
+	 * sufficient here may hold fewer (see above), so it can't be used
+	 * anyway.  Such a write takes the gang fallback below.
+	 */
+	boolean_t slot_gang = (slot->ddp_phys_birth != 0 &&
+	    ddt_phys_is_gang(ddp, v));
+	boolean_t join_chain = (lead != NULL &&
+	    (sufficient || (!slot_gang && chain_dvas >= want_dvas)));
+
+	/*
+	 * Every path from here that doesn't simply join the chain or reuse
+	 * the slot -- the gang fallback and the two branches that create an
+	 * extend child -- needs the parent's transformed data.  An override
+	 * bp never ran the transform stack: io_abd is the raw logical data,
+	 * while the bp describes the dmu_sync()'d, possibly compressed,
+	 * block.  A write built from it would put data on disk that doesn't
+	 * match its blkptr.  Toss the override and restart as a normal
+	 * write; using the override bp is only an optimisation.
+	 */
+	if (zio->io_bp_override != NULL && !sufficient && !join_chain &&
+	    (lead != NULL || ((ddt->ddt_flags & DDT_FLAG_FLAT) &&
+	    slot->ddp_phys_birth != 0))) {
+		if (dde_io != NULL)
+			mutex_exit(&dde_io->dde_io_lock);
+		ddt_exit(ddt);
+		zio_pop_transforms(zio);
+		zio->io_stage = ZIO_STAGE_OPEN;
+		zio->io_pipeline = ZIO_WRITE_PIPELINE;
+		zio->io_bp_override = NULL;
+		BP_ZERO(bp);
+		return (zio);
+	}
+
+	/*
+	 * The matched slot is already a gang block but doesn't have enough
+	 * DVAs for this write.  We cannot extend it (that would build an
+	 * illegal mixed gang/non-gang blkptr), so give up on dedup for this
+	 * block and write it as a plain block instead.  A ganged slot that
+	 * IS sufficient is fine -- we just dedup against it below.  This
+	 * applies whether or not a write is in flight: a lead past READY
+	 * may already have filled the slot with a gang block.  A lead that
+	 * gangs after we chain on it is caught in
+	 * zio_ddt_child_write_extend_ready().
+	 * Ported from upstream OpenZFS 5f5321e.
+	 */
+	if ((ddt->ddt_flags & DDT_FLAG_FLAT) && slot_gang &&
+	    !sufficient && !join_chain) {
+		zp->zp_dedup = B_FALSE;
+		BP_SET_DEDUP(bp, B_FALSE);
+		zio->io_pipeline = ZIO_WRITE_PIPELINE;
+		if (dde_io != NULL)
+			mutex_exit(&dde_io->dde_io_lock);
+		ddt_exit(ddt);
+		return (zio);
+	}
+
+	if ((slot->ddp_phys_birth != 0 && sufficient) || join_chain) {
+		if (slot->ddp_phys_birth != 0 && sufficient)
+			ddt_bp_fill(ddp, v, bp, txg);
+		if (lead != NULL)
+			zio_add_child(zio, lead);
+		/*
+		 * Take the reference for this parent now, at write-issue
+		 * time (optimistic), matching upstream OpenZFS.  If an
+		 * in-flight write later fails, zio_ddt_child_write_done()
+		 * drops one reference per parent.  The old code took this
+		 * reference at write-completion instead, which let a
+		 * concurrent free or ddt_sync() observe too low a refcount
+		 * and free a still-referenced block (-> reuse -> ECKSUM)
+		 * while stranding the allocation (-> leaked space).
+		 */
+		ddt_phys_addref(ddp, v);
+		if (dde_io != NULL)
+			mutex_exit(&dde_io->dde_io_lock);
+	} else if (lead != NULL) {
+		/*
+		 * A write is in flight for this entry, but even once it and
+		 * everything chained on it completes the slot will hold only
+		 * chain_dvas DVAs, fewer than we need (flat tables only; see
+		 * above).  Issue a write for just the difference and chain it
+		 * on top: the current lead becomes its child, so it reaches
+		 * READY -- and fills or extends the slot -- before this write
+		 * extends it further, and it completes before this one.  This
+		 * write then becomes the lead, so later arrivals measure
+		 * themselves against what it promises.
+		 *
+		 * dde_orig_phys is deliberately not re-snapshotted: it holds
+		 * the state from before the chain started, and each chain
+		 * member that completes successfully advances it (see
+		 * zio_ddt_child_write_done()), so whichever member fails
+		 * reverts the slot to the last state that was actually
+		 * written.
+		 *
+		 * Ported from upstream OpenZFS zio_ddt_write(); the in-flight
+		 * promise is computed differently, see above.
+		 */
+		ASSERT(ddt->ddt_flags & DDT_FLAG_FLAT);
+		ASSERT3S(chain_dvas, <, want_dvas);
+		ASSERT3P(dde_io, !=, NULL);
+		ASSERT3P(zio->io_bp_override, ==, NULL);
+
+		zio_prop_t ezp = *zp;
+		ezp.zp_copies = want_dvas - chain_dvas;
+		/* Not allowed to gang, as for any extend write; see below. */
+		ezp.zp_no_gang = B_TRUE;
+
+		blkptr_t ebp;
+		zio_ddt_extend_bp(zio, &ebp);
+
+		cio = zio_write(zio, spa, txg, &ebp, zio->io_orig_abd,
+		    zio->io_orig_size, zio->io_orig_size, &ezp,
+		    zio_ddt_child_write_extend_ready, NULL, NULL,
+		    zio_ddt_child_write_extend_done, dde, zio->io_priority,
+		    ZIO_DDT_CHILD_FLAGS(zio), &zio->io_bookmark);
+
+		zio_push_transform(cio, zio->io_abd, zio->io_size, 0, NULL);
+
+		/* The existing chain cannot complete until we have. */
+		zio_add_child(cio, lead);
+		dde_io->dde_lead_zio[lead_idx] = cio;
+
+		/* Optimistic reference for this parent (see above). */
+		ddt_phys_addref(ddp, v);
+		mutex_exit(&dde_io->dde_io_lock);
+	} else if ((ddt->ddt_flags & DDT_FLAG_FLAT) &&
+	    slot->ddp_phys_birth != 0) {
+		/*
+		 * Dedup hit, but the existing slot has fewer DVAs than this
+		 * write's zp_copies needs (DDT_FLAG_FLAT only -- enforced
+		 * by the flag check above; see the comment on
+		 * zio_ddt_child_write_extend_ready()), and no
+		 * write is currently in flight for this entry.  Allocate
+		 * only the shortfall and merge it into the existing slot,
+		 * rather than discarding the existing DVAs and writing a
+		 * full fresh set.
+		 *
+		 * An override bp never gets here: it is tossed and the
+		 * write restarted above, because an extend child needs the
+		 * transformed data an override never produced.
+		 */
+		ASSERT3P(zio->io_bp_override, ==, NULL);
+		int need = MIN(p, max_dvas) -
+		    ddt_phys_dva_count(ddp, v, encrypted);
+		zio_prop_t ezp = *zp;
+		ezp.zp_copies = need;
+		/*
+		 * The extend child must not gang: a ganged shortfall DVA
+		 * cannot be merged into the existing non-gang slot.  If it
+		 * would gang, zio_write_gang_block() bails with EAGAIN and
+		 * the parent is reissued non-dedup (see zio_done()).
+		 */
+		ezp.zp_no_gang = B_TRUE;
+
+		blkptr_t ebp;
+		zio_ddt_extend_bp(zio, &ebp);
+
+		ddt_io_alloc(dde);
+		ddt_phys_copy(&dde->dde_io->dde_orig_phys, ddp, v);
+
+		cio = zio_write(zio, spa, txg, &ebp, zio->io_orig_abd,
+		    zio->io_orig_size, zio->io_orig_size, &ezp,
+		    zio_ddt_child_write_extend_ready, NULL, NULL,
+		    zio_ddt_child_write_extend_done, dde, zio->io_priority,
+		    ZIO_DDT_CHILD_FLAGS(zio), &zio->io_bookmark);
+
+		zio_push_transform(cio, zio->io_abd, zio->io_size, 0, NULL);
+		dde->dde_io->dde_lead_zio[lead_idx] = cio;
+		/* Optimistic reference for this parent (see above). */
+		ddt_phys_addref(ddp, v);
+		if (dde_io != NULL)
+			mutex_exit(&dde_io->dde_io_lock);
 	} else if (zio->io_bp_override) {
 		ASSERT(bp->blk_birth == txg);
 		ASSERT(BP_EQUAL(bp, zio->io_bp_override));
-		ddt_phys_fill(ddp, bp);
-		ddt_phys_addref(ddp);
+		ddt_phys_fill(ddp, v, bp);
+		ddt_phys_addref(ddp, v);
+		/*
+		 * Drop dde_io_lock after the slot mutations, matching the
+		 * other two branches.  In FDT-FLAT mode all copy indices
+		 * share slot 0, so an unlocked ddt_phys_fill/addref can
+		 * race with a concurrent zio_ddt_child_write_ready callback
+		 * on a different copy index of the same dde.
+		 */
+		if (dde_io != NULL)
+			mutex_exit(&dde_io->dde_io_lock);
 	} else {
 		cio = zio_write(zio, spa, txg, bp, zio->io_orig_abd,
 		    zio->io_orig_size, zio->io_orig_size, zp,
@@ -3110,15 +3681,23 @@ zio_ddt_write(zio_t *zio)
 		    ZIO_DDT_CHILD_FLAGS(zio), &zio->io_bookmark);
 
 		zio_push_transform(cio, zio->io_abd, zio->io_size, 0, NULL);
-		dde->dde_lead_zio[p] = cio;
+		ddt_io_alloc(dde);
+		/*
+		 * Snapshot dde_phys[v] so zio_ddt_child_write_done can
+		 * revert if the write fails.
+		 */
+		ddt_phys_copy(&dde->dde_io->dde_orig_phys, ddp, v);
+		dde->dde_io->dde_lead_zio[lead_idx] = cio;
+		/* Optimistic reference for this parent (see above). */
+		ddt_phys_addref(ddp, v);
+		if (dde_io != NULL)
+			mutex_exit(&dde_io->dde_io_lock);
 	}
 
 	ddt_exit(ddt);
 
 	if (cio)
 		zio_nowait(cio);
-	if (dio)
-		zio_nowait(dio);
 
 	return (zio);
 }
@@ -3132,16 +3711,62 @@ zio_ddt_free(zio_t *zio)
 	blkptr_t *bp = zio->io_bp;
 	ddt_t *ddt = ddt_select(spa, bp);
 	ddt_entry_t *dde;
-	ddt_phys_t *ddp;
+	ddt_phys_variant_t v;
+	int error;
 
 	ASSERT(BP_GET_DEDUP(bp));
 	ASSERT(zio->io_child_type == ZIO_CHILD_LOGICAL);
 
 	ddt_enter(ddt);
-	freedde = dde = ddt_lookup(ddt, bp, B_TRUE);
-	ddp = ddt_phys_select(dde, bp);
-	ddt_phys_decref(ddp);
+	freedde = dde = ddt_lookup_error(ddt, bp, B_TRUE, &error);
+	if (dde != NULL) {
+		v = ddt_phys_select(ddt, dde, bp);
+		if (v != DDT_PHYS_NONE) {
+			/* Normal dedup-free path: decref matching phys. */
+			ddt_phys_decref(dde->dde_phys, v);
+			ddt_exit(ddt);
+			return (zio);
+		}
+	}
 	ddt_exit(ddt);
+
+	/*
+	 * The entry couldn't be read, so we can't tell whether other block
+	 * pointers still reference this block.  Leak this reference rather
+	 * than risk freeing data other files still use.  Falling through to
+	 * the free below, as upstream OpenZFS does, would free a shared
+	 * block on a read error.
+	 */
+	if (error != 0) {
+		zfs_dbgmsg("%s: DDT entry for dedup BP DVA[0]=<%llu:%llx:%llx> "
+		    "unreadable (error %d); leaking the block instead of "
+		    "freeing it", spa_name(spa),
+		    (u_longlong_t)DVA_GET_VDEV(&bp->blk_dva[0]),
+		    (u_longlong_t)DVA_GET_OFFSET(&bp->blk_dva[0]),
+		    (u_longlong_t)DVA_GET_ASIZE(&bp->blk_dva[0]), error);
+		return (zio);
+	}
+
+	/*
+	 * The DDT has no matching entry for this BP -- either the entry was
+	 * removed by ddtprune (which only ever targets UNIQUE-class entries,
+	 * refcount == 1) or its DVAs were zeroed by ddt_phys_clear().  The
+	 * underlying block was deliberately NOT freed at prune time because
+	 * a BP still referenced it; that BP is the one we have here now.
+	 * Free the block directly so it doesn't leak.
+	 *
+	 * Safe vs double-free: prune only operates on UNIQUE entries, so
+	 * exactly one BP references each pruned block; the others go through
+	 * the normal decref path above.
+	 *
+	 * Without this fallback, "zpool ddtprune -p 100; zfs destroy <ds>"
+	 * leaks every block whose DDT entry was pruned -- visible as
+	 * "block traversal size NNN != alloc NNN (leaked NN)" under
+	 * `zdb -bcc`.
+	 */
+	blkptr_t bp_copy = *bp;
+	BP_SET_DEDUP(&bp_copy, 0);
+	zio_free(spa, zio->io_txg, &bp_copy);
 
 	return (zio);
 }
@@ -3189,8 +3814,7 @@ zio_dva_throttle(zio_t *zio)
 	metaslab_class_t *mc;
 
 	/* locate an appropriate allocation class */
-	mc = spa_preferred_class(spa, zio->io_size, zio->io_prop.zp_type,
-	    zio->io_prop.zp_level, zio->io_prop.zp_zpl_smallblk);
+	mc = spa_preferred_class(spa, zio);
 
 	if (zio->io_priority == ZIO_PRIORITY_SYNC_WRITE ||
 	    !mc->mc_alloc_throttle_enabled ||
@@ -3272,9 +3896,7 @@ zio_dva_allocate(zio_t *zio)
 	 */
 	mc = zio->io_metaslab_class;
 	if (mc == NULL) {
-		mc = spa_preferred_class(spa, zio->io_size,
-		    zio->io_prop.zp_type, zio->io_prop.zp_level,
-		    zio->io_prop.zp_zpl_smallblk);
+		mc = spa_preferred_class(spa, zio);
 		zio->io_metaslab_class = mc;
 	}
 
@@ -3286,6 +3908,26 @@ zio_dva_allocate(zio_t *zio)
 	 * Fallback to normal class when an alloc class is full
 	 */
 	if (error == ENOSPC && mc != spa_normal_class(spa)) {
+		/*
+		 * When the dedup or special class is spilling into the normal
+		 * class, there can still be significant space available due
+		 * to deferred frees that are in-flight.  We track the txg when
+		 * this occurred and back off adding new DDT entries for a few
+		 * txgs to allow the free blocks to be processed.
+		 */
+		if ((mc == spa_dedup_class(spa) || (spa_special_has_ddt(spa) &&
+		    mc == spa_special_class(spa))) &&
+		    spa->spa_dedup_class_full_txg != zio->io_txg) {
+			spa->spa_dedup_class_full_txg = zio->io_txg;
+			zfs_dbgmsg("%s[%d]: %s class spilling, req size %d, "
+			    "%llu allocated of %llu",
+			    spa_name(spa), (int)zio->io_txg,
+			    mc == spa_dedup_class(spa) ? "dedup" : "special",
+			    (int)zio->io_size,
+			    (u_longlong_t)metaslab_class_get_alloc(mc),
+			    (u_longlong_t)metaslab_class_get_space(mc));
+		}
+
 		/*
 		 * If throttling, transfer reservation over to normal class.
 		 * The io_allocator slot can remain the same even though we
@@ -3474,8 +4116,23 @@ zio_vdev_io_start(zio_t *zio)
 	ASSERT(zio->io_child_error[ZIO_CHILD_VDEV] == 0);
 
 	if (vd == NULL) {
-		if (!(zio->io_flags & ZIO_FLAG_CONFIG_WRITER))
-			spa_config_enter(spa, SCL_ZIO, zio, RW_READER);
+		if (!(zio->io_flags & ZIO_FLAG_CONFIG_WRITER)) {
+			/*
+			 * Deadlock workaround: ddt_prune_unique_entries() ->
+			 * prune_candidates_sync() already holds the SCL_ZIO
+			 * reader lock and reaches here wanting it again.  If a
+			 * writer is waiting (scl_write_wanted), normal reader
+			 * enter blocks behind it -> deadlock.  While a prune is
+			 * active, cut in front of pending writers.
+			 * Ported from OpenZFS cb3c18a (#17793).
+			 */
+			if (spa->spa_active_ddt_prune)
+				spa_config_enter_priority(spa, SCL_ZIO, zio,
+				    RW_READER);
+			else
+				spa_config_enter(spa, SCL_ZIO, zio,
+				    RW_READER);
+		}
 
 		/*
 		 * The mirror_ops handle multiple DVAs in a single BP.
@@ -4316,6 +4973,37 @@ zio_done(zio_t *zio)
 	}
 
 	zio_pop_transforms(zio);	/* note: may set zio->io_error */
+
+	/*
+	 * A DDT extend child bailed with EAGAIN: either it could not gang
+	 * without building a mixed blkptr (zio_write_gang_block()), or the
+	 * entry's existing DVAs can't be merged with the new ones
+	 * (zio_ddt_child_write_extend_ready()).  That is an internal control
+	 * signal, not an I/O failure: the write is about to be reissued as
+	 * a plain, non-deduplicated block and will succeed.
+	 *
+	 * This has to be handled HERE, before vdev_stat_update() counts a
+	 * write error on the root vdev and before the error block below
+	 * calls spa_log_error() and posts an ereport.fs.zfs.data; both run
+	 * before zio_done() gets to its reexecute decisions.  Clearing the
+	 * error any later leaves the pool reporting write errors and
+	 * "Permanent errors have been detected in the following files" for
+	 * data that was written correctly.
+	 *
+	 * zio_reexecute() clears io_child_error[] as well, so the
+	 * inherited EAGAIN does not come back on the retry.
+	 *
+	 * Adapted from upstream OpenZFS 5f5321e, which sets zp_dedup and
+	 * ZIO_REEXECUTE_NOW in the later block and leaves io_error set.
+	 */
+	if (zio->io_error == EAGAIN && zio == lio && IO_IS_ALLOCATING(zio) &&
+	    zio->io_prop.zp_dedup) {
+		ASSERT(bp != NULL);
+		zio->io_prop.zp_dedup = B_FALSE;
+		BP_SET_DEDUP(bp, B_FALSE);
+		zio->io_reexecute |= ZIO_REEXECUTE_NOW;
+		zio->io_error = 0;
+	}
 
 	vdev_stat_update(zio, psize);
 

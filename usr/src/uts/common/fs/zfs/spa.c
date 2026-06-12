@@ -32,8 +32,12 @@
  * Copyright (c) 2017, Intel Corporation.
  * Copyright 2020 Joshua M. Clulow <josh@sysmgr.org>
  * Copyright 2021 OmniOS Community Edition (OmniOSce) Association.
+ * Copyright (c) 2021, Colm Buckley <colm@tuatha.org>
  * Copyright 2026 Oxide Computer Company
  * Copyright 2026 Edgecast Cloud LLC.
+ * Copyright (c) 2023 Hewlett Packard Enterprise Development LP.
+ * Copyright (c) 2023-2026, Klara, Inc.
+ * Copyright (c) 2026, TrueNAS.
  */
 
 /*
@@ -352,6 +356,11 @@ spa_prop_get_config(spa_t *spa, nvlist_t **nvp)
 	}
 
 	spa_prop_add_list(*nvp, ZPOOL_PROP_GUID, NULL, spa_guid(spa), src);
+
+	spa_prop_add_list(*nvp, ZPOOL_PROP_DEDUP_TABLE_SIZE, NULL,
+	    ddt_get_ddt_dsize(spa), src);
+	spa_prop_add_list(*nvp, ZPOOL_PROP_DEDUP_TABLE_QUOTA, NULL,
+	    spa->spa_dedup_table_quota, src);
 
 	if (spa->spa_comment != NULL) {
 		spa_prop_add_list(*nvp, ZPOOL_PROP_COMMENT, spa->spa_comment,
@@ -697,20 +706,23 @@ spa_prop_validate(spa_t *spa, nvlist_t *props)
 				error = E2BIG;
 			break;
 
-		case ZPOOL_PROP_DEDUPDITTO:
-			if (spa_version(spa) < SPA_VERSION_DEDUP)
-				error = SET_ERROR(ENOTSUP);
-			else
-				error = nvpair_value_uint64(elem, &intval);
-			if (error == 0 &&
-			    intval != 0 && intval < ZIO_DEDUPDITTO_MIN)
-				error = SET_ERROR(EINVAL);
+		case ZPOOL_PROP_DEDUP_TABLE_QUOTA:
+			error = nvpair_value_uint64(elem, &intval);
 			break;
 		}
 
 		if (error)
 			break;
 	}
+
+	/*
+	 * dedupditto is accepted for compatibility but no longer does
+	 * anything: ditto copies don't survive scrub or resilver, so they
+	 * never provided the redundancy they claimed.  Drop the setting so
+	 * it is never persisted.  Matches upstream OpenZFS.
+	 */
+	(void) nvlist_remove_all(props,
+	    zpool_prop_to_name(ZPOOL_PROP_DEDUPDITTO));
 
 	if (!error && reset_bootfs) {
 		error = nvlist_remove(props,
@@ -3626,8 +3638,8 @@ spa_ld_get_props(spa_t *spa)
 		spa_prop_find(spa, ZPOOL_PROP_AUTOEXPAND, &spa->spa_autoexpand);
 		spa_prop_find(spa, ZPOOL_PROP_BOOTSIZE, &spa->spa_bootsize);
 		spa_prop_find(spa, ZPOOL_PROP_MULTIHOST, &spa->spa_multihost);
-		spa_prop_find(spa, ZPOOL_PROP_DEDUPDITTO,
-		    &spa->spa_dedup_ditto);
+		spa_prop_find(spa, ZPOOL_PROP_DEDUP_TABLE_QUOTA,
+		    &spa->spa_dedup_table_quota);
 		spa_prop_find(spa, ZPOOL_PROP_AUTOTRIM, &spa->spa_autotrim);
 		spa->spa_autoreplace = (autoreplace != 0);
 	}
@@ -3782,6 +3794,16 @@ spa_ld_load_dedup_tables(spa_t *spa)
 		spa_load_failed(spa, "ddt_load failed [error=%d]", error);
 		return (spa_vdev_err(rvd, VDEV_AUX_CORRUPT_DATA, EIO));
 	}
+
+	/*
+	 * dsl_scan_init() runs before the DDTs are loaded, so its
+	 * ddt_walk_init() found no dedup log to flush.  Redo it now for a
+	 * scan that is being resumed, or its walk would miss entries that
+	 * so far exist only in the log.
+	 */
+	dsl_scan_t *scn = spa->spa_dsl_pool->dp_scan;
+	if (scn != NULL && scn->scn_phys.scn_state == DSS_SCANNING)
+		ddt_walk_init(spa, scn->scn_phys.scn_max_txg);
 
 	return (0);
 }
@@ -8345,8 +8367,8 @@ spa_sync_props(void *arg, dmu_tx_t *tx)
 			case ZPOOL_PROP_MULTIHOST:
 				spa->spa_multihost = intval;
 				break;
-			case ZPOOL_PROP_DEDUPDITTO:
-				spa->spa_dedup_ditto = intval;
+			case ZPOOL_PROP_DEDUP_TABLE_QUOTA:
+				spa->spa_dedup_table_quota = intval;
 				break;
 			default:
 				break;

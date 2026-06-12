@@ -377,7 +377,9 @@ typedef struct dmu_buf {
 #define	DMU_POOL_L2CACHE		"l2cache"
 #define	DMU_POOL_TMP_USERREFS		"tmp_userrefs"
 #define	DMU_POOL_DDT			"DDT-%s-%s-%s"
+#define	DMU_POOL_DDT_DIR		"DDT-%s"
 #define	DMU_POOL_DDT_STATS		"DDT-statistics"
+#define	DMU_POOL_DDT_LOG		"DDT-log-%s-%u"
 #define	DMU_POOL_CREATION_VERSION	"creation_version"
 #define	DMU_POOL_SCAN			"scan"
 #define	DMU_POOL_FREE_BPOBJ		"free_bpobj"
@@ -890,6 +892,8 @@ extern int zfs_max_recordsize;
  */
 void dmu_prefetch(objset_t *os, uint64_t object, int64_t level, uint64_t offset,
     uint64_t len, enum zio_priority pri);
+int dmu_prefetch_wait(objset_t *os, uint64_t object, uint64_t offset,
+    uint64_t size);
 
 typedef struct dmu_object_info {
 	/* All sizes are in bytes unless otherwise indicated. */
