@@ -41,6 +41,7 @@
  * Copyright (c) 2023 Hewlett Packard Enterprise Development LP.
  * Copyright (c) 2023-2026, Klara, Inc.
  * Copyright (c) 2026, TrueNAS.
+ * Copyright 2026 Edgecast Cloud LLC.
  */
 
 /*
@@ -715,16 +716,6 @@ spa_prop_validate(spa_t *spa, nvlist_t *props)
 				error = E2BIG;
 			break;
 
-		case ZPOOL_PROP_DEDUPDITTO:
-			if (spa_version(spa) < SPA_VERSION_DEDUP)
-				error = SET_ERROR(ENOTSUP);
-			else
-				error = nvpair_value_uint64(elem, &intval);
-			if (error == 0 &&
-			    intval != 0 && intval < ZIO_DEDUPDITTO_MIN)
-				error = SET_ERROR(EINVAL);
-			break;
-
 		case ZPOOL_PROP_DEDUP_TABLE_QUOTA:
 			error = nvpair_value_uint64(elem, &intval);
 			break;
@@ -733,6 +724,15 @@ spa_prop_validate(spa_t *spa, nvlist_t *props)
 		if (error)
 			break;
 	}
+
+	/*
+	 * dedupditto is accepted for compatibility but no longer does
+	 * anything: ditto copies don't survive scrub or resilver, so they
+	 * never provided the redundancy they claimed.  Drop the setting so
+	 * it is never persisted.  Matches upstream OpenZFS.
+	 */
+	(void) nvlist_remove_all(props,
+	    zpool_prop_to_name(ZPOOL_PROP_DEDUPDITTO));
 
 	if (!error && reset_bootfs) {
 		error = nvlist_remove(props,
@@ -3665,8 +3665,6 @@ spa_ld_get_props(spa_t *spa)
 		spa_prop_find(spa, ZPOOL_PROP_AUTOEXPAND, &spa->spa_autoexpand);
 		spa_prop_find(spa, ZPOOL_PROP_BOOTSIZE, &spa->spa_bootsize);
 		spa_prop_find(spa, ZPOOL_PROP_MULTIHOST, &spa->spa_multihost);
-		spa_prop_find(spa, ZPOOL_PROP_DEDUPDITTO,
-		    &spa->spa_dedup_ditto);
 		spa_prop_find(spa, ZPOOL_PROP_DEDUP_TABLE_QUOTA,
 		    &spa->spa_dedup_table_quota);
 		spa_prop_find(spa, ZPOOL_PROP_AUTOTRIM, &spa->spa_autotrim);
@@ -8297,9 +8295,6 @@ spa_sync_props(void *arg, dmu_tx_t *tx)
 				break;
 			case ZPOOL_PROP_MULTIHOST:
 				spa->spa_multihost = intval;
-				break;
-			case ZPOOL_PROP_DEDUPDITTO:
-				spa->spa_dedup_ditto = intval;
 				break;
 			case ZPOOL_PROP_DEDUP_TABLE_QUOTA:
 				spa->spa_dedup_table_quota = intval;

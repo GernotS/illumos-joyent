@@ -2235,6 +2235,15 @@ zpool_ddt_prune(zpool_handle_t *zhp, zpool_ddt_prune_unit_t unit,
 	if (ret != 0) {
 		(void) snprintf(msg, sizeof (msg), dgettext(TEXT_DOMAIN,
 		    "cannot prune DDT on '%s'"), zhp->zpool_name);
+		/*
+		 * EALREADY is not handled by zpool_standard_error(), which
+		 * would report it as EZFS_UNKNOWN and abort().
+		 */
+		if (errno == EALREADY) {
+			zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
+			    "a prune operation is already in progress"));
+			return (zfs_error(hdl, EZFS_BUSY, msg));
+		}
 		(void) zpool_standard_error(hdl, errno, msg);
 		return (-1);
 	}

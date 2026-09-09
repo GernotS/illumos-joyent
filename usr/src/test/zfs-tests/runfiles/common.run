@@ -541,13 +541,15 @@ tests = ['ctime_001_pos' ]
 tags = ['functional', 'ctime']
 
 [tests/functional/dedup]
-tests = ['dedup_ddt_stray_class', 'dedup_fdt_create', 'dedup_fdt_import',
-    'dedup_fdt_pacing', 'dedup_gang_copies',
-    'dedup_legacy_create', 'dedup_legacy_import',
-    'dedup_legacy_fdt_upgrade', 'dedup_legacy_fdt_mixed', 'dedup_log_zdb_leak',
-    'dedup_prune', 'dedup_prune_all',
-    'dedup_prune_deadlock', 'dedup_prune_leak', 'dedup_prune_race',
-    'dedup_quota', 'dedup_zap_shrink']
+tests = ['dedup_concurrent_copies', 'dedup_ddt_stray_class',
+    'dedup_ditto_noop', 'dedup_encrypted_copies', 'dedup_fdt_create',
+    'dedup_fdt_import', 'dedup_fdt_pacing', 'dedup_gang_copies',
+    'dedup_gang_redundancy', 'dedup_legacy_create', 'dedup_legacy_fdt_mixed',
+    'dedup_legacy_fdt_upgrade', 'dedup_legacy_import', 'dedup_log_zdb_leak',
+    'dedup_prune', 'dedup_prune_all', 'dedup_prune_args',
+    'dedup_prune_concurrent', 'dedup_prune_deadlock', 'dedup_prune_leak',
+    'dedup_prune_log_flush', 'dedup_prune_percentage', 'dedup_prune_race',
+    'dedup_quota', 'dedup_sync_copies', 'dedup_zap_shrink']
 pre =
 post =
 tags = ['functional', 'dedup']

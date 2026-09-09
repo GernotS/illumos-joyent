@@ -2399,11 +2399,15 @@ file path=opt/zfs-tests/tests/functional/ctime/cleanup mode=0555
 file path=opt/zfs-tests/tests/functional/ctime/ctime_001_pos mode=0555
 file path=opt/zfs-tests/tests/functional/ctime/setup mode=0555
 dir  path=opt/zfs-tests/tests/functional/dedup
+file path=opt/zfs-tests/tests/functional/dedup/dedup_concurrent_copies mode=0555
 file path=opt/zfs-tests/tests/functional/dedup/dedup_ddt_stray_class mode=0555
+file path=opt/zfs-tests/tests/functional/dedup/dedup_ditto_noop mode=0555
+file path=opt/zfs-tests/tests/functional/dedup/dedup_encrypted_copies mode=0555
 file path=opt/zfs-tests/tests/functional/dedup/dedup_fdt_create mode=0555
 file path=opt/zfs-tests/tests/functional/dedup/dedup_fdt_import mode=0555
 file path=opt/zfs-tests/tests/functional/dedup/dedup_fdt_pacing mode=0555
 file path=opt/zfs-tests/tests/functional/dedup/dedup_gang_copies mode=0555
+file path=opt/zfs-tests/tests/functional/dedup/dedup_gang_redundancy mode=0555
 file path=opt/zfs-tests/tests/functional/dedup/dedup_legacy_create mode=0555
 file path=opt/zfs-tests/tests/functional/dedup/dedup_legacy_fdt_mixed mode=0555
 file path=opt/zfs-tests/tests/functional/dedup/dedup_legacy_fdt_upgrade mode=0555
@@ -2411,10 +2415,15 @@ file path=opt/zfs-tests/tests/functional/dedup/dedup_legacy_import mode=0555
 file path=opt/zfs-tests/tests/functional/dedup/dedup_log_zdb_leak mode=0555
 file path=opt/zfs-tests/tests/functional/dedup/dedup_prune mode=0555
 file path=opt/zfs-tests/tests/functional/dedup/dedup_prune_all mode=0555
+file path=opt/zfs-tests/tests/functional/dedup/dedup_prune_args mode=0555
+file path=opt/zfs-tests/tests/functional/dedup/dedup_prune_concurrent mode=0555
 file path=opt/zfs-tests/tests/functional/dedup/dedup_prune_deadlock mode=0555
 file path=opt/zfs-tests/tests/functional/dedup/dedup_prune_leak mode=0555
+file path=opt/zfs-tests/tests/functional/dedup/dedup_prune_log_flush mode=0555
+file path=opt/zfs-tests/tests/functional/dedup/dedup_prune_percentage mode=0555
 file path=opt/zfs-tests/tests/functional/dedup/dedup_prune_race mode=0555
 file path=opt/zfs-tests/tests/functional/dedup/dedup_quota mode=0555
+file path=opt/zfs-tests/tests/functional/dedup/dedup_sync_copies mode=0555
 file path=opt/zfs-tests/tests/functional/dedup/dedup_zap_shrink mode=0555
 dir  path=opt/zfs-tests/tests/functional/delegate
 file path=opt/zfs-tests/tests/functional/delegate/cleanup mode=0555

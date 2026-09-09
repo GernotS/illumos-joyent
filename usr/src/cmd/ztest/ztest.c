@@ -5312,9 +5312,6 @@ ztest_spa_prop_get_set(ztest_ds_t *zd, uint64_t id)
 
 	rw_enter(&ztest_name_lock, RW_READER);
 
-	(void) ztest_spa_prop_set_uint64(ZPOOL_PROP_DEDUPDITTO,
-	    ZIO_DEDUPDITTO_MIN + ztest_random(ZIO_DEDUPDITTO_MIN));
-
 	(void) ztest_spa_prop_set_uint64(ZPOOL_PROP_AUTOTRIM, ztest_random(2));
 
 	VERIFY0(spa_prop_get(ztest_spa, &props));
@@ -6571,8 +6568,6 @@ ztest_run(ztest_shared_t *zs)
 	dsl_pool_config_exit(dmu_objset_pool(os), FTAG);
 	zs->zs_guid = dds.dds_guid;
 	dmu_objset_disown(os, B_TRUE, FTAG);
-
-	spa->spa_dedup_ditto = 2 * ZIO_DEDUPDITTO_MIN;
 
 	/*
 	 * We don't expect the pool to suspend unless maxfaults == 0,

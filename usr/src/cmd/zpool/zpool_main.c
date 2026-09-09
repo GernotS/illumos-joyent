@@ -6803,6 +6803,16 @@ zpool_do_ddt_prune(int argc, char **argv)
 				    gettext("invalid days value\n"));
 				usage(B_FALSE);
 			}
+			/*
+			 * Reject day counts whose conversion to seconds would
+			 * overflow: a wrapped value is a small age, which would
+			 * prune recent unique entries instead of failing.
+			 */
+			if (amount > UINT64_MAX / 86400) {
+				(void) fprintf(stderr,
+				    gettext("days value too large\n"));
+				usage(B_FALSE);
+			}
 			amount *= 86400;	/* convert days to seconds */
 			unit = ZPOOL_DDT_PRUNE_AGE;
 			break;

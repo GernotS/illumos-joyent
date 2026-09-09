@@ -1043,88 +1043,6 @@ ddt_phys_total_refcnt(const ddt_t *ddt, const ddt_univ_phys_t *ddp)
 	return (refcnt);
 }
 
-int
-ddt_ditto_copies_needed(ddt_t *ddt, ddt_entry_t *dde,
-    ddt_univ_phys_t *ddp_willref)
-{
-	spa_t *spa = ddt->ddt_spa;
-	uint64_t total_refcnt = 0;
-	uint64_t ditto = spa->spa_dedup_ditto;
-	int total_copies = 0;
-	int desired_copies = 0;
-	int copies_needed = 0;
-
-	/* Ditto is trad-only.  Flat tables never generate new ditto entries. */
-	if (ddt->ddt_flags & DDT_FLAG_FLAT) {
-		(void) ddp_willref;
-		return (0);
-	}
-
-	for (int p = DDT_PHYS_SINGLE; p <= DDT_PHYS_TRIPLE; p++) {
-		ddt_phys_t *ddp = &dde->dde_phys[0].ddp_trad[p];
-		zio_t *zio = DDE_LEAD_ZIO(dde, p);
-		uint64_t refcnt = ddp->ddp_refcnt;	/* committed refs */
-		if (zio != NULL)
-			refcnt += zio->io_parent_count;	/* pending refs */
-		if ((ddt_univ_phys_t *)ddp == ddp_willref)
-			refcnt++;			/* caller's ref */
-		if (refcnt != 0) {
-			total_refcnt += refcnt;
-			total_copies += p;
-		}
-	}
-
-	if (ditto == 0 || ditto > UINT32_MAX)
-		ditto = UINT32_MAX;
-
-	if (total_refcnt >= 1)
-		desired_copies++;
-	if (total_refcnt >= ditto)
-		desired_copies++;
-	if (total_refcnt >= ditto * ditto)
-		desired_copies++;
-
-	copies_needed = MAX(desired_copies, total_copies) - total_copies;
-
-	/* encrypted blocks store their IV in DVA[2] */
-	if (DDK_GET_CRYPT(&dde->dde_key))
-		copies_needed = MIN(copies_needed, SPA_DVAS_PER_BP - 1);
-
-	return (copies_needed);
-}
-
-int
-ddt_ditto_copies_present(ddt_entry_t *dde)
-{
-	/*
-	 * Ditto is a traditional-only feature.  In flat mode the trad
-	 * array doesn't exist on disk, and &dde_phys[0].ddp_trad[0]
-	 * actually aliases the flat slot's DVAs -- if we read DVAs from
-	 * that union member in flat mode we'd misinterpret legitimate
-	 * flat-slot DVAs as a ditto block with 3 copies, which then
-	 * trips the ASSERT(copies < SPA_DVAS_PER_BP) below.
-	 *
-	 * We never generate new ditto blocks on flat tables (see
-	 * ddt_ditto_copies_needed); return 0 here so ditto logic in
-	 * zio_ddt_write is a no-op for flat.
-	 */
-	if (dde->dde_ddt != NULL &&
-	    (dde->dde_ddt->ddt_flags & DDT_FLAG_FLAT))
-		return (0);
-
-	ddt_phys_t *ddp = &dde->dde_phys[0].ddp_trad[DDT_PHYS_DITTO];
-	dva_t *dva = ddp->ddp_dva;
-	int copies = 0 - DVA_GET_GANG(dva);
-
-	for (int d = 0; d < DDE_GET_NDVAS(dde); d++, dva++)
-		if (DVA_IS_VALID(dva))
-			copies++;
-
-	ASSERT(copies >= 0 && copies < SPA_DVAS_PER_BP);
-
-	return (copies);
-}
-
 size_t
 ddt_compress(void *src, uchar_t *dst, size_t s_len, size_t d_len)
 {
@@ -1600,7 +1518,7 @@ void
 ddt_prefetch(spa_t *spa, const blkptr_t *bp)
 {
 	ddt_t *ddt;
-	uint8_t ddebuf[sizeof (ddt_entry_t) + DDT_PHYS_SIZE_MAX] = {0};
+	uint64_t ddebuf[DDT_ENTRY_BUF_WORDS] = { 0 };
 	ddt_entry_t *dde = (ddt_entry_t *)ddebuf;
 
 	if (!zfs_dedup_prefetch || bp == NULL || !BP_GET_DEDUP(bp))
@@ -1830,7 +1748,7 @@ boolean_t
 ddt_class_contains(spa_t *spa, ddt_class_t max_class, const blkptr_t *bp)
 {
 	ddt_t *ddt;
-	uint8_t ddebuf[sizeof (ddt_entry_t) + DDT_PHYS_SIZE_MAX] = {0};
+	uint64_t ddebuf[DDT_ENTRY_BUF_WORDS] = { 0 };
 	ddt_entry_t *dde = (ddt_entry_t *)ddebuf;
 
 	if (!BP_GET_DEDUP(bp))
@@ -1997,10 +1915,15 @@ ddt_sync_entry(ddt_t *ddt, ddt_entry_t *dde, dmu_tx_t *tx, uint64_t txg)
 				continue;
 			}
 			if (p == DDT_PHYS_DITTO) {
-				if (ddt_ditto_copies_needed(ddt, dde, NULL)
-				    == 0)
-					ddt_phys_free(ddt, ddk, ddp, p,
-					    txg);
+				/*
+				 * New ditto copies are no longer written
+				 * (the dedupditto property is a no-op), but
+				 * old pools may still hold them.  Don't keep
+				 * the obsolete slot regardless of refcount,
+				 * and don't leak it either: free it.
+				 * Matches upstream OpenZFS.
+				 */
+				ddt_phys_free(ddt, ddk, ddp, p, txg);
 				continue;
 			}
 			if (slot->ddp_refcnt == 0)
@@ -2009,10 +1932,12 @@ ddt_sync_entry(ddt_t *ddt, ddt_entry_t *dde, dmu_tx_t *tx, uint64_t txg)
 		}
 	}
 
-	if (!(ddt->ddt_flags & DDT_FLAG_FLAT) &&
-	    dde->dde_phys[0].ddp_trad[DDT_PHYS_DITTO].ddp_phys_birth != 0)
-		nclass = DDT_CLASS_DITTO;
-	else if (total_refcnt > 1)
+	/*
+	 * The ditto slot was freed above, so no entry is (re)classified as
+	 * DDT_CLASS_DITTO any more; entries an old pool keeps in that class
+	 * move to unique/duplicate the next time they are synced.
+	 */
+	if (total_refcnt > 1)
 		nclass = DDT_CLASS_DUPLICATE;
 	else
 		nclass = DDT_CLASS_UNIQUE;
@@ -2456,6 +2381,20 @@ ddt_sync_table_log(ddt_t *ddt, dmu_tx_t *tx)
 				VERIFY(ddt_log_remove_key(ddt,
 				    ddt->ddt_log_flushing, &ddlwe.ddlwe_key));
 			}
+
+			/*
+			 * Stamp the entry with the time of this modification.
+			 * Without this an entry keeps the class_start it was
+			 * loaded with, so one that has only just dropped back
+			 * to the unique class looks as old as the entry's
+			 * first write and is immediately eligible for an age-
+			 * or percentage-based prune.  Matches upstream OpenZFS.
+			 */
+			if (ddt->ddt_flags & DDT_FLAG_FLAT) {
+				ddlwe.ddlwe_phys.ddp_flat.ddp_class_start =
+				    ddt_class_start();
+			}
+
 			ddt_log_entry(ddt, &ddlwe, &dlu);
 			ddt_sync_scan_entry(ddt, &ddlwe, tx);
 			ddt_free(ddt, dde);
@@ -2527,6 +2466,11 @@ ddt_sync_table(ddt_t *ddt, dmu_tx_t *tx, uint64_t txg)
 		/* No log: drain the in-memory tree straight to the store. */
 		while ((dde =
 		    avl_destroy_nodes(&ddt->ddt_tree, &cookie)) != NULL) {
+			/* Stamp the modification; see ddt_sync_table_log(). */
+			if (ddt->ddt_flags & DDT_FLAG_FLAT) {
+				dde->dde_phys->ddp_flat.ddp_class_start =
+				    ddt_class_start();
+			}
 			ddt_sync_entry(ddt, dde, tx, txg);
 			ddt_free(ddt, dde);
 		}
@@ -2645,7 +2589,19 @@ prune_candidates_sync(void *arg, dmu_tx_t *tx)
 		    dpe->dpe_phys, DDT_PHYS_FLAT, &blk);
 
 		ddt_entry_t *dde = ddt_lookup_unique(ddt, &blk);
-		if (dde != NULL && !dde->dde_logged) {
+		/*
+		 * Prune only an entry that is exactly what the walk read.  The
+		 * walk reads the stored unique class, which lags the dedup log;
+		 * if the log flushed since, a candidate that gained a reference
+		 * is now found in the DUPLICATE class (ddt_lookup_unique() only
+		 * tries UNIQUE first, then falls back to every class), is not
+		 * dde_logged, and would be cleared -- freeing a block that is
+		 * still referenced.  Any added reference changes the phys.
+		 * Adapted from upstream OpenZFS PR #19223.
+		 */
+		if (dde != NULL && !dde->dde_logged &&
+		    memcmp(dde->dde_phys, dpe->dpe_phys,
+		    DDT_FLAT_PHYS_SIZE) == 0) {
 			ASSERT(dde->dde_loaded);
 			/*
 			 * Zero the physical, so we don't try to free DVAs
@@ -2690,8 +2646,10 @@ ddt_prune_entry(list_t *list, ddt_t *ddt, const ddt_key_t *ddk,
  *  (b) prune entries whose class_start is older than cutoff (cutoff != 0).
  *
  * Starting the bookmark at DDT_CLASS_UNIQUE restricts ddt_walk() to the
- * unique class.  Entries also present in the log are skipped (the on-disk
- * copy is stale).  Also called by zdb(8) to dump the age histogram.
+ * unique class.  The walk reads the stored entries only, which lag the
+ * log; prune_candidates_sync() rechecks each candidate against the live,
+ * logged and reloaded entry before pruning it.  Also called by zdb(8) to
+ * dump the age histogram.
  */
 void
 ddt_prune_walk(spa_t *spa, uint64_t cutoff, ddt_age_histo_t *histogram)
@@ -2714,7 +2672,7 @@ ddt_prune_walk(spa_t *spa, uint64_t cutoff, ddt_age_histo_t *histogram)
 	 * Stack-allocate a flat-sized ddt_entry_t for ddt_walk() to fill,
 	 * mirroring how zdb walks the table.
 	 */
-	uint8_t ddebuf[sizeof (ddt_entry_t) + DDT_PHYS_SIZE_MAX] = {0};
+	uint64_t ddebuf[DDT_ENTRY_BUF_WORDS] = { 0 };
 	ddt_entry_t *dde = (ddt_entry_t *)ddebuf;
 
 	if (pruning) {
@@ -2820,24 +2778,56 @@ ddt_total_entries(spa_t *spa)
 	return (ddo.ddo_count);
 }
 
+/* spa_active_ddt_prune is claimed with atomic_cas_uint() below. */
+CTASSERT(sizeof (boolean_t) == sizeof (uint_t));
+
 int
 ddt_prune_unique_entries(spa_t *spa, zpool_ddt_prune_unit_t unit,
     uint64_t amount)
 {
 	uint64_t cutoff;
 	uint64_t start_time = gethrtime();
+	uint64_t now = gethrestime_sec();
 
-	if (spa->spa_active_ddt_prune)
+	/*
+	 * Validate the request before claiming the prune, so that a rejected
+	 * request can never leave the prune marked active.  The percentage
+	 * range matches what zpool(8) enforces; through lzc_ddt_prune(), 0%
+	 * made the cutoff the current time and pruned nearly every unique
+	 * entry.
+	 */
+	switch (unit) {
+	case ZPOOL_DDT_PRUNE_PERCENTAGE:
+		if (amount == 0 || amount > 100)
+			return (SET_ERROR(EINVAL));
+		break;
+	case ZPOOL_DDT_PRUNE_AGE:
+		if (amount >= now)
+			return (SET_ERROR(EINVAL));
+		break;
+	default:
+		return (SET_ERROR(EINVAL));
+	}
+
+	/*
+	 * Claim the prune atomically, before any other work.  Testing the
+	 * mark and setting it later let two concurrent prunes both proceed;
+	 * the first to finish then cleared the mark while the other was still
+	 * pruning, and that prune's I/O lost the SCL_ZIO priority that
+	 * zio_vdev_io_start() gives an active prune.  From here on, every
+	 * exit must release the claim.
+	 */
+	if (atomic_cas_uint((volatile uint_t *)&spa->spa_active_ddt_prune,
+	    B_FALSE, B_TRUE) != B_FALSE)
 		return (SET_ERROR(EALREADY));
-	if (ddt_total_entries(spa) == 0)
-		return (0);
 
-	spa->spa_active_ddt_prune = B_TRUE;
+	if (ddt_total_entries(spa) == 0) {
+		spa->spa_active_ddt_prune = B_FALSE;
+		return (0);
+	}
 
 	zfs_dbgmsg("prune %llu %s", (u_longlong_t)amount,
 	    unit == ZPOOL_DDT_PRUNE_PERCENTAGE ? "%" : "seconds old or older");
-
-	uint64_t now = gethrestime_sec();
 
 	if (unit == ZPOOL_DDT_PRUNE_PERCENTAGE) {
 		ddt_age_histo_t histogram;
@@ -2847,6 +2837,20 @@ ddt_prune_unique_entries(spa_t *spa, zpool_ddt_prune_unit_t unit,
 		ddt_prune_walk(spa, 0, &histogram);
 
 		uint64_t target = (histogram.dah_entries * amount) / 100;
+
+		/*
+		 * The target rounds down to whole entries.  If it is zero --
+		 * e.g. 1% of fewer than 100 unique entries -- the bin search
+		 * below never runs, oldest stays 0, the cutoff becomes the
+		 * current time, and the walk prunes every unique entry
+		 * instead of none.  Prune nothing.  (Upstream OpenZFS #19264.)
+		 */
+		if (target == 0) {
+			zfs_dbgmsg("%s: prune target rounds to 0 entries",
+			    spa_name(spa));
+			spa->spa_active_ddt_prune = B_FALSE;
+			return (0);
+		}
 
 		/*
 		 * Figure out our cutoff date (i.e., which bins to prune from).
@@ -2863,15 +2867,9 @@ ddt_prune_unique_entries(spa_t *spa, zpool_ddt_prune_unit_t unit,
 			}
 		}
 		cutoff = now - oldest;
-	} else if (unit == ZPOOL_DDT_PRUNE_AGE) {
-		if (amount >= now) {
-			spa->spa_active_ddt_prune = B_FALSE;
-			return (SET_ERROR(EINVAL));
-		}
-		cutoff = now - amount;
 	} else {
-		spa->spa_active_ddt_prune = B_FALSE;
-		return (SET_ERROR(EINVAL));
+		/* ZPOOL_DDT_PRUNE_AGE; validated above */
+		cutoff = now - amount;
 	}
 
 	if (cutoff > 0 && !spa_shutting_down(spa) && !issig(JUSTLOOKING)) {

@@ -45,7 +45,7 @@
 #	- get/set_tunable (not save/restore_tunable).
 #	- zfs_dedup_log_txg_max and zfs_dedup_log_flush_entries_min are both
 #	  set, as in dedup_prune.ksh: the log must be fully drained before
-#	  pruning, because ddt_prune_walk() skips entries still on it.
+#	  pruning, because a prune never removes entries still on it.
 #	- no events_common.kshlib include (unused upstream).
 
 . $STF_SUITE/include/libtest.shlib
@@ -56,7 +56,7 @@ log_assert "DDT pruning followed by free does not leak space"
 
 # Flush the dedup log every txg, and lift the per-txg flush floor so a
 # flush pass drains the whole tree rather than the default ~200 entries.
-# ddt_prune_walk() skips any entry still on the log, so an undrained log
+# A prune never removes an entry still on the log, so an undrained log
 # silently makes the prune a no-op.
 typeset orig_txg_max=$(get_tunable zfs_dedup_log_txg_max)
 typeset orig_flush_min=$(get_tunable zfs_dedup_log_flush_entries_min)

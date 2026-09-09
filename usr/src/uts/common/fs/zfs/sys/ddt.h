@@ -308,6 +308,20 @@ struct ddt_entry {
 };
 
 /*
+ * Words of stack storage for a ddt_entry_t with room for the largest
+ * dde_phys[]:
+ *
+ *	uint64_t ddebuf[DDT_ENTRY_BUF_WORDS] = { 0 };
+ *	ddt_entry_t *dde = (ddt_entry_t *)ddebuf;
+ *
+ * A uint64_t array is aligned for ddt_entry_t, whose most strictly aligned
+ * members are pointers and 64-bit integers; a uint8_t array is not.
+ */
+#define	DDT_ENTRY_BUF_WORDS	\
+	((sizeof (ddt_entry_t) + DDT_PHYS_SIZE_MAX + sizeof (uint64_t) - 1) / \
+	sizeof (uint64_t))
+
+/*
  * A "lightweight" entry is a stack-friendly copy of an entry: the key, its
  * storage type/class, and a full (max-size) phys.  Used to pass entries
  * around (for example through the DDT log) without holding the live
@@ -445,10 +459,6 @@ extern void ddt_get_dedup_stats(spa_t *spa, ddt_stat_t *dds_total);
 
 extern uint64_t ddt_get_dedup_dspace(spa_t *spa);
 extern uint64_t ddt_get_pool_dedup_ratio(spa_t *spa);
-
-extern int ddt_ditto_copies_needed(ddt_t *ddt, ddt_entry_t *dde,
-    ddt_univ_phys_t *ddp_willref);
-extern int ddt_ditto_copies_present(ddt_entry_t *dde);
 
 extern size_t ddt_compress(void *src, uchar_t *dst, size_t s_len, size_t d_len);
 extern void ddt_decompress(uchar_t *src, void *dst, size_t s_len, size_t d_len);

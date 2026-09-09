@@ -2555,7 +2555,7 @@ static void
 dsl_scan_ddt(dsl_scan_t *scn, dmu_tx_t *tx)
 {
 	ddt_bookmark_t *ddb = &scn->scn_phys.scn_ddt_bookmark;
-	uint8_t ddebuf[sizeof (ddt_entry_t) + DDT_PHYS_SIZE_MAX] = {0};
+	uint64_t ddebuf[DDT_ENTRY_BUF_WORDS] = { 0 };
 	ddt_entry_t *dde = (ddt_entry_t *)ddebuf;
 	int error;
 	uint64_t n = 0;

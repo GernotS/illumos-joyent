@@ -215,6 +215,13 @@ ddt_histogram_empty(const ddt_histogram_t *ddh)
 void
 ddt_get_dedup_object_stats(spa_t *spa, ddt_object_t *ddo_total)
 {
+	/*
+	 * The totals are accumulated below, so start from zero rather than
+	 * trusting every caller to pass a zeroed struct; ddt_total_entries()
+	 * passed an uninitialized one.  Matches upstream OpenZFS.
+	 */
+	bzero(ddo_total, sizeof (*ddo_total));
+
 	/* Sum the statistics we cached in ddt_object_sync(). */
 	for (enum zio_checksum c = 0; c < ZIO_CHECKSUM_FUNCTIONS; c++) {
 		ddt_t *ddt = spa->spa_ddt[c];

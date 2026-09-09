@@ -57,9 +57,9 @@ log_assert "Verify DDT pruning correctly removes non-duplicate entries"
 # zfs_dedup_log_flush_entries_min raises the per-txg flush floor:
 # ddt_sync_flush_log() computes flush_min from it and then flush_max as
 # flush_min * 5 / 4, so with the default 200 only a couple of hundred
-# entries leave the log per txg.  ddt_prune_walk() skips any entry still
-# on the log (the stored copy is stale), so an undrained log makes prune
-# look like it did nothing.
+# entries leave the log per txg.  A prune never removes an entry that is
+# still on the log (prune_candidates_sync() skips logged entries), so an
+# undrained log makes prune look like it did nothing.
 typeset orig_txg_max=$(get_tunable zfs_dedup_log_txg_max)
 typeset orig_flush_min=$(get_tunable zfs_dedup_log_flush_entries_min)
 log_must set_tunable32 zfs_dedup_log_txg_max 1

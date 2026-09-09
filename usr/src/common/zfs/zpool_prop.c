@@ -116,8 +116,6 @@ zpool_prop_init(void)
 	/* default number properties */
 	zprop_register_number(ZPOOL_PROP_VERSION, "version", SPA_VERSION,
 	    PROP_DEFAULT, ZFS_TYPE_POOL, "<version>", "VERSION");
-	zprop_register_number(ZPOOL_PROP_DEDUPDITTO, "dedupditto", 0,
-	    PROP_DEFAULT, ZFS_TYPE_POOL, "<threshold (min 100)>", "DEDUPDITTO");
 	zprop_register_number(ZPOOL_PROP_ASHIFT, "ashift", 0, PROP_DEFAULT,
 	    ZFS_TYPE_POOL, "<ashift, 9-16, or 0=default>", "ASHIFT");
 
@@ -155,6 +153,12 @@ zpool_prop_init(void)
 	    PROP_ONETIME, ZFS_TYPE_POOL, "TNAME");
 	zprop_register_hidden(ZPOOL_PROP_MAXDNODESIZE, "maxdnodesize",
 	    PROP_TYPE_NUMBER, PROP_READONLY, ZFS_TYPE_POOL, "MAXDNODESIZE");
+	/*
+	 * No longer functional; kept hidden so setting it remains a
+	 * harmless no-op (see spa_prop_validate()).
+	 */
+	zprop_register_hidden(ZPOOL_PROP_DEDUPDITTO, "dedupditto",
+	    PROP_TYPE_NUMBER, PROP_DEFAULT, ZFS_TYPE_POOL, "DEDUPDITTO");
 }
 
 /*

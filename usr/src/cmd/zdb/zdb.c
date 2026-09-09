@@ -1239,7 +1239,7 @@ dump_dedup_ratio(const ddt_stat_t *dds)
 static void
 dump_ddt_log(ddt_t *ddt)
 {
-	uint8_t ddebuf[sizeof (ddt_entry_t) + DDT_PHYS_SIZE_MAX] = {0};
+	uint64_t ddebuf[DDT_ENTRY_BUF_WORDS] = { 0 };
 	ddt_entry_t *dde = (ddt_entry_t *)ddebuf;
 
 	for (int n = 0; n < 2; n++) {
@@ -1278,7 +1278,7 @@ static void
 dump_ddt(ddt_t *ddt, ddt_type_t type, ddt_class_t class)
 {
 	char name[DDT_NAMELEN];
-	uint8_t ddebuf[sizeof (ddt_entry_t) + DDT_PHYS_SIZE_MAX] = {0};
+	uint64_t ddebuf[DDT_ENTRY_BUF_WORDS] = { 0 };
 	ddt_entry_t *dde = (ddt_entry_t *)ddebuf;
 	uint64_t walk = 0;
 	dmu_object_info_t doi;
