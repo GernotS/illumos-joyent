@@ -20,6 +20,8 @@
  */
 /*
  * Copyright (c) 2008, 2010, Oracle and/or its affiliates. All rights reserved.
+ * Copyright 2014 by Saso Kiselkov. All rights reserved.
+ * Copyright 2026 Gernot Strasser
  */
 
 #ifndef _KERNEL
@@ -31,10 +33,48 @@
 
 #include <sys/types.h>
 #include <sys/kmem.h>
+#define	INLINE_CRYPTO_GET_PTRS
 #include <modes/modes.h>
 #include <sys/crypto/common.h>
 #include <sys/crypto/impl.h>
 #include <sys/byteorder.h>
+
+#if defined(__amd64)
+#include <sys/x86_archext.h>	/* x86_featureset, X86FSET_AES, is_x86_feature */
+#ifdef _KERNEL
+#include <sys/disp.h>		/* kpreempt_disable(), kpreempt_enable() */
+
+extern void gcm_accel_save(void *savestate);
+extern void gcm_accel_restore(void *savestate);
+
+static int intel_aes_instructions_present(void);
+
+#define	CCM_ACCEL_SAVESTATE \
+	uint8_t savestate[16*16+8] __attribute__((aligned(16)))
+#define	CCM_ACCEL_ENTER \
+	do { \
+		if (intel_aes_instructions_present()) { \
+			kpreempt_disable(); \
+			gcm_accel_save(savestate); \
+		} \
+	} while (0)
+#define	CCM_ACCEL_EXIT \
+	do { \
+		if (intel_aes_instructions_present()) { \
+			gcm_accel_restore(savestate); \
+			kpreempt_enable(); \
+		} \
+	} while (0)
+#else	/* !_KERNEL */
+#define	CCM_ACCEL_SAVESTATE
+#define	CCM_ACCEL_ENTER
+#define	CCM_ACCEL_EXIT
+#endif	/* _KERNEL */
+#else	/* !__amd64 */
+#define	CCM_ACCEL_SAVESTATE
+#define	CCM_ACCEL_ENTER
+#define	CCM_ACCEL_EXIT
+#endif	/* __amd64 */
 
 #if defined(__i386) || defined(__amd64)
 #define	UNALIGNED_POINTERS_PERMITTED
@@ -48,8 +88,8 @@ int
 ccm_mode_encrypt_contiguous_blocks(ccm_ctx_t *ctx, char *data, size_t length,
     crypto_data_t *out, size_t block_size,
     int (*encrypt_block)(const void *, const uint8_t *, uint8_t *),
-    void (*copy_block)(uint8_t *, uint8_t *),
-    void (*xor_block)(uint8_t *, uint8_t *))
+    void (*copy_block)(const uint8_t *, uint8_t *),
+    void (*xor_block)(const uint8_t *, uint8_t *))
 {
 	size_t remainder = length;
 	size_t need;
@@ -63,6 +103,8 @@ ccm_mode_encrypt_contiguous_blocks(ccm_ctx_t *ctx, char *data, size_t length,
 	size_t out_data_1_len;
 	uint64_t counter;
 	uint8_t *mac_buf;
+	int rv = CRYPTO_SUCCESS;
+	CCM_ACCEL_SAVESTATE;
 
 	if (length + ctx->ccm_remainder_len < block_size) {
 		/* accumulate bytes here and return */
@@ -74,6 +116,7 @@ ccm_mode_encrypt_contiguous_blocks(ccm_ctx_t *ctx, char *data, size_t length,
 		return (CRYPTO_SUCCESS);
 	}
 
+	CCM_ACCEL_ENTER;
 	lastp = (uint8_t *)ctx->ccm_cb;
 	if (out != NULL)
 		crypto_init_ptrs(out, &iov_or_mp, &offset);
@@ -85,8 +128,10 @@ ccm_mode_encrypt_contiguous_blocks(ccm_ctx_t *ctx, char *data, size_t length,
 		if (ctx->ccm_remainder_len > 0) {
 			need = block_size - ctx->ccm_remainder_len;
 
-			if (need > remainder)
-				return (CRYPTO_DATA_LEN_RANGE);
+			if (need > remainder) {
+				rv = CRYPTO_DATA_LEN_RANGE;
+				goto out;
+			}
 
 			bcopy(datap, &((uint8_t *)ctx->ccm_remainder)
 			    [ctx->ccm_remainder_len], need);
@@ -176,7 +221,8 @@ ccm_mode_encrypt_contiguous_blocks(ccm_ctx_t *ctx, char *data, size_t length,
 	} while (remainder > 0);
 
 out:
-	return (CRYPTO_SUCCESS);
+	CCM_ACCEL_EXIT;
+	return (rv);
 }
 
 void
@@ -206,7 +252,7 @@ calculate_ccm_mac(ccm_ctx_t *ctx, uint8_t *ccm_mac,
 int
 ccm_encrypt_final(ccm_ctx_t *ctx, crypto_data_t *out, size_t block_size,
     int (*encrypt_block)(const void *, const uint8_t *, uint8_t *),
-    void (*xor_block)(uint8_t *, uint8_t *))
+    void (*xor_block)(const uint8_t *, uint8_t *))
 {
 	uint8_t *lastp, *mac_buf, *ccm_mac_p, *macp;
 	void *iov_or_mp;
@@ -214,7 +260,8 @@ ccm_encrypt_final(ccm_ctx_t *ctx, crypto_data_t *out, size_t block_size,
 	uint8_t *out_data_1;
 	uint8_t *out_data_2;
 	size_t out_data_1_len;
-	int i;
+	int i, rv = CRYPTO_SUCCESS;
+	CCM_ACCEL_SAVESTATE;
 
 	if (out->cd_length < (ctx->ccm_remainder_len + ctx->ccm_mac_len)) {
 		return (CRYPTO_DATA_LEN_RANGE);
@@ -231,6 +278,7 @@ ccm_encrypt_final(ccm_ctx_t *ctx, crypto_data_t *out, size_t block_size,
 		return (CRYPTO_DATA_LEN_RANGE);
 	}
 
+	CCM_ACCEL_ENTER;
 	mac_buf = (uint8_t *)ctx->ccm_mac_buf;
 
 	if (ctx->ccm_remainder_len > 0) {
@@ -323,7 +371,8 @@ ccm_encrypt_final(ccm_ctx_t *ctx, crypto_data_t *out, size_t block_size,
 	}
 	out->cd_offset += ctx->ccm_remainder_len + ctx->ccm_mac_len;
 	ctx->ccm_remainder_len = 0;
-	return (CRYPTO_SUCCESS);
+	CCM_ACCEL_EXIT;
+	return (rv);
 }
 
 /*
@@ -359,8 +408,8 @@ int
 ccm_mode_decrypt_contiguous_blocks(ccm_ctx_t *ctx, char *data, size_t length,
     crypto_data_t *out, size_t block_size,
     int (*encrypt_block)(const void *, const uint8_t *, uint8_t *),
-    void (*copy_block)(uint8_t *, uint8_t *),
-    void (*xor_block)(uint8_t *, uint8_t *))
+    void (*copy_block)(const uint8_t *, uint8_t *),
+    void (*xor_block)(const uint8_t *, uint8_t *))
 {
 	size_t remainder = length;
 	size_t need;
@@ -370,6 +419,8 @@ ccm_mode_decrypt_contiguous_blocks(ccm_ctx_t *ctx, char *data, size_t length,
 	uint64_t counter;
 	size_t pt_len, total_decrypted_len, mac_len, pm_len, pd_len;
 	uint8_t *resultp;
+	int rv = CRYPTO_SUCCESS;
+	CCM_ACCEL_SAVESTATE;
 
 
 	pm_len = ctx->ccm_processed_mac_len;
@@ -403,6 +454,7 @@ ccm_mode_decrypt_contiguous_blocks(ccm_ctx_t *ctx, char *data, size_t length,
 		return (CRYPTO_ENCRYPTED_DATA_LEN_RANGE);
 	}
 
+	CCM_ACCEL_ENTER;
 	pt_len = ctx->ccm_data_len;
 
 	if (total_decrypted_len > pt_len) {
@@ -431,7 +483,7 @@ ccm_mode_decrypt_contiguous_blocks(ccm_ctx_t *ctx, char *data, size_t length,
 			ccm_decrypt_incomplete_block(ctx, encrypt_block);
 			ctx->ccm_processed_data_len += ctx->ccm_remainder_len;
 			ctx->ccm_remainder_len = 0;
-			return (CRYPTO_SUCCESS);
+			goto out;
 		} else {
 			/* let rest of the code handle this */
 			length = pt_part;
@@ -443,7 +495,7 @@ ccm_mode_decrypt_contiguous_blocks(ccm_ctx_t *ctx, char *data, size_t length,
 		    length);
 		ctx->ccm_remainder_len += length;
 		ctx->ccm_copy_to = datap;
-		return (CRYPTO_SUCCESS);
+		goto out;
 	}
 
 	do {
@@ -451,8 +503,10 @@ ccm_mode_decrypt_contiguous_blocks(ccm_ctx_t *ctx, char *data, size_t length,
 		if (ctx->ccm_remainder_len > 0) {
 			need = block_size - ctx->ccm_remainder_len;
 
-			if (need > remainder)
-				return (CRYPTO_ENCRYPTED_DATA_LEN_RANGE);
+			if (need > remainder) {
+				rv = CRYPTO_ENCRYPTED_DATA_LEN_RANGE;
+				goto out;
+			}
 
 			bcopy(datap, &((uint8_t *)ctx->ccm_remainder)
 			    [ctx->ccm_remainder_len], need);
@@ -520,18 +574,20 @@ ccm_mode_decrypt_contiguous_blocks(ccm_ctx_t *ctx, char *data, size_t length,
 	} while (remainder > 0);
 
 out:
-	return (CRYPTO_SUCCESS);
+	CCM_ACCEL_EXIT;
+	return (rv);
 }
 
 int
 ccm_decrypt_final(ccm_ctx_t *ctx, crypto_data_t *out, size_t block_size,
     int (*encrypt_block)(const void *, const uint8_t *, uint8_t *),
-    void (*copy_block)(uint8_t *, uint8_t *),
-    void (*xor_block)(uint8_t *, uint8_t *))
+    void (*copy_block)(const uint8_t *, uint8_t *),
+    void (*xor_block)(const uint8_t *, uint8_t *))
 {
 	size_t mac_remain, pt_len;
 	uint8_t *pt, *mac_buf, *macp, *ccm_mac_p;
 	int rv;
+	CCM_ACCEL_SAVESTATE;
 
 	pt_len = ctx->ccm_data_len;
 
@@ -539,6 +595,8 @@ ccm_decrypt_final(ccm_ctx_t *ctx, crypto_data_t *out, size_t block_size,
 	if (out->cd_length < pt_len) {
 		return (CRYPTO_DATA_LEN_RANGE);
 	}
+
+	CCM_ACCEL_ENTER;
 
 	pt = ctx->ccm_pt_buf;
 	mac_remain = ctx->ccm_processed_data_len;
@@ -570,14 +628,16 @@ ccm_decrypt_final(ccm_ctx_t *ctx, crypto_data_t *out, size_t block_size,
 	/* compare the input CCM MAC value with what we calculated */
 	if (bcmp(ctx->ccm_mac_input_buf, ccm_mac_p, ctx->ccm_mac_len)) {
 		/* They don't match */
-		return (CRYPTO_INVALID_MAC);
-	} else {
-		rv = crypto_put_output_data(ctx->ccm_pt_buf, out, pt_len);
-		if (rv != CRYPTO_SUCCESS)
-			return (rv);
-		out->cd_offset += pt_len;
+		rv = CRYPTO_INVALID_MAC;
+		goto out;
 	}
-	return (CRYPTO_SUCCESS);
+	rv = crypto_put_output_data(ctx->ccm_pt_buf, out, pt_len);
+	if (rv != CRYPTO_SUCCESS)
+		goto out;
+	out->cd_offset += pt_len;
+out:
+	CCM_ACCEL_EXIT;
+	return (rv);
 }
 
 int
@@ -770,7 +830,7 @@ int
 ccm_init(ccm_ctx_t *ctx, unsigned char *nonce, size_t nonce_len,
     unsigned char *auth_data, size_t auth_data_len, size_t block_size,
     int (*encrypt_block)(const void *, const uint8_t *, uint8_t *),
-    void (*xor_block)(uint8_t *, uint8_t *))
+    void (*xor_block)(const uint8_t *, uint8_t *))
 {
 	uint8_t *mac_buf, *datap, *ivp, *authp;
 	size_t remainder, processed;
@@ -854,10 +914,11 @@ int
 ccm_init_ctx(ccm_ctx_t *ccm_ctx, char *param, int kmflag,
     boolean_t is_encrypt_init, size_t block_size,
     int (*encrypt_block)(const void *, const uint8_t *, uint8_t *),
-    void (*xor_block)(uint8_t *, uint8_t *))
+    void (*xor_block)(const uint8_t *, uint8_t *))
 {
 	int rv;
 	CK_AES_CCM_PARAMS *ccm_param;
+	CCM_ACCEL_SAVESTATE;
 
 	if (param != NULL) {
 		ccm_param = (CK_AES_CCM_PARAMS *)(void *)param;
@@ -883,12 +944,15 @@ ccm_init_ctx(ccm_ctx_t *ccm_ctx, char *param, int kmflag,
 		goto out;
 	}
 
+	CCM_ACCEL_ENTER;
 	if (ccm_init(ccm_ctx, ccm_param->nonce, ccm_param->ulNonceSize,
 	    ccm_param->authData, ccm_param->ulAuthDataSize, block_size,
 	    encrypt_block, xor_block) != 0) {
+		CCM_ACCEL_EXIT;
 		rv = CRYPTO_MECHANISM_PARAM_INVALID;
 		goto out;
 	}
+	CCM_ACCEL_EXIT;
 	if (!is_encrypt_init && ccm_ctx->ccm_data_len != 0) {
 		/* allocate buffer for storing decrypted plaintext */
 #ifdef _KERNEL
@@ -904,6 +968,23 @@ ccm_init_ctx(ccm_ctx_t *ccm_ctx, char *param, int kmflag,
 out:
 	return (rv);
 }
+
+#if defined(__amd64) && defined(_KERNEL)
+/*
+ * Returns non-zero if Intel AES-NI instructions are available.
+ */
+static int
+intel_aes_instructions_present(void)
+{
+	static int	cached_result = -1;
+
+	if (cached_result == -1) {
+		cached_result =
+		    is_x86_feature(x86_featureset, X86FSET_AES);
+	}
+	return (cached_result);
+}
+#endif	/* defined(__amd64) && defined(_KERNEL) */
 
 void *
 ccm_alloc_ctx(int kmflag)

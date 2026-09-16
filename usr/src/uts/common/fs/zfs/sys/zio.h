@@ -24,8 +24,12 @@
  * Copyright 2011 Nexenta Systems, Inc.  All rights reserved.
  * Copyright (c) 2012, 2018 by Delphix. All rights reserved.
  * Copyright (c) 2013 by Saso Kiselkov. All rights reserved.
- * Copyright 2019, Joyent, Inc.
  * Copyright 2016 Toomas Soome <tsoome@me.com>
+ * Copyright (c) 2019, Allan Jude
+ * Copyright 2019, Joyent, Inc.
+ * Copyright (c) 2019, 2023, 2024, Klara Inc.
+ * Copyright (c) 2019-2020, Michael Niewöhner
+ * Copyright (c) 2024 by George Melikov. All rights reserved.
  */
 
 #ifndef _ZIO_H
@@ -323,6 +327,7 @@ typedef struct zio_prop {
 	uint8_t			zp_copies;
 	boolean_t		zp_dedup;
 	boolean_t		zp_dedup_verify;
+	boolean_t		zp_no_gang;
 	boolean_t		zp_nopwrite;
 	uint32_t		zp_zpl_smallblk;
 	boolean_t		zp_encrypt;
@@ -330,6 +335,7 @@ typedef struct zio_prop {
 	uint8_t			zp_salt[ZIO_DATA_SALT_LEN];
 	uint8_t			zp_iv[ZIO_DATA_IV_LEN];
 	uint8_t			zp_mac[ZIO_DATA_MAC_LEN];
+	dmu_object_type_t	zp_storage_type;
 } zio_prop_t;
 
 typedef struct zio_cksum_report zio_cksum_report_t;

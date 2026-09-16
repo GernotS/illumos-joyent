@@ -21,7 +21,8 @@
 
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2011, 2020 by Delphix. All rights reserved.
+ * Copyright (c) 2011, 2021 by Delphix. All rights reserved.
+ * Copyright 2026 Gernot Strasser
  * Copyright (c) 2017, Intel Corporation.
  * Copyright (c) 2019, Datto Inc. All rights reserved.
  */
@@ -33,6 +34,7 @@
 #include <sys/zio.h>
 #include <sys/dmu.h>
 #include <sys/space_map.h>
+#include <sys/metaslab.h>
 #include <sys/fs/zfs.h>
 
 #ifdef	__cplusplus
@@ -102,6 +104,9 @@ extern void vdev_xlate(vdev_t *vd, const range_seg64_t *logical_rs,
     range_seg64_t *physical_rs);
 
 extern void vdev_get_stats_ex(vdev_t *vd, vdev_stat_t *vs, vdev_stat_ex_t *vsx);
+
+extern metaslab_group_t *vdev_get_mg(vdev_t *vd, metaslab_class_t *mc);
+
 extern void vdev_get_stats(vdev_t *vd, vdev_stat_t *vs);
 extern void vdev_clear_stats(vdev_t *vd);
 extern void vdev_stat_update(zio_t *zio, uint64_t psize);
@@ -146,6 +151,7 @@ extern void vdev_queue_change_io_priority(zio_t *zio, zio_priority_t priority);
 
 extern int vdev_queue_length(vdev_t *vd);
 extern uint64_t vdev_queue_last_offset(vdev_t *vd);
+extern boolean_t vdev_queue_pool_busy(spa_t *spa);
 
 extern void vdev_config_dirty(vdev_t *vd);
 extern void vdev_config_clean(vdev_t *vd);

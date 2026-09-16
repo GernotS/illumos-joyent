@@ -21,6 +21,8 @@
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2012, 2017 by Delphix. All rights reserved.
+ * Copyright 2025 iXsystems, Inc.
+ * Copyright 2026 Gernot Strasser
  * Copyright (c) 2014 Integros [integros.com]
  * Copyright 2026 Oxide Computer Company
  */
@@ -470,6 +472,7 @@ extern void	zil_set_logbias(zilog_t *zilog, uint64_t slogval);
 extern void	zil_async_to_sync(zilog_t *zilog, uint64_t foid);
 
 extern int zil_replay_disable;
+extern int zil_special_is_slog;
 
 #ifdef	__cplusplus
 }

@@ -31,7 +31,7 @@
 .\" Copyright 2023 RackTop Systems, Inc.
 .\" Copyright 2026 Oxide Computer Company
 .\"
-.Dd January 30, 2026
+.Dd February 27, 2026
 .Dt ZFS 8
 .Os
 .Sh NAME
@@ -1387,12 +1387,12 @@ This feature must be enabled to be used
 .Pc .
 .It Sy special_small_blocks Ns = Ns Em size
 This value represents the threshold block size for including small file
-blocks into the special allocation class.
+or zvol blocks into the special allocation class.
 Blocks smaller than or equal to this value will be assigned to the special
 allocation class while greater blocks will be assigned to the regular class.
 Valid values are zero or a power of two from 512B up to 128K.
-The default size is 0 which means no small file blocks will be allocated in
-the special class.
+The default size is 0 which means no small file or zvol blocks
+will be allocated in the special class.
 .Pp
 Before setting this property, a special class vdev must be added to the
 pool.

@@ -21,7 +21,8 @@
 
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2011, 2018 by Delphix. All rights reserved.
+ * Copyright (c) 2011, 2021 by Delphix. All rights reserved.
+ * Copyright 2026 Gernot Strasser
  */
 
 #include <sys/zfs_context.h>
@@ -1161,7 +1162,11 @@ vdev_remove_complete(spa_t *spa)
 		vdev_metaslab_fini(vd);
 		metaslab_group_destroy(vd->vdev_mg);
 		vd->vdev_mg = NULL;
-		spa_log_sm_set_blocklimit(spa);
+	}
+	if (vd->vdev_log_mg != NULL) {
+		ASSERT0(vd->vdev_ms_count);
+		metaslab_group_destroy(vd->vdev_log_mg);
+		vd->vdev_log_mg = NULL;
 	}
 	ASSERT0(vd->vdev_stat.vs_space);
 	ASSERT0(vd->vdev_stat.vs_dspace);
@@ -1693,6 +1698,8 @@ spa_vdev_remove_cancel(spa_t *spa)
 		spa_config_enter(spa, SCL_ALLOC | SCL_VDEV, FTAG, RW_WRITER);
 		vdev_t *vd = vdev_lookup_top(spa, vdid);
 		metaslab_group_activate(vd->vdev_mg);
+		ASSERT(!vd->vdev_islog);
+		metaslab_group_activate(vd->vdev_log_mg);
 		spa_config_exit(spa, SCL_ALLOC | SCL_VDEV, FTAG);
 	}
 
@@ -1760,6 +1767,7 @@ spa_vdev_remove_log(vdev_t *vd, uint64_t *txg)
 
 	ASSERT(vd->vdev_islog);
 	ASSERT(vd == vd->vdev_top);
+	ASSERT3P(vd->vdev_log_mg, ==, NULL);
 	ASSERT(MUTEX_HELD(&spa_namespace_lock));
 
 	/*
@@ -1788,10 +1796,9 @@ spa_vdev_remove_log(vdev_t *vd, uint64_t *txg)
 
 	if (error != 0) {
 		metaslab_group_activate(mg);
+		ASSERT3P(vd->vdev_log_mg, ==, NULL);
 		return (error);
 	}
-	ASSERT0(vd->vdev_stat.vs_alloc);
-
 	/*
 	 * The evacuation succeeded.  Remove any remaining MOS metadata
 	 * associated with this vdev, and wait for these changes to sync.
@@ -1822,7 +1829,6 @@ spa_vdev_remove_log(vdev_t *vd, uint64_t *txg)
 	 * metaslab_class_histogram_verify()
 	 */
 	vdev_metaslab_fini(vd);
-	spa_log_sm_set_blocklimit(spa);
 
 	spa_history_log_internal(spa, "vdev remove", NULL,
 	    "%s vdev %llu (log) %s", spa_name(spa), vd->vdev_id,
@@ -1855,8 +1861,6 @@ spa_vdev_remove_log(vdev_t *vd, uint64_t *txg)
 	if (list_link_active(&vd->vdev_config_dirty_node))
 		vdev_config_clean(vd);
 
-	ASSERT0(vd->vdev_stat.vs_alloc);
-
 	/*
 	 * Clean up the vdev namespace.
 	 */
@@ -1879,32 +1883,49 @@ spa_vdev_remove_top_check(vdev_t *vd)
 	if (!spa_feature_is_enabled(spa, SPA_FEATURE_DEVICE_REMOVAL))
 		return (SET_ERROR(ENOTSUP));
 
-	/* available space in the pool's normal class */
-	uint64_t available = dsl_dir_space_available(
-	    spa->spa_dsl_pool->dp_root_dir, NULL, 0, B_TRUE);
-
 	metaslab_class_t *mc = vd->vdev_mg->mg_class;
 
-	/*
-	 * When removing a vdev from an allocation class that has
-	 * remaining vdevs, include available space from the class.
-	 */
-	if (mc != spa_normal_class(spa) && mc->mc_groups > 1) {
-		uint64_t class_avail = metaslab_class_get_space(mc) -
-		    metaslab_class_get_alloc(mc);
+	if (mc != spa_normal_class(spa)) {
+		/*
+		 * Removing a special or dedup vdev: its allocations are
+		 * relocated to the normal class (see the mc_groups <= 1
+		 * redirect in spa_vdev_copy_segment()), so the normal class
+		 * only needs room for the data actually allocated on this
+		 * vdev (vs_alloc) -- not the vdev's whole capacity.  Checking
+		 * vs_dspace here made it impossible to remove the last
+		 * special/dedup vdev whenever the normal class was not larger
+		 * than it.  If the class still has other vdevs, credit their
+		 * free space too.  Matches OpenZFS spa_vdev_remove_top_check().
+		 */
+		uint64_t available =
+		    metaslab_class_get_space(spa_normal_class(spa)) -
+		    metaslab_class_get_alloc(spa_normal_class(spa));
 
-		/* add class space, adjusted for overhead */
-		available += (class_avail * 94) / 100;
-	}
+		if (mc->mc_groups > 1) {
+			uint64_t class_avail = metaslab_class_get_space(mc) -
+			    metaslab_class_get_alloc(mc);
 
-	/*
-	 * There has to be enough free space to remove the
-	 * device and leave double the "slop" space (i.e. we
-	 * must leave at least 3% of the pool free, in addition to
-	 * the normal slop space).
-	 */
-	if (available < vd->vdev_stat.vs_dspace + spa_get_slop_space(spa)) {
-		return (SET_ERROR(ENOSPC));
+			/* add class space, adjusted for overhead */
+			available += (class_avail * 94) / 100;
+		}
+
+		if (available < vd->vdev_stat.vs_alloc)
+			return (SET_ERROR(ENOSPC));
+	} else {
+		/* available space in the pool's normal class */
+		uint64_t available = dsl_dir_space_available(
+		    spa->spa_dsl_pool->dp_root_dir, NULL, 0, B_TRUE);
+
+		/*
+		 * There has to be enough free space to remove the
+		 * device and leave double the "slop" space (i.e. we
+		 * must leave at least 3% of the pool free, in addition to
+		 * the normal slop space).
+		 */
+		if (available <
+		    vd->vdev_stat.vs_dspace + spa_get_slop_space(spa)) {
+			return (SET_ERROR(ENOSPC));
+		}
 	}
 
 	/*
@@ -1998,6 +2019,8 @@ spa_vdev_remove_top(vdev_t *vd, uint64_t *txg)
 	 */
 	metaslab_group_t *mg = vd->vdev_mg;
 	metaslab_group_passivate(mg);
+	ASSERT(!vd->vdev_islog);
+	metaslab_group_passivate(vd->vdev_log_mg);
 
 	/*
 	 * Wait for the youngest allocations and frees to sync,
@@ -2034,6 +2057,8 @@ spa_vdev_remove_top(vdev_t *vd, uint64_t *txg)
 
 	if (error != 0) {
 		metaslab_group_activate(mg);
+		ASSERT(!vd->vdev_islog);
+		metaslab_group_activate(vd->vdev_log_mg);
 		spa_async_request(spa, SPA_ASYNC_INITIALIZE_RESTART);
 		spa_async_request(spa, SPA_ASYNC_TRIM_RESTART);
 		spa_async_request(spa, SPA_ASYNC_AUTOTRIM_RESTART);

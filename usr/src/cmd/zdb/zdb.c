@@ -21,12 +21,14 @@
 
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2011, 2019 by Delphix. All rights reserved.
+ * Copyright (c) 2011, 2021 by Delphix. All rights reserved.
+ * Copyright 2025 iXsystems, Inc.
+ * Copyright 2026 Gernot Strasser
  * Copyright (c) 2014 Integros [integros.com]
  * Copyright 2017 Nexenta Systems, Inc.
  * Copyright (c) 2017, 2018 Lawrence Livermore National Security, LLC.
  * Copyright 2017 RackTop Systems.
- * Copyright 2026 Edgecast Cloud LLC.
+ * Copyright 2026 Gernot Strasser
  */
 
 #include <stdio.h>
@@ -64,6 +66,7 @@
 #include <sys/arc.h>
 #include <sys/arc_impl.h>
 #include <sys/ddt.h>
+#include <sys/ddt_impl.h>
 #include <sys/zfeature.h>
 #include <sys/abd.h>
 #include <sys/blkptr.h>
@@ -1189,20 +1192,25 @@ dump_log_spacemaps(spa_t *spa)
 static void
 dump_dde(const ddt_t *ddt, const ddt_entry_t *dde, uint64_t index)
 {
-	const ddt_phys_t *ddp = dde->dde_phys;
+	const ddt_univ_phys_t *ddp = dde->dde_phys;
 	const ddt_key_t *ddk = &dde->dde_key;
-	const char *types[4] = { "ditto", "single", "double", "triple" };
+	const char *types[5] =
+	    { "ditto", "single", "double", "triple", "flat" };
 	char blkbuf[BP_SPRINTF_LEN];
 	blkptr_t blk;
 
-	for (int p = 0; p < DDT_PHYS_TYPES; p++, ddp++) {
-		if (ddp->ddp_phys_birth == 0)
+	int nphys = DDT_NPHYS(ddt);
+	for (int p = 0; p < nphys; p++) {
+		ddt_phys_variant_t v = DDT_PHYS_VARIANT(ddt, p);
+		const ddt_phys_t *slot = DDT_PHYS_SLOT(
+		    (ddt_univ_phys_t *)ddp, v);
+		if (slot->ddp_phys_birth == 0)
 			continue;
-		ddt_bp_create(ddt->ddt_checksum, ddk, ddp, &blk);
+		ddt_bp_create(ddt->ddt_checksum, ddk, ddp, v, &blk);
 		snprintf_blkptr(blkbuf, sizeof (blkbuf), &blk);
 		(void) printf("index %llx refcnt %llu %s %s\n",
-		    (u_longlong_t)index, (u_longlong_t)ddp->ddp_refcnt,
-		    types[p], blkbuf);
+		    (u_longlong_t)index, (u_longlong_t)slot->ddp_refcnt,
+		    types[v], blkbuf);
 	}
 }
 
@@ -1229,10 +1237,49 @@ dump_dedup_ratio(const ddt_stat_t *dds)
 }
 
 static void
-dump_ddt(ddt_t *ddt, enum ddt_type type, enum ddt_class class)
+dump_ddt_log(ddt_t *ddt)
+{
+	uint8_t ddebuf[sizeof (ddt_entry_t) + DDT_PHYS_SIZE_MAX] = {0};
+	ddt_entry_t *dde = (ddt_entry_t *)ddebuf;
+
+	for (int n = 0; n < 2; n++) {
+		ddt_log_t *ddl = &ddt->ddt_log[n];
+
+		uint64_t count = avl_numnodes(&ddl->ddl_tree);
+		if (count == 0)
+			continue;
+
+		(void) printf(DMU_POOL_DDT_LOG ": %llu log entries\n",
+		    zio_checksum_table[ddt->ddt_checksum].ci_name, n,
+		    (u_longlong_t)count);
+
+		if (dump_opt['D'] < 4)
+			continue;
+
+		/*
+		 * illumos has no ddlwe-based dump_ddt_entry(); marshal each
+		 * frozen log entry into a stack ddt_entry_t and reuse
+		 * dump_dde(), the same way dump_ddt() handles ZAP entries.
+		 */
+		uint64_t index = 0;
+		for (ddt_log_entry_t *ddle = avl_first(&ddl->ddl_tree);
+		    ddle != NULL; ddle = AVL_NEXT(&ddl->ddl_tree, ddle)) {
+			dde->dde_key = ddle->ddle_key;
+			dde->dde_type = ddle->ddle_type;
+			dde->dde_class = ddle->ddle_class;
+			memcpy(dde->dde_phys, ddle->ddle_phys,
+			    DDT_PHYS_SIZE(ddt));
+			dump_dde(ddt, dde, index++);
+		}
+	}
+}
+
+static void
+dump_ddt(ddt_t *ddt, ddt_type_t type, ddt_class_t class)
 {
 	char name[DDT_NAMELEN];
-	ddt_entry_t dde;
+	uint8_t ddebuf[sizeof (ddt_entry_t) + DDT_PHYS_SIZE_MAX] = {0};
+	ddt_entry_t *dde = (ddt_entry_t *)ddebuf;
 	uint64_t walk = 0;
 	dmu_object_info_t doi;
 	uint64_t count, dspace, mspace;
@@ -1244,7 +1291,8 @@ dump_ddt(ddt_t *ddt, enum ddt_type type, enum ddt_class class)
 		return;
 	ASSERT(error == 0);
 
-	if ((count = ddt_object_count(ddt, type, class)) == 0)
+	error = ddt_object_count(ddt, type, class, &count);
+	if (error != 0 || count == 0)
 		return;
 
 	dspace = doi.doi_physical_blocks_512 << 9;
@@ -1261,6 +1309,8 @@ dump_ddt(ddt_t *ddt, enum ddt_type type, enum ddt_class class)
 	if (dump_opt['D'] < 3)
 		return;
 
+	(void) printf("%s: object=%llu\n", name,
+	    (u_longlong_t)ddt->ddt_object[type][class]);
 	zpool_dump_ddt(NULL, &ddt->ddt_histogram[type][class]);
 
 	if (dump_opt['D'] < 4)
@@ -1271,8 +1321,8 @@ dump_ddt(ddt_t *ddt, enum ddt_type type, enum ddt_class class)
 
 	(void) printf("%s contents:\n\n", name);
 
-	while ((error = ddt_object_walk(ddt, type, class, &walk, &dde)) == 0)
-		dump_dde(ddt, &dde, walk);
+	while ((error = ddt_object_walk(ddt, type, class, &walk, dde)) == 0)
+		dump_dde(ddt, dde, walk);
 
 	ASSERT3U(error, ==, ENOENT);
 
@@ -1290,12 +1340,13 @@ dump_all_ddts(spa_t *spa)
 
 	for (enum zio_checksum c = 0; c < ZIO_CHECKSUM_FUNCTIONS; c++) {
 		ddt_t *ddt = spa->spa_ddt[c];
-		for (enum ddt_type type = 0; type < DDT_TYPES; type++) {
-			for (enum ddt_class class = 0; class < DDT_CLASSES;
+		for (ddt_type_t type = 0; type < DDT_TYPES; type++) {
+			for (ddt_class_t class = 0; class < DDT_CLASSES;
 			    class++) {
 				dump_ddt(ddt, type, class);
 			}
 		}
+		dump_ddt_log(ddt);
 	}
 
 	ddt_get_dedup_stats(spa, &dds_total);
@@ -3438,16 +3489,19 @@ typedef struct zdb_blkstats {
 } zdb_blkstats_t;
 
 /*
- * Extended object types to report deferred frees and dedup auto-ditto blocks.
+ * Extended object types to report deferred frees, dedup auto-ditto blocks
+ * and pending DDT-log frees.
  */
 #define	ZDB_OT_DEFERRED	(DMU_OT_NUMTYPES + 0)
 #define	ZDB_OT_DITTO	(DMU_OT_NUMTYPES + 1)
-#define	ZDB_OT_OTHER	(DMU_OT_NUMTYPES + 2)
-#define	ZDB_OT_TOTAL	(DMU_OT_NUMTYPES + 3)
+#define	ZDB_OT_DDT_PENDING	(DMU_OT_NUMTYPES + 2)
+#define	ZDB_OT_OTHER	(DMU_OT_NUMTYPES + 3)
+#define	ZDB_OT_TOTAL	(DMU_OT_NUMTYPES + 4)
 
 static const char *zdb_ot_extname[] = {
 	"deferred free",
 	"dedup ditto",
+	"DDT pending free",
 	"other",
 	"Total",
 };
@@ -3460,6 +3514,7 @@ typedef struct zdb_cb {
 	uint64_t	zcb_checkpoint_size;
 	uint64_t	zcb_dedup_asize;
 	uint64_t	zcb_dedup_blocks;
+	uint64_t	zcb_ddt_extra_asize;
 	uint64_t	zcb_embedded_blocks[NUM_BP_EMBEDDED_TYPES];
 	uint64_t	zcb_embedded_histogram[NUM_BP_EMBEDDED_TYPES]
 	    [BPE_PAYLOAD_SIZE];
@@ -3483,14 +3538,143 @@ same_metaslab(spa_t *spa, uint64_t vdev, uint64_t off1, uint64_t off2)
 	return ((off1 >> ms_shift) == (off2 >> ms_shift));
 }
 
+/*
+ * Clean up DDT internal state.  ddt_lookup() adds entries to ddt_tree, which
+ * on a live pool are normally cleaned up during ddt_sync().  We can't do that
+ * here (and wouldn't want to anyway), but if we don't clean up the presence
+ * of stuff on ddt_tree will trip asserts in ddt_table_free().
+ *
+ * Also, dde_lead_zio[] was used as a per-phys "seen" flag in
+ * zdb_count_block (storing 0x1 instead of a real zio_t *), and ddt_free()
+ * asserts those slots are NULL.  Zero them before ddt_remove().
+ *
+ * Per upstream PR #15892 c61047c.
+ */
+static void
+zdb_ddt_cleanup(spa_t *spa)
+{
+	for (enum zio_checksum c = 0; c < ZIO_CHECKSUM_FUNCTIONS; c++) {
+		ddt_t *ddt = spa->spa_ddt[c];
+		if (ddt == NULL)
+			continue;
+
+		spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
+		ddt_enter(ddt);
+		ddt_entry_t *dde = avl_first(&ddt->ddt_tree), *next;
+		while (dde) {
+			next = AVL_NEXT(&ddt->ddt_tree, dde);
+			if (dde->dde_io != NULL) {
+				memset(&dde->dde_io->dde_lead_zio, 0,
+				    sizeof (dde->dde_io->dde_lead_zio));
+			}
+			ddt_remove(ddt, dde);
+			dde = next;
+		}
+		ddt_exit(ddt);
+		spa_config_exit(spa, SCL_CONFIG, FTAG);
+	}
+}
+
 static void
 zdb_count_block(zdb_cb_t *zcb, const blkptr_t *bp, dmu_object_type_t type)
 {
-	uint64_t refcnt = 0;
-
 	ASSERT(type < ZDB_OT_TOTAL);
 
+	/*
+	 * Controls whether we issue a claim for the block while counting
+	 * it.  We don't claim if -L was passed (leak tracking off).  We
+	 * also don't claim the second-or-later occurrence of a dedup'd
+	 * block because we already claimed it on first sight.
+	 */
+	boolean_t do_claim = !dump_opt['L'];
+
+	/*
+	 * Under FDT with variable copies, different BPs referencing the same
+	 * DDT entry can carry different numbers of DVAs (e.g. a copies=1 file
+	 * and a copies=3 file sharing a block).  The entry owns the full DVA
+	 * set, so claim/account that -- not whichever BP we happened to see
+	 * first.  claim_bp points at a canonical BP built from the entry.
+	 */
+	blkptr_t ddt_bp;
+	const blkptr_t *claim_bp = bp;
+
 	spa_config_enter(zcb->zcb_spa, SCL_CONFIG, FTAG, RW_READER);
+
+	/*
+	 * Dedup'd blocks: look up in DDT, consume a refcount, mark "seen"
+	 * via the dde_lead_zio[] slot (zdb never writes, so it can safely
+	 * repurpose those pointers as a per-phys boolean flag).  Second
+	 * and later sightings of the same dedup'd block are counted as
+	 * duplicates and don't get claimed again.
+	 *
+	 * Per upstream PR #15892 c61047c -- replaces the old
+	 * zdb_ddt_leak_init pre-population scheme, which was broken by
+	 * FDT/flat (one DDT entry can represent variable refcounts
+	 * depending on its layout).
+	 */
+	if (BP_GET_DEDUP(bp)) {
+		ddt_t *ddt = ddt_select(zcb->zcb_spa, bp);
+		ddt_enter(ddt);
+
+		ddt_entry_t *dde = ddt_lookup(ddt, bp, B_TRUE);
+		ddt_phys_variant_t v = (dde == NULL) ? DDT_PHYS_NONE :
+		    ddt_phys_select(ddt, dde, bp);
+
+		/*
+		 * The DDT may have no live phys for this BP: the block was
+		 * pruned by "zpool ddtprune" (the block stays referenced by
+		 * this BP, but its unique DDT entry is gone -- ddt_lookup()
+		 * with verify returns NULL), or a surviving entry matches by
+		 * DVA but is a later generation with a different birth
+		 * (ddt_phys_select() returns DDT_PHYS_NONE).  Prune only ever
+		 * targets UNIQUE (refcnt == 1) entries, so such a block has
+		 * exactly one reference; treat it as an ordinary block,
+		 * counted and claimed once by the code below.  Only do the
+		 * dedup refcount / "seen" accounting when a matching phys
+		 * exists.
+		 */
+		if (dde != NULL && v != DDT_PHYS_NONE) {
+			uint_t idx = DDT_PHYS_FOR_COPIES(ddt, v);
+			ddt_io_alloc(dde);
+			boolean_t seen = (boolean_t)(uintptr_t)
+			    dde->dde_io->dde_lead_zio[idx];
+			if (!seen) {
+				dde->dde_io->dde_lead_zio[idx] =
+				    (zio_t *)(uintptr_t)B_TRUE;
+				/*
+				 * First sighting: claim and account the
+				 * entry's whole DVA set.  Under FDT with
+				 * variable copies this BP may hold only a
+				 * subset (a copies=1 file sharing a block
+				 * with a copies=3 file), and later sightings
+				 * are skipped entirely -- so without this the
+				 * extra DVAs are never claimed and get
+				 * misreported as leaked.
+				 */
+				ddt_bp_create(ddt->ddt_checksum, &dde->dde_key,
+				    dde->dde_phys, v, &ddt_bp);
+				if (BP_GET_ASIZE(&ddt_bp) > BP_GET_ASIZE(bp)) {
+					zcb->zcb_ddt_extra_asize +=
+					    BP_GET_ASIZE(&ddt_bp) -
+					    BP_GET_ASIZE(bp);
+					claim_bp = &ddt_bp;
+				}
+			}
+
+			VERIFY3U(ddt_phys_total_refcnt(ddt, dde->dde_phys),
+			    >, 0);
+			ddt_phys_decref(dde->dde_phys, v);
+
+			if (seen) {
+				zcb->zcb_dedup_asize += BP_GET_ASIZE(bp);
+				zcb->zcb_dedup_blocks++;
+				do_claim = B_FALSE;
+			}
+		}
+
+		ddt_exit(ddt);
+	}
+
 
 	for (int i = 0; i < 4; i++) {
 		int l = (i < 2) ? BP_GET_LEVEL(bp) : ZB_TOTAL;
@@ -3572,32 +3756,12 @@ zdb_count_block(zdb_cb_t *zcb, const blkptr_t *bp, dmu_object_type_t type)
 		return;
 	}
 
-	if (dump_opt['L'])
+	if (!do_claim)
 		return;
 
-	if (BP_GET_DEDUP(bp)) {
-		ddt_t *ddt;
-		ddt_entry_t *dde;
-
-		ddt = ddt_select(zcb->zcb_spa, bp);
-		ddt_enter(ddt);
-		dde = ddt_lookup(ddt, bp, B_FALSE);
-
-		if (dde == NULL) {
-			refcnt = 0;
-		} else {
-			ddt_phys_t *ddp = ddt_phys_select(dde, bp);
-			ddt_phys_decref(ddp);
-			refcnt = ddp->ddp_refcnt;
-			if (ddt_phys_total_refcnt(dde) == 0)
-				ddt_remove(ddt, dde);
-		}
-		ddt_exit(ddt);
-	}
-
-	VERIFY3U(zio_wait(zio_claim(NULL, zcb->zcb_spa,
-	    refcnt ? 0 : spa_min_claim_txg(zcb->zcb_spa),
-	    bp, NULL, NULL, ZIO_FLAG_CANFAIL)), ==, 0);
+	VERIFY0(zio_wait(zio_claim(NULL, zcb->zcb_spa,
+	    spa_min_claim_txg(zcb->zcb_spa), claim_bp, NULL, NULL,
+	    ZIO_FLAG_CANFAIL)));
 }
 
 static void
@@ -3817,47 +3981,6 @@ load_unflushed_svr_segs_cb(spa_t *spa, space_map_entry_t *sme,
 		range_tree_remove(svr->svr_allocd_segs, offset, size);
 
 	return (0);
-}
-
-static void
-zdb_ddt_leak_init(spa_t *spa, zdb_cb_t *zcb)
-{
-	ddt_bookmark_t ddb;
-	ddt_entry_t dde;
-	int error;
-
-	ASSERT(!dump_opt['L']);
-
-	bzero(&ddb, sizeof (ddb));
-	while ((error = ddt_walk(spa, &ddb, &dde)) == 0) {
-		blkptr_t blk;
-		ddt_phys_t *ddp = dde.dde_phys;
-
-		if (ddb.ddb_class == DDT_CLASS_UNIQUE)
-			return;
-
-		ASSERT(ddt_phys_total_refcnt(&dde) > 1);
-
-		for (int p = 0; p < DDT_PHYS_TYPES; p++, ddp++) {
-			if (ddp->ddp_phys_birth == 0)
-				continue;
-			ddt_bp_create(ddb.ddb_checksum,
-			    &dde.dde_key, ddp, &blk);
-			if (p == DDT_PHYS_DITTO) {
-				zdb_count_block(zcb, &blk, ZDB_OT_DITTO);
-			} else {
-				zcb->zcb_dedup_asize +=
-				    BP_GET_ASIZE(&blk) * (ddp->ddp_refcnt - 1);
-				zcb->zcb_dedup_blocks++;
-			}
-		}
-		ddt_t *ddt = spa->spa_ddt[ddb.ddb_checksum];
-		ddt_enter(ddt);
-		VERIFY(ddt_lookup(ddt, &blk, B_TRUE) != NULL);
-		ddt_exit(ddt);
-	}
-
-	ASSERT(error == ENOENT);
 }
 
 /* ARGSUSED */
@@ -4290,6 +4413,7 @@ zdb_leak_init_prepare_indirect_vdevs(spa_t *spa, zdb_cb_t *zcb)
 		 * metaslabs.  We want to set them up for
 		 * zio_claim().
 		 */
+		vdev_metaslab_group_create(vd);
 		VERIFY0(vdev_metaslab_init(vd, 0));
 
 #if defined(DEBUG)
@@ -4330,6 +4454,8 @@ zdb_leak_init(spa_t *spa, zdb_cb_t *zcb)
 	 */
 	spa->spa_normal_class->mc_ops = &zdb_metaslab_ops;
 	spa->spa_log_class->mc_ops = &zdb_metaslab_ops;
+	spa->spa_embedded_log_class->mc_ops = &zdb_metaslab_ops;
+	spa->spa_special_embedded_log_class->mc_ops = &zdb_metaslab_ops;
 
 	zcb->zcb_vd_obsolete_counts =
 	    umem_zalloc(rvd->vdev_children * sizeof (uint32_t *),
@@ -4376,9 +4502,6 @@ zdb_leak_init(spa_t *spa, zdb_cb_t *zcb)
 		    increment_indirect_mapping_cb, zcb, NULL);
 	}
 
-	spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
-	zdb_ddt_leak_init(spa, zcb);
-	spa_config_exit(spa, SCL_CONFIG, FTAG);
 }
 
 static boolean_t
@@ -4462,9 +4585,6 @@ zdb_leak_fini(spa_t *spa, zdb_cb_t *zcb)
 	vdev_t *rvd = spa->spa_root_vdev;
 	for (unsigned c = 0; c < rvd->vdev_children; c++) {
 		vdev_t *vd = rvd->vdev_child[c];
-#if DEBUG
-		metaslab_group_t *mg = vd->vdev_mg;
-#endif
 
 		if (zcb->zcb_vd_obsolete_counts[c] != NULL) {
 			leaks |= zdb_check_for_obsolete_leaks(vd, zcb);
@@ -4472,7 +4592,11 @@ zdb_leak_fini(spa_t *spa, zdb_cb_t *zcb)
 
 		for (uint64_t m = 0; m < vd->vdev_ms_count; m++) {
 			metaslab_t *msp = vd->vdev_ms[m];
-			ASSERT3P(mg, ==, msp->ms_group);
+			ASSERT3P(msp->ms_group, ==, (msp->ms_group->mg_class ==
+			    spa_embedded_log_class(spa) ||
+			    msp->ms_group->mg_class ==
+			    spa_special_embedded_log_class(spa)) ?
+			    vd->vdev_log_mg : vd->vdev_mg);
 
 			/*
 			 * ms_allocatable has been overloaded
@@ -4524,6 +4648,84 @@ count_block_cb(void *arg, const blkptr_t *bp, dmu_tx_t *tx)
 	return (0);
 }
 
+/*
+ * Claim space held by DDT log entries whose phys will be freed the next time
+ * the log is flushed.
+ *
+ * With fast dedup, dropping the last reference to a deduped block does not
+ * free its DVAs immediately.  The entry is appended to the DDT log with a
+ * zero refcount, and ddt_sync_flush_entry() issues the frees later, when that
+ * log is flushed.  Between those two points the space is legitimately
+ * allocated but reachable from no BP, so the traversal below never claims it
+ * and we would report it as leaked.  This is the same situation as the
+ * deferred-free bpobjs handled above, and is handled the same way, but
+ * counted in its own "DDT pending free" bucket (as upstream OpenZFS
+ * db78d8b07 does) so it can be told apart in "zdb -bb" output.
+ *
+ * The selection here mirrors ddt_sync_flush_entry() exactly: a phys is going
+ * to be freed if it has a birth txg and either it is an obsolete (ditto) slot
+ * -- freed regardless of refcount -- or its refcount has reached zero.  A
+ * phys with references is left alone: some BP points at it, so the traversal
+ * claims it (and zdb_count_block() claims the entry's whole DVA set on first
+ * sighting).  Claiming it here as well would be a double allocation.
+ *
+ * A key lives in at most one of the two logs -- ddt_sync_table_log() removes
+ * it from the flushing log when re-logging it into the active one -- so
+ * walking both cannot double-claim.
+ */
+static void
+zdb_claim_ddt_log(spa_t *spa, zdb_cb_t *zcb)
+{
+	for (enum zio_checksum c = 0; c < ZIO_CHECKSUM_FUNCTIONS; c++) {
+		ddt_t *ddt = spa->spa_ddt[c];
+
+		if (ddt == NULL)
+			continue;
+
+		ddt_enter(ddt);
+
+		for (int n = 0; n < 2; n++) {
+			ddt_log_t *ddl = &ddt->ddt_log[n];
+
+			for (ddt_log_entry_t *ddle = avl_first(&ddl->ddl_tree);
+			    ddle != NULL;
+			    ddle = AVL_NEXT(&ddl->ddl_tree, ddle)) {
+				ddt_univ_phys_t *ddp =
+				    (ddt_univ_phys_t *)ddle->ddle_phys;
+
+				for (int p = 0; p < DDT_NPHYS(ddt); p++) {
+					ddt_phys_variant_t v =
+					    DDT_PHYS_VARIANT(ddt, p);
+					blkptr_t bp;
+
+					if (ddt_phys_birth(ddp, v) == 0)
+						continue;
+					if (!DDT_PHYS_IS_DITTO(ddt, p) &&
+					    ddt_phys_refcnt(ddp, v) != 0)
+						continue;
+
+					ddt_bp_create(ddt->ddt_checksum,
+					    &ddle->ddle_key, ddp, v, &bp);
+
+					if (dump_opt['b'] >= 5) {
+						char blkbuf[BP_SPRINTF_LEN];
+						snprintf_blkptr(blkbuf,
+						    sizeof (blkbuf), &bp);
+						(void) printf("[%s] %s\n",
+						    "DDT pending free",
+						    blkbuf);
+					}
+
+					zdb_count_block(zcb, &bp,
+					    ZDB_OT_DDT_PENDING);
+				}
+			}
+		}
+
+		ddt_exit(ddt);
+	}
+}
+
 static int
 dump_block_stats(spa_t *spa)
 {
@@ -4571,6 +4773,11 @@ dump_block_stats(spa_t *spa)
 
 	zdb_claim_removing(spa, &zcb);
 
+	/*
+	 * Claim DDT log entries whose phys are pending free (see above).
+	 */
+	zdb_claim_ddt_log(spa, &zcb);
+
 	if (spa_feature_is_active(spa, SPA_FEATURE_ASYNC_DESTROY)) {
 		VERIFY3U(0, ==, bptree_iterate(spa->spa_meta_objset,
 		    spa->spa_dsl_pool->dp_bptree_obj, B_FALSE, count_block_cb,
@@ -4583,6 +4790,10 @@ dump_block_stats(spa_t *spa)
 	zcb.zcb_totalasize = metaslab_class_get_alloc(spa_normal_class(spa));
 	zcb.zcb_totalasize += metaslab_class_get_alloc(spa_special_class(spa));
 	zcb.zcb_totalasize += metaslab_class_get_alloc(spa_dedup_class(spa));
+	zcb.zcb_totalasize +=
+	    metaslab_class_get_alloc(spa_embedded_log_class(spa));
+	zcb.zcb_totalasize +=
+	    metaslab_class_get_alloc(spa_special_embedded_log_class(spa));
 	zcb.zcb_start = zcb.zcb_lastprint = gethrtime();
 	err = traverse_pool(spa, 0, flags, zdb_blkptr_cb, &zcb);
 
@@ -4629,11 +4840,14 @@ dump_block_stats(spa_t *spa)
 
 	total_alloc = norm_alloc +
 	    metaslab_class_get_alloc(spa_log_class(spa)) +
+	    metaslab_class_get_alloc(spa_embedded_log_class(spa)) +
+	    metaslab_class_get_alloc(spa_special_embedded_log_class(spa)) +
 	    metaslab_class_get_alloc(spa_special_class(spa)) +
 	    metaslab_class_get_alloc(spa_dedup_class(spa)) +
 	    get_unflushed_alloc_space(spa);
 	total_found = tzb->zb_asize - zcb.zcb_dedup_asize +
-	    zcb.zcb_removing_size + zcb.zcb_checkpoint_size;
+	    zcb.zcb_ddt_extra_asize + zcb.zcb_removing_size +
+	    zcb.zcb_checkpoint_size;
 
 	if (total_found == total_alloc && !dump_opt['L']) {
 		(void) printf("\n\tNo leaks (block sum matches space"
@@ -4693,6 +4907,28 @@ dump_block_stats(spa_t *spa)
 
 		(void) printf("\t%-16s %14llu     used: %5.2f%%\n",
 		    "Dedup class", (u_longlong_t)alloc,
+		    100.0 * alloc / space);
+	}
+
+	if (spa_embedded_log_class(spa)->mc_rotor != NULL) {
+		uint64_t alloc = metaslab_class_get_alloc(
+		    spa_embedded_log_class(spa));
+		uint64_t space = metaslab_class_get_space(
+		    spa_embedded_log_class(spa));
+
+		(void) printf("\t%-16s %14llu     used: %5.2f%%\n",
+		    "Embedded log class", (u_longlong_t)alloc,
+		    100.0 * alloc / space);
+	}
+
+	if (spa_special_embedded_log_class(spa)->mc_rotor != NULL) {
+		uint64_t alloc = metaslab_class_get_alloc(
+		    spa_special_embedded_log_class(spa));
+		uint64_t space = metaslab_class_get_space(
+		    spa_special_embedded_log_class(spa));
+
+		(void) printf("\t%-16s %14llu     used: %5.2f%%\n",
+		    "Special embedded log", (u_longlong_t)alloc,
 		    100.0 * alloc / space);
 	}
 
@@ -5614,14 +5850,31 @@ dump_mos_leaks(spa_t *spa)
 
 	mos_leak_vdev(spa->spa_root_vdev);
 
-	for (uint64_t class = 0; class < DDT_CLASSES; class++) {
+	for (uint64_t cksum = 0; cksum < ZIO_CHECKSUM_FUNCTIONS; cksum++) {
+		ddt_t *ddt = spa->spa_ddt[cksum];
+		if (ddt == NULL)
+			continue;
+
+		/* per-(type, class) DDT store objects */
 		for (uint64_t type = 0; type < DDT_TYPES; type++) {
-			for (uint64_t cksum = 0;
-			    cksum < ZIO_CHECKSUM_FUNCTIONS; cksum++) {
-				ddt_t *ddt = spa->spa_ddt[cksum];
+			for (uint64_t class = 0; class < DDT_CLASSES;
+			    class++) {
 				mos_obj_refd(ddt->ddt_object[type][class]);
 			}
 		}
+
+		/*
+		 * FDT container.  zdb otherwise sees this as a leaked
+		 * DMU_OT_DDT_ZAP since it's not referenced via any of
+		 * zdb's hard-coded MOS-walk roots.  Without this line
+		 * an FDT-enabled pool reports two phantom leaks per
+		 * dedup checksum that has ever been used.
+		 */
+		mos_obj_refd(ddt->ddt_dir_object);
+
+		/* FDT log objects (objids from in-memory ddt_log[]). */
+		mos_obj_refd(ddt->ddt_log[0].ddl_object);
+		mos_obj_refd(ddt->ddt_log[1].ddl_object);
 	}
 
 	/*
@@ -6615,6 +6868,9 @@ main(int argc, char **argv)
 		if (!target_is_spa)
 			free(checkpoint_target);
 	}
+
+	if (spa != NULL)
+		zdb_ddt_cleanup(spa);
 
 	if (os != NULL)
 		close_objset(os, FTAG);

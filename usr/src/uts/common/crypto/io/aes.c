@@ -20,6 +20,7 @@
  */
 /*
  * Copyright (c) 2003, 2010, Oracle and/or its affiliates. All rights reserved.
+ * Copyright 2014 by Saso Kiselkov. All rights reserved.
  * Copyright 2017 Nexenta Systems, Inc.  All rights reserved.
  * Copyright 2019 Joyent, Inc.
  * Copyright 2023 RackTop Systems, Inc.
@@ -97,7 +98,7 @@ static crypto_mech_info_t aes_mech_info_tab[] = {
 	{SUN_CKM_AES_GMAC, AES_GMAC_MECH_INFO_TYPE,
 	    CRYPTO_FG_ENCRYPT | CRYPTO_FG_ENCRYPT_ATOMIC |
 	    CRYPTO_FG_DECRYPT | CRYPTO_FG_DECRYPT_ATOMIC |
-	    CRYPTO_FG_MAC | CRYPTO_FG_MAC_ATOMIC |
+	    CRYPTO_FG_MAC | CRYPTO_FG_MAC_ATOMIC,
 	    AES_MIN_KEY_BYTES, AES_MAX_KEY_BYTES, CRYPTO_KEYSIZE_UNIT_IN_BYTES}
 };
 
@@ -517,10 +518,13 @@ aes_encrypt(crypto_ctx_t *ctx, crypto_data_t *plaintext,
 		    AES_BLOCK_LEN, aes_encrypt_block, aes_xor_block);
 		aes_ctx->ac_remainder_len = 0;
 	} else if (aes_ctx->ac_flags & CMAC_MODE) {
+		AES_ACCEL_SAVESTATE(savestate);
 		/* cmac_update doesn't store data */
 		ciphertext->cd_length = saved_length;
+		aes_accel_enter(savestate);
 		ret = cmac_mode_final((cbc_ctx_t *)aes_ctx, ciphertext,
 		    aes_encrypt_block, aes_xor_block);
+		aes_accel_exit(savestate);
 		aes_ctx->ac_remainder_len = 0;
 	}
 
@@ -620,7 +624,8 @@ aes_decrypt(crypto_ctx_t *ctx, crypto_data_t *ciphertext,
 		plaintext->cd_length = saved_length - plaintext->cd_length;
 
 		ret = gcm_decrypt_final((gcm_ctx_t *)aes_ctx, plaintext,
-		    AES_BLOCK_LEN, aes_encrypt_block, aes_xor_block);
+		    AES_BLOCK_LEN, aes_encrypt_block, aes_copy_block,
+		    aes_xor_block, aes_ctr_mode);
 		if (ret == CRYPTO_SUCCESS) {
 			if (plaintext != ciphertext) {
 				plaintext->cd_length =
@@ -734,8 +739,14 @@ aes_decrypt_update(crypto_ctx_t *ctx, crypto_data_t *ciphertext,
 
 	/*
 	 * Adjust the number of bytes that will hold the plaintext (out_len).
-	 * CCM, GCM, and GMAC mechanisms never return plaintext for update
-	 * operations, so we set out_len to 0 for those.
+	 * The CCM mechanism never returns plaintext for update operations,
+	 * so we set out_len to 0 for it.
+	 *
+	 * GCM (and GMAC, which shares the GCM decrypt path) emits plaintext
+	 * incrementally during update calls, withholding only the trailing
+	 * bytes (potential auth tag plus a partial block) in gcm_last_input.
+	 * Ask the GCM code exactly how many bytes this update call will
+	 * produce so the output buffer size check below remains effective.
 	 *
 	 * CTR mode does not accumulate any ciphertext across xx_decrypt
 	 * calls, and always outputs as many bytes of plaintext as
@@ -745,8 +756,11 @@ aes_decrypt_update(crypto_ctx_t *ctx, crypto_data_t *ciphertext,
 	 * we round out_len down to the closest multiple of AES_BLOCK_LEN.
 	 */
 	out_len = aes_ctx->ac_remainder_len + ciphertext->cd_length;
-	if ((aes_ctx->ac_flags & (CCM_MODE|GCM_MODE|GMAC_MODE)) != 0) {
+	if ((aes_ctx->ac_flags & CCM_MODE) != 0) {
 		out_len = 0;
+	} else if ((aes_ctx->ac_flags & (GCM_MODE|GMAC_MODE)) != 0) {
+		out_len = gcm_decrypt_update_out_len((gcm_ctx_t *)aes_ctx,
+		    ciphertext->cd_length, AES_BLOCK_LEN);
 	} else if ((aes_ctx->ac_flags & CTR_MODE) == 0) {
 		out_len &= ~(AES_BLOCK_LEN - 1);
 	}
@@ -834,8 +848,11 @@ aes_encrypt_final(crypto_ctx_t *ctx, crypto_data_t *data,
 		data->cd_length = data->cd_offset - saved_offset;
 		data->cd_offset = saved_offset;
 	} else if (aes_ctx->ac_flags & CMAC_MODE) {
+		AES_ACCEL_SAVESTATE(savestate);
+		aes_accel_enter(savestate);
 		ret = cmac_mode_final((cbc_ctx_t *)aes_ctx, data,
 		    aes_encrypt_block, aes_xor_block);
+		aes_accel_exit(savestate);
 		if (ret != CRYPTO_SUCCESS)
 			return (ret);
 		data->cd_length = AES_BLOCK_LEN;
@@ -890,7 +907,8 @@ aes_decrypt_final(crypto_ctx_t *ctx, crypto_data_t *data,
 	 * accumulate ciphertext across update calls with CTR mode).
 	 */
 	if (aes_ctx->ac_remainder_len > 0 &&
-	    (aes_ctx->ac_flags & CTR_MODE) == 0) {
+	    (aes_ctx->ac_flags &
+	    (CTR_MODE|CCM_MODE|GCM_MODE|GMAC_MODE)) == 0) {
 		return (CRYPTO_ENCRYPTED_DATA_LEN_RANGE);
 	}
 
@@ -924,21 +942,21 @@ aes_decrypt_final(crypto_ctx_t *ctx, crypto_data_t *data,
 		}
 	} else if (aes_ctx->ac_flags & (GCM_MODE|GMAC_MODE)) {
 		/*
-		 * This is where all the plaintext is returned, make sure
-		 * the plaintext buffer is big enough
+		 * Check to make sure there is enough space for remaining
+		 * plaintext.
 		 */
 		gcm_ctx_t *ctx = (gcm_ctx_t *)aes_ctx;
-		size_t pt_len = ctx->gcm_processed_data_len - ctx->gcm_tag_len;
+		size_t pt_len = ctx->gcm_last_input_fill - ctx->gcm_tag_len;
 
 		if (data->cd_length < pt_len) {
 			data->cd_length = pt_len;
 			return (CRYPTO_BUFFER_TOO_SMALL);
 		}
-
 		saved_offset = data->cd_offset;
 		saved_length = data->cd_length;
 		ret = gcm_decrypt_final((gcm_ctx_t *)aes_ctx, data,
-		    AES_BLOCK_LEN, aes_encrypt_block, aes_xor_block);
+		    AES_BLOCK_LEN, aes_encrypt_block, aes_copy_block,
+		    aes_xor_block, aes_ctr_mode);
 		if (ret == CRYPTO_SUCCESS) {
 			data->cd_length = data->cd_offset - saved_offset;
 		} else {
@@ -950,7 +968,6 @@ aes_decrypt_final(crypto_ctx_t *ctx, crypto_data_t *data,
 			return (ret);
 		}
 	}
-
 
 	if ((aes_ctx->ac_flags & (CTR_MODE|CCM_MODE|GCM_MODE|GMAC_MODE)) == 0) {
 		data->cd_length = 0;
@@ -1090,13 +1107,17 @@ aes_encrypt_atomic(crypto_provider_handle_t provider,
 			 */
 			ASSERT3U(aes_ctx.ac_remainder_len, ==, 0);
 			break;
-		case AES_CMAC_MECH_INFO_TYPE:
+		case AES_CMAC_MECH_INFO_TYPE: {
+			AES_ACCEL_SAVESTATE(savestate);
+			aes_accel_enter(savestate);
 			ret = cmac_mode_final((cbc_ctx_t *)&aes_ctx,
 			    ciphertext, aes_encrypt_block,
 			    aes_xor_block);
+			aes_accel_exit(savestate);
 			if (ret != CRYPTO_SUCCESS)
 				goto out;
 			break;
+		}
 		default:
 			ASSERT3U(aes_ctx.ac_remainder_len, ==, 0);
 			break;
@@ -1231,7 +1252,7 @@ aes_decrypt_atomic(crypto_provider_handle_t provider,
 		case AES_GMAC_MECH_INFO_TYPE:
 			ret = gcm_decrypt_final((gcm_ctx_t *)&aes_ctx,
 			    plaintext, AES_BLOCK_LEN, aes_encrypt_block,
-			    aes_xor_block);
+			    aes_copy_block, aes_xor_block, aes_ctr_mode);
 			ASSERT3U(aes_ctx.ac_remainder_len, ==, 0);
 			if ((ret == CRYPTO_SUCCESS) &&
 			    (ciphertext != plaintext)) {
@@ -1269,11 +1290,6 @@ out:
 	if (aes_ctx.ac_flags & CCM_MODE) {
 		if (aes_ctx.ac_pt_buf != NULL) {
 			kmem_free(aes_ctx.ac_pt_buf, aes_ctx.ac_data_len);
-		}
-	} else if (aes_ctx.ac_flags & (GCM_MODE|GMAC_MODE)) {
-		if (((gcm_ctx_t *)&aes_ctx)->gcm_pt_buf != NULL) {
-			kmem_free(((gcm_ctx_t *)&aes_ctx)->gcm_pt_buf,
-			    ((gcm_ctx_t *)&aes_ctx)->gcm_pt_buf_len);
 		}
 	}
 
@@ -1388,8 +1404,22 @@ aes_common_init_ctx(aes_ctx_t *aes_ctx, crypto_spi_ctx_template_t *template,
 			return (CRYPTO_MECHANISM_PARAM_INVALID);
 		}
 		pp = (CK_AES_CTR_PARAMS *)(void *)mechanism->cm_param;
+		/*
+		 * ctr_init_ctx() primes the keystream by encrypting the
+		 * initial counter block through aes_encrypt_block().  On x86
+		 * that reaches the AES-NI aes_encrypt_intel() path, which uses
+		 * %xmm and traps #nm (Device not available) unless CR0.TS has
+		 * been cleared first.  Unlike ccm_init_ctx()/gcm_init_ctx()/
+		 * gmac_init_ctx(), which bracket their own init-time block
+		 * encrypts, ctr_init_ctx() is generic modes-layer code and
+		 * issues the cipher call unguarded, so the FPU context must be
+		 * established here around the call.
+		 */
+		AES_ACCEL_SAVESTATE(savestate);
+		aes_accel_enter(savestate);
 		rv = ctr_init_ctx((ctr_ctx_t *)aes_ctx, pp->ulCounterBits,
 		    pp->cb, aes_encrypt_block, aes_copy_block);
+		aes_accel_exit(savestate);
 		break;
 	}
 	case AES_CCM_MECH_INFO_TYPE:

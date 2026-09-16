@@ -77,14 +77,14 @@ $if _ELF64
 	spa_feature_table		{
 					  ASSERT = {
 						  TYPE = OBJECT;
-						  SIZE = addrsize[162];
+						  SIZE = addrsize[168];
 						};
 					};
 $elif _ELF32
 	spa_feature_table		{
 					  ASSERT = {
 						  TYPE = OBJECT;
-						  SIZE = addrsize[189];
+						  SIZE = addrsize[196];
 						};
 					};
 $else
@@ -254,8 +254,10 @@ $endif
 	zpool_import_props;
 	zpool_import_status;
 	zpool_in_use;
+	zpool_ddt_prune;
 	zpool_initialize;
 	zpool_initialize_wait;
+	zpool_prefetch;
 	zpool_is_bootable;
 	zpool_iter;
 	zpool_label_disk;

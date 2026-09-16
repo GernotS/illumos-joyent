@@ -77,6 +77,8 @@ int	blockif_is_ro(struct blockif_ctxt *bc);
 int	blockif_candelete(struct blockif_ctxt *bc);
 #ifndef __FreeBSD__
 int	blockif_set_wce(struct blockif_ctxt *bc, int enable);
+int	blockif_wce_toggleable(struct blockif_ctxt *bc);
+int	blockif_flush_sync(struct blockif_ctxt *bc);
 #endif
 int	blockif_read(struct blockif_ctxt *bc, struct blockif_req *breq);
 int	blockif_write(struct blockif_ctxt *bc, struct blockif_req *breq);

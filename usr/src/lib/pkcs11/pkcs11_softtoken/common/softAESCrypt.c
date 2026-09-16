@@ -25,6 +25,7 @@
  * Copyright 2019 Joyent, Inc.
  * Copyright 2017 Jason King.
  * Copyright 2025 RackTop Systems, Inc.
+ * Copyright 2026 Gernot Strasser
  */
 
 #include <pthread.h>
@@ -54,6 +55,42 @@
  * just the 12-byte Initialization Vector (IV).  The passed IV
  * is converted to CK_AES_GMAC_PARAMS soft_aes_init_ctx().
  */
+/*
+ * Minimal CTR-mode bulk encrypt for use within this file.
+ * Uses single-block aes_encrypt_block in a loop; the kernel
+ * build gets the parallelised version from aes_impl.c instead.
+ */
+static int
+soft_aes_ctr_mode(const void *ks, const uint8_t *input, uint8_t *output,
+    uint64_t length, uint64_t counter[2])
+{
+	uint64_t i = 0;
+
+	/* counter[] is big-endian; swap lower word to host for arithmetic */
+	counter[1] = __builtin_bswap64(counter[1]);
+	for (; i < length; i += AES_BLOCK_LEN) {
+		uint8_t keystream[AES_BLOCK_LEN];
+		uint64_t ctr_block[2];
+		size_t n = MIN(length - i, (uint64_t)AES_BLOCK_LEN);
+
+		/*
+		 * counter[0] (the nonce / upper counter word) is kept in its
+		 * in-memory big-endian byte order and must be copied verbatim;
+		 * byte-swapping it corrupts the AES-CTR counter block and
+		 * yields the wrong keystream.  Only the lower word is tracked
+		 * in host order for arithmetic and swapped back here.
+		 */
+		ctr_block[0] = counter[0];
+		ctr_block[1] = __builtin_bswap64(counter[1]);
+		(void) aes_encrypt_block(ks, (uint8_t *)ctr_block, keystream);
+		for (size_t j = 0; j < n; j++)
+			output[i + j] = input[i + j] ^ keystream[j];
+		counter[1]++;
+	}
+	counter[1] = __builtin_bswap64(counter[1]);
+	return (CRYPTO_SUCCESS);
+}
+
 static CK_RV
 soft_aes_check_mech_param(CK_MECHANISM_PTR mech, aes_ctx_t **ctxp)
 {
@@ -818,7 +855,8 @@ soft_aes_decrypt(soft_session_t *session_p, CK_BYTE_PTR pEncryptedData,
 		rv = crypto2pkcs11_error_number(rc);
 	} else if (aes_ctx->ac_flags & GCM_MODE) {
 		rc = gcm_decrypt_final((gcm_ctx_t *)aes_ctx, &out,
-		    AES_BLOCK_LEN, aes_encrypt_block, aes_xor_block);
+		    AES_BLOCK_LEN, aes_encrypt_block, aes_copy_block,
+		    aes_xor_block, soft_aes_ctr_mode);
 		rv = crypto2pkcs11_error_number(rc);
 	}
 
@@ -944,101 +982,41 @@ soft_aes_decrypt_update(soft_session_t *session_p, CK_BYTE_PTR pEncryptedData,
 
 	switch (mech) {
 	case CKM_AES_CCM:
-	case CKM_AES_GCM:
 		out_len = 0;
 		break;
-	case CKM_AES_CBC_PAD:
+	case CKM_AES_GCM:
 		/*
-		 * For CKM_AES_CBC_PAD, we use the existing code for CBC
-		 * mode in libsoftcrypto (which itself uses the code in
-		 * usr/src/common/crypto/modes for CBC mode).  For
-		 * non-padding AES CBC mode, aes_decrypt_contiguous_blocks()
-		 * will accumulate ciphertext in aes_ctx->ac_remainder until
-		 * there is at least AES_BLOCK_LEN bytes of ciphertext available
-		 * to decrypt.  At that point, as many blocks of AES_BLOCK_LEN
-		 * sized ciphertext blocks are decrypted.  Any remainder is
-		 * copied into aes_ctx->ac_remainder for decryption in
-		 * subsequent calls to aes_decrypt_contiguous_blocks().
-		 *
-		 * When PKCS#7 padding is used, the buffering
-		 * aes_decrypt_contigous_blocks() performs is insufficient.
-		 * PKCS#7 padding always adds [1..AES_BLOCK_LEN] bytes of
-		 * padding to plaintext, so the resulting ciphertext is always
-		 * larger than the input plaintext.  However we cannot know
-		 * which block is the final block (and needs its padding
-		 * stripped) until C_DecryptFinal() is called.  Additionally,
-		 * it is permissible for a caller to use buffers sized to the
-		 * output plaintext -- i.e. smaller than the input ciphertext.
-		 * This leads to a more complicated buffering/accumulation
-		 * strategy than what aes_decrypt_contiguous_blocks() provides
-		 * us.
-		 *
-		 * Our buffering strategy works as follows:
-		 *  For each call to C_DecryptUpdate, we calculate the
-		 *  total amount of ciphertext available (buffered plus what's
-		 *  passed in) as the initial output size (out_len). Based
-		 *  on the value of out_len, there are three possibilties:
-		 *
-		 *  1. We have less than AES_BLOCK_LEN + 1 bytes of
-		 *  ciphertext available. Accumulate the ciphertext in
-		 *  aes_ctx->ac_remainder. Note that while we could let
-		 *  aes_decrypt_contiguous_blocks() buffer the input for us
-		 *  when we have less than AES_BLOCK_LEN bytes, we would still
-		 *  need to buffer when we have exactly AES_BLOCK_LEN
-		 *  bytes available, so we just handle both situations with
-		 *  one if clause.
-		 *
-		 *  2. We have at least AES_BLOCK_LEN + 1 bytes of
-		 *  ciphertext, and the total amount available is also an
-		 *  exact multiple of AES_BLOCK_LEN. We cannot know if the
-		 *  last block of input is the final block (yet), but we
-		 *  are an exact multiple of AES_BLOCK_LEN, and we have
-		 *  at least AES_BLOCK_LEN + 1 bytes available, therefore
-		 *  there must be at least 2 * AES_BLOCK_LEN bytes of input
-		 *  ciphertext available. It also means there's at least one
-		 *  full block of input ciphertext that can be decrypted. We
-		 *  reduce the size of the input (in_len) given to
-		 *  aes_decrypt_contiguous_bytes() by AES_BLOCK_LEN to prevent
-		 *  it from decrypting the last full block of data.
-		 *  aes_decrypt_contiguous_blocks() will when decrypt any
-		 *  buffered data in aex_ctx->ac_remainder, and then any
-		 *  input data passed. Since we have an exact multiple of
-		 *  AES_BLOCK_LEN, aes_ctx->ac_remainder will be empty
-		 *  (aes_ctx->ac_remainder_len == 0), once
-		 *  aes_decrypt_contiguout_block() completes, and we can
-		 *  copy the last block of data into aes_ctx->ac_remainder.
-		 *
-		 *  3. We have at least AES_BLOCK_LEN + 1 bytes of
-		 *  ciphertext, but the total amount available is not an
-		 *  exact multiple of AES_BLOCK_LEN. We decrypt all of
-		 *  full blocks of data we have. The remainder will be
-		 *  less than AES_BLOCK_LEN bytes. We let
-		 *  aes_decrypt_contiguous_blocks() buffer the remainder
-		 *  for us since it would normally do this anyway. Since there
-		 *  is a remainder, the full blocks that are present cannot
-		 *  be the last block, so we can safey decrypt all of them.
-		 *
-		 * Some things to note:
-		 *  - The above semantics will cause aes_ctx->ac_remainder to
-		 *  never accumulate more than AES_BLOCK_LEN bytes of
-		 *  ciphertext. Once we reach at least AES_BLOCK_LEN + 1 bytes,
-		 *  we will decrypt the contents of aes_ctx->ac_remainder by one
-		 *  of the last two scenarios described above.
-		 *
-		 *  - We must always end up with AES_BLOCK_LEN bytes of data
-		 *  in aes_ctx->ac_remainder when C_DecryptFinal() is called.
-		 *  The first and third scenarios above may leave
-		 *  aes_ctx->ac_remainder with less than AES_BLOCK_LEN bytes,
-		 *  however the total size of the input ciphertext that's
-		 *  been decrypted must end up a multiple of AES_BLOCK_LEN.
-		 *  Therefore, we can always assume when there is a
-		 *  remainder that more data is coming.  If we do end up
-		 *  with a remainder that's not AES_BLOCK_LEN bytes long
-		 *  when C_DecryptFinal() is called, the input is assumed
-		 *  invalid and we return CKR_DATA_LEN_RANGE (see
-		 *  soft_aes_decrypt_final()).
+		 * GCM decrypt emits plaintext incrementally during
+		 * C_DecryptUpdate, withholding only the trailing bytes
+		 * (potential auth tag plus a partial block) in
+		 * gcm_last_input.  Ask the GCM code exactly how many bytes
+		 * this update call will produce so that both the NULL pData
+		 * size inquiry and the output buffer size check below
+		 * return correct results.
 		 */
-
+		out_len = gcm_decrypt_update_out_len(
+		    (gcm_ctx_t *)aes_ctx, in_len, AES_BLOCK_LEN);
+		break;
+	case CKM_AES_CBC_PAD:
+	/*
+ 	* CKM_AES_CBC_PAD uses libsoftcrypto's CBC implementation.
+	* See libpkcs11(3LIB) for the general PKCS#7 padding contract.
+ 	*
+ 	* Buffering strategy for CBC_PAD decryption:
+ 	*
+ 	* We cannot strip padding until the final block is known, so we must
+ 	* always hold back at least one full block.  For each C_DecryptUpdate:
+ 	*
+ 	*  - < AES_BLOCK_LEN+1 bytes available: buffer in ac_remainder.
+ 	*  - >= AES_BLOCK_LEN+1, exact multiple of AES_BLOCK_LEN: decrypt all
+ 	*    but the last block; save that block in ac_remainder.
+ 	*  - >= AES_BLOCK_LEN+1, non-multiple: decrypt all full blocks;
+ 	*    ac_remainder holds the sub-block tail (< AES_BLOCK_LEN bytes).
+ 	*
+ 	* ac_remainder never exceeds AES_BLOCK_LEN bytes.  If it is not
+ 	* exactly AES_BLOCK_LEN bytes when C_DecryptFinal() is called,
+ 	* the input is invalid and CKR_DATA_LEN_RANGE is returned.
+ 	*/
 		VERIFY3U(aes_ctx->ac_remainder_len, <=, AES_BLOCK_LEN);
 		if (in_len >= SIZE_MAX - AES_BLOCK_LEN)
 			return (CKR_ENCRYPTED_DATA_LEN_RANGE);
@@ -1430,7 +1408,16 @@ soft_aes_decrypt_final(soft_session_t *session_p, CK_BYTE_PTR pLastPart,
 		out_len = aes_ctx->ac_data_len;
 		break;
 	case CKM_AES_GCM:
-		out_len = aes_ctx->acu.acu_gcm.gcm_processed_data_len -
+		/*
+		 * The rewritten GCM decrypt emits plaintext incrementally
+		 * during C_DecryptUpdate and holds only the trailing
+		 * (ciphertext tail + auth tag) in gcm_last_input.  The amount
+		 * still to be emitted by gcm_decrypt_final() is therefore the
+		 * buffered bytes minus the tag, not the whole processed length.
+		 * Using gcm_processed_data_len here over-sizes the output and
+		 * trips CKR_BUFFER_TOO_SMALL / the cd_offset == out_len VERIFY.
+		 */
+		out_len = aes_ctx->acu.acu_gcm.gcm_last_input_fill -
 		    aes_ctx->acu.acu_gcm.gcm_tag_len;
 		break;
 	default:
@@ -1471,7 +1458,8 @@ soft_aes_decrypt_final(soft_session_t *session_p, CK_BYTE_PTR pLastPart,
 		break;
 	case CKM_AES_GCM:
 		rc = gcm_decrypt_final((gcm_ctx_t *)aes_ctx, &out,
-		    AES_BLOCK_LEN, aes_encrypt_block, aes_xor_block);
+		    AES_BLOCK_LEN, aes_encrypt_block, aes_copy_block,
+		    aes_xor_block, soft_aes_ctr_mode);
 		break;
 	default:
 		break;
@@ -1708,12 +1696,6 @@ soft_aes_free_ctx(aes_ctx_t *ctx)
 	} else if (ctx->ac_flags & GMAC_MODE) {
 		len = sizeof (gcm_ctx_t);
 	} else if (ctx->ac_flags & GCM_MODE) {
-		gcm_ctx_t *gcm_ctx = &ctx->acu.acu_gcm;
-		if (gcm_ctx->gcm_pt_buf != NULL) {
-			freezero(gcm_ctx->gcm_pt_buf,
-			    gcm_ctx->gcm_pt_buf_len);
-			gcm_ctx->gcm_pt_buf = NULL;
-		}
 		len = sizeof (gcm_ctx_t);
 	}
 

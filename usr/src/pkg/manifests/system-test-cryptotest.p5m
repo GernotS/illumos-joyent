@@ -102,6 +102,10 @@ file opt/crypto-tests/tests/aes/kcf/cleanup \
     path=opt/crypto-tests/tests/aes/kcf/cleanup owner=root group=root mode=0555
 file opt/crypto-tests/tests/aes/kcf/setup \
     path=opt/crypto-tests/tests/aes/kcf/setup owner=root group=root mode=0555
+dir  path=opt/crypto-tests/tests/aes/ktest owner=root group=root mode=0755
+file opt/crypto-tests/tests/aes/ktest/aes_ktest \
+    path=opt/crypto-tests/tests/aes/ktest/aes_ktest owner=root group=root \
+    mode=0555
 dir  path=opt/crypto-tests/tests/aes/pkcs owner=root group=root mode=0755
 file opt/crypto-tests/tests/aes/pkcs/aes_cbc_32 \
     path=opt/crypto-tests/tests/aes/pkcs/aes_cbc_32 owner=root group=root \
@@ -277,4 +281,5 @@ file path=opt/crypto-tests/tests/longhash/longhash_64 mode=0555
 license cr_Sun license=cr_Sun
 license lic_CDDL license=lic_CDDL
 depend type=require fmri=driver/crypto/dprov
+depend type=require fmri=driver/ktest
 depend type=require fmri=system/test/testrunner

@@ -421,6 +421,11 @@ zpool_feature_init(void)
 	    "Support for defering new resilvers when one is already running.",
 	    ZFEATURE_FLAG_READONLY_COMPAT, ZFEATURE_TYPE_BOOLEAN, NULL);
 
+	zfeature_register(SPA_FEATURE_FAST_DEDUP,
+	    "com.klarasystems:fast_dedup", "fast_dedup",
+	    "Support for advanced deduplication",
+	    ZFEATURE_FLAG_READONLY_COMPAT, ZFEATURE_TYPE_BOOLEAN, NULL);
+
 	/*
 	 * Slots for:
 	 * SPA_FEATURE_DEVICE_REBUILD
@@ -433,7 +438,6 @@ zpool_feature_init(void)
 	 * SPA_FEATURE_AVZ_V2
 	 * SPA_FEATURE_REDACTION_LIST_SPILL
 	 * SPA_FEATURE_RAIDZ_EXPANSION
-	 * SPA_FEATURE_FAST_DEDUP
 	 * SPA_FEATURE_LONGNAME
 	 * SPA_FEATURE_LARGE_MICROZAP
 	 */

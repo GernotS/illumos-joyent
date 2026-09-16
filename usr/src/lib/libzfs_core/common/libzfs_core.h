@@ -62,6 +62,7 @@ int lzc_get_bookmarks(const char *, nvlist_t *, nvlist_t **);
 int lzc_destroy_bookmarks(nvlist_t *, nvlist_t **);
 int lzc_initialize(const char *, pool_initialize_func_t, nvlist_t *,
     nvlist_t **);
+int lzc_pool_prefetch(const char *, zpool_prefetch_type_t);
 int lzc_trim(const char *, pool_trim_func_t, uint64_t, boolean_t,
     nvlist_t *, nvlist_t **);
 

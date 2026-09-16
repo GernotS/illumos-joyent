@@ -365,6 +365,36 @@ when the first dependent feature uses it, and will be returned to the
 .Sy enabled
 state when all datasets that use this feature are destroyed.
 .
+.feature com.klarasystems fast_dedup yes
+This feature allows more advanced deduplication features to be enabled on new
+dedup tables.
+.Pp
+This feature will be
+.Sy active
+when the first deduplicated block is written after a new dedup table is created
+(i.e. after a new pool creation, or new checksum used on a dataset with
+.Sy dedup
+enabled).
+It will be returned to the
+.Sy enabled
+state when all deduplicated blocks using it are freed.
+.Pp
+.Sy Caveat:
+when a deduplicated block must be stored as a gang block
+.Pq because the requested allocation cannot be satisfied contiguously ,
+the gang headers occupy DVA slots in the block pointer without
+contributing to leaf-block redundancy.
+If different datasets that share deduplicated content set different
+.Sy copies
+values, a higher
+.Sy copies
+request may silently end up with fewer effective copies than asked for.
+This is a redundancy-accounting limitation, not data corruption; reads
+remain consistent.
+To avoid it, keep the
+.Sy copies
+property uniform across datasets that share deduplicated content.
+.
 .feature com.joyent filesystem_limits yes extensible_dataset
 This feature enables filesystem and snapshot limits.
 These limits can be used to control how many filesystems and/or snapshots

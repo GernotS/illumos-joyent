@@ -185,7 +185,7 @@ unsigned int zfs_resilver_min_time_ms = 3000;
 int zfs_scan_suspend_progress = 0; /* set to prevent scans from progressing */
 boolean_t zfs_no_scrub_io = B_FALSE; /* set to disable scrub i/o */
 boolean_t zfs_no_scrub_prefetch = B_FALSE; /* set to disable scrub prefetch */
-enum ddt_class zfs_scrub_ddt_class_max = DDT_CLASS_DUPLICATE;
+ddt_class_t zfs_scrub_ddt_class_max = DDT_CLASS_DUPLICATE;
 /* max number of blocks to free in a single TXG */
 uint64_t zfs_async_block_max_blocks = UINT64_MAX;
 
@@ -447,6 +447,28 @@ dsl_scan_init(dsl_pool_t *dp, uint64_t txg)
 
 	scn = dp->dp_scan = kmem_zalloc(sizeof (dsl_scan_t), KM_SLEEP);
 	scn->scn_dp = dp;
+
+	/*
+	 * scn_maxinflight_bytes is in-core only, so it is zero here even when
+	 * the on-disk scn_phys we are about to load says a scan is already
+	 * running.  scan_exec_io() waits while
+	 *
+	 *	spa_scrub_inflight >= scn_maxinflight_bytes
+	 *
+	 * which at zero is true even with no I/O in flight at all, so no
+	 * completion can ever broadcast and the wait is permanent.  On a pool
+	 * imported mid-scan, ddt_sync() reaches that wait via
+	 * dsl_scan_ddt_entry() in the first txg -- before dsl_scan_sync() has
+	 * computed the real limit, since it runs later in the same pass -- and
+	 * the txg sync thread hangs, stopping the pool.
+	 *
+	 * Start from the same floor dsl_scan_sync() enforces.  It recomputes
+	 * the true value (leaf count * zfs_scan_vdev_limit) on its first run,
+	 * so this only has to be non-zero and sane for one txg.  Deliberately
+	 * not calling dsl_scan_count_leaves() here: this runs during pool load
+	 * and must not depend on the vdev tree being complete.
+	 */
+	scn->scn_maxinflight_bytes = 1ULL << 20;
 
 	/*
 	 * It's possible that we're resuming a scan after a reboot so
@@ -2457,10 +2479,10 @@ enqueue_cb(dsl_pool_t *dp, dsl_dataset_t *hds, void *arg)
 /* ARGSUSED */
 void
 dsl_scan_ddt_entry(dsl_scan_t *scn, enum zio_checksum checksum,
-    ddt_entry_t *dde, dmu_tx_t *tx)
+    ddt_t *ddt, ddt_lightweight_entry_t *ddlwe, dmu_tx_t *tx)
 {
-	const ddt_key_t *ddk = &dde->dde_key;
-	ddt_phys_t *ddp = dde->dde_phys;
+	const ddt_key_t *ddk = &ddlwe->ddlwe_key;
+	ddt_univ_phys_t *ddp = &ddlwe->ddlwe_phys;
 	blkptr_t bp;
 	zbookmark_phys_t zb = { 0 };
 	int p;
@@ -2482,11 +2504,14 @@ dsl_scan_ddt_entry(dsl_scan_t *scn, enum zio_checksum checksum,
 	if (scn->scn_done_txg != 0)
 		return;
 
-	for (p = 0; p < DDT_PHYS_TYPES; p++, ddp++) {
-		if (ddp->ddp_phys_birth == 0 ||
-		    ddp->ddp_phys_birth > scn->scn_phys.scn_max_txg)
+	int nphys = DDT_NPHYS(ddt);
+	for (p = 0; p < nphys; p++) {
+		ddt_phys_variant_t v = DDT_PHYS_VARIANT(ddt, p);
+		ddt_phys_t *slot = DDT_PHYS_SLOT(ddp, v);
+		if (slot->ddp_phys_birth == 0 ||
+		    slot->ddp_phys_birth > scn->scn_phys.scn_max_txg)
 			continue;
-		ddt_bp_create(checksum, ddk, ddp, &bp);
+		ddt_bp_create(checksum, ddk, ddp, v, &bp);
 
 		scn->scn_visited_this_txg++;
 		scan_funcs[scn->scn_phys.scn_func](scn->scn_dp, &bp, &zb);
@@ -2499,7 +2524,7 @@ dsl_scan_ddt_entry(dsl_scan_t *scn, enum zio_checksum checksum,
  * If there are N references to a deduped block, we don't want to scrub it
  * N times -- ideally, we should scrub it exactly once.
  *
- * We leverage the fact that the dde's replication class (enum ddt_class)
+ * We leverage the fact that the dde's replication class (ddt_class_t)
  * is ordered from highest replication class (DDT_CLASS_DITTO) to lowest
  * (DDT_CLASS_UNIQUE) so that we may walk the DDT in that order.
  *
@@ -2530,11 +2555,12 @@ static void
 dsl_scan_ddt(dsl_scan_t *scn, dmu_tx_t *tx)
 {
 	ddt_bookmark_t *ddb = &scn->scn_phys.scn_ddt_bookmark;
-	ddt_entry_t dde = { 0 };
+	uint8_t ddebuf[sizeof (ddt_entry_t) + DDT_PHYS_SIZE_MAX] = {0};
+	ddt_entry_t *dde = (ddt_entry_t *)ddebuf;
 	int error;
 	uint64_t n = 0;
 
-	while ((error = ddt_walk(scn->scn_dp->dp_spa, ddb, &dde)) == 0) {
+	while ((error = ddt_walk(scn->scn_dp->dp_spa, ddb, dde)) == 0) {
 		ddt_t *ddt;
 
 		if (ddb->ddb_class > scn->scn_phys.scn_ddt_class_max)
@@ -2549,7 +2575,12 @@ dsl_scan_ddt(dsl_scan_t *scn, dmu_tx_t *tx)
 		ddt = scn->scn_dp->dp_spa->spa_ddt[ddb->ddb_checksum];
 		ASSERT(avl_first(&ddt->ddt_tree) == NULL);
 
-		dsl_scan_ddt_entry(scn, ddb->ddb_checksum, &dde, tx);
+		ddt_lightweight_entry_t ddlwe;
+		ddlwe.ddlwe_key = dde->dde_key;
+		ddlwe.ddlwe_type = dde->dde_type;
+		ddlwe.ddlwe_class = dde->dde_class;
+		memcpy(&ddlwe.ddlwe_phys, dde->dde_phys, DDT_PHYS_SIZE(ddt));
+		dsl_scan_ddt_entry(scn, ddb->ddb_checksum, ddt, &ddlwe, tx);
 		n++;
 
 		if (dsl_scan_check_suspend(scn, NULL))
@@ -3944,6 +3975,7 @@ scan_exec_io(dsl_pool_t *dp, const blkptr_t *bp, int zio_flags,
 	abd_t *data = abd_alloc_for_io(size, B_FALSE);
 
 	if (queue == NULL) {
+		ASSERT3U(scn->scn_maxinflight_bytes, >, 0);
 		mutex_enter(&spa->spa_scrub_lock);
 		while (spa->spa_scrub_inflight >= scn->scn_maxinflight_bytes)
 			cv_wait(&spa->spa_scrub_io_cv, &spa->spa_scrub_lock);

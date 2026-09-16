@@ -190,17 +190,19 @@ struct metaslab_class {
 
 	uint64_t		mc_alloc_groups; /* # of allocatable groups */
 
-	uint64_t		mc_alloc;	/* total allocated space */
-	uint64_t		mc_deferred;	/* total deferred frees */
+	uint64_t		mc_alloc;	/* allocated space */
+	uint64_t		mc_dalloc;	/* deflated allocated space */
+	uint64_t		mc_deferred;	/* deferred frees */
+	uint64_t		mc_ddeferred;	/* deflated deferred frees */
 	uint64_t		mc_space;	/* total space (alloc + free) */
-	uint64_t		mc_dspace;	/* total deflated space */
+	uint64_t		mc_dspace;	/* deflated total space */
 	uint64_t		mc_histogram[RANGE_TREE_HISTOGRAM_SIZE];
 
 	/*
 	 * List of all loaded metaslabs in the class, sorted in order of most
 	 * recent use.
 	 */
-	multilist_t		*mc_metaslab_txg_list;
+	multilist_t		mc_metaslab_txg_list;
 };
 
 /*
@@ -544,6 +546,7 @@ struct metaslab {
 	 * log space maps.
 	 */
 	uint64_t	ms_unflushed_txg;
+	boolean_t	ms_unflushed_dirty;
 
 	/* updated every time we are done syncing the metaslab's space map */
 	uint64_t	ms_synced_length;

@@ -20,7 +20,9 @@
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2011, 2018 by Delphix. All rights reserved.
+ * Copyright (c) 2011, 2021 by Delphix. All rights reserved.
+ * Copyright 2025 iXsystems, Inc.
+ * Copyright 2026 Gernot Strasser
  * Copyright (c) 2013 by Saso Kiselkov. All rights reserved.
  * Copyright (c) 2014 Integros [integros.com]
  * Copyright 2019 Joyent, Inc.
@@ -384,7 +386,7 @@ metaslab_class_create(spa_t *spa, metaslab_ops_t *ops)
 	mc->mc_rotor = NULL;
 	mc->mc_ops = ops;
 	mutex_init(&mc->mc_lock, NULL, MUTEX_DEFAULT, NULL);
-	mc->mc_metaslab_txg_list = multilist_create(sizeof (metaslab_t),
+	multilist_create(&mc->mc_metaslab_txg_list, sizeof (metaslab_t),
 	    offsetof(metaslab_t, ms_class_txg_node), metaslab_idx_func);
 	mc->mc_alloc_slots = kmem_zalloc(spa->spa_alloc_count *
 	    sizeof (zfs_refcount_t), KM_SLEEP);
@@ -401,7 +403,9 @@ metaslab_class_destroy(metaslab_class_t *mc)
 {
 	ASSERT(mc->mc_rotor == NULL);
 	ASSERT(mc->mc_alloc == 0);
+	ASSERT0(mc->mc_dalloc);
 	ASSERT(mc->mc_deferred == 0);
+	ASSERT0(mc->mc_ddeferred);
 	ASSERT(mc->mc_space == 0);
 	ASSERT(mc->mc_dspace == 0);
 
@@ -412,7 +416,7 @@ metaslab_class_destroy(metaslab_class_t *mc)
 	kmem_free(mc->mc_alloc_max_slots, mc->mc_spa->spa_alloc_count *
 	    sizeof (uint64_t));
 	mutex_destroy(&mc->mc_lock);
-	multilist_destroy(mc->mc_metaslab_txg_list);
+	multilist_destroy(&mc->mc_metaslab_txg_list);
 	kmem_free(mc, sizeof (metaslab_class_t));
 }
 
@@ -444,10 +448,13 @@ metaslab_class_validate(metaslab_class_t *mc)
 
 static void
 metaslab_class_space_update(metaslab_class_t *mc, int64_t alloc_delta,
-    int64_t defer_delta, int64_t space_delta, int64_t dspace_delta)
+    int64_t dalloc_delta, int64_t deferred_delta, int64_t ddeferred_delta,
+    int64_t space_delta, int64_t dspace_delta)
 {
 	atomic_add_64(&mc->mc_alloc, alloc_delta);
-	atomic_add_64(&mc->mc_deferred, defer_delta);
+	atomic_add_64(&mc->mc_dalloc, dalloc_delta);
+	atomic_add_64(&mc->mc_deferred, deferred_delta);
+	atomic_add_64(&mc->mc_ddeferred, ddeferred_delta);
 	atomic_add_64(&mc->mc_space, space_delta);
 	atomic_add_64(&mc->mc_dspace, dspace_delta);
 }
@@ -455,25 +462,34 @@ metaslab_class_space_update(metaslab_class_t *mc, int64_t alloc_delta,
 uint64_t
 metaslab_class_get_alloc(metaslab_class_t *mc)
 {
-	return (mc->mc_alloc);
+	return (atomic_load_64(&mc->mc_alloc));
+}
+
+uint64_t
+metaslab_class_get_dalloc(metaslab_class_t *mc)
+{
+	return (spa_deflate(mc->mc_spa) ? atomic_load_64(&mc->mc_dalloc) :
+	    atomic_load_64(&mc->mc_alloc));
 }
 
 uint64_t
 metaslab_class_get_deferred(metaslab_class_t *mc)
 {
-	return (mc->mc_deferred);
+	return (spa_deflate(mc->mc_spa) ? atomic_load_64(&mc->mc_ddeferred) :
+	    atomic_load_64(&mc->mc_deferred));
 }
 
 uint64_t
 metaslab_class_get_space(metaslab_class_t *mc)
 {
-	return (mc->mc_space);
+	return (atomic_load_64(&mc->mc_space));
 }
 
 uint64_t
 metaslab_class_get_dspace(metaslab_class_t *mc)
 {
-	return (spa_deflate(mc->mc_spa) ? mc->mc_dspace : mc->mc_space);
+	return (spa_deflate(mc->mc_spa) ? atomic_load_64(&mc->mc_dspace) :
+	    atomic_load_64(&mc->mc_space));
 }
 
 void
@@ -492,7 +508,7 @@ metaslab_class_histogram_verify(metaslab_class_t *mc)
 
 	for (int c = 0; c < rvd->vdev_children; c++) {
 		vdev_t *tvd = rvd->vdev_child[c];
-		metaslab_group_t *mg = tvd->vdev_mg;
+		metaslab_group_t *mg = vdev_get_mg(tvd, mc);
 
 		/*
 		 * Skip any holes, uninitialized top-levels, or
@@ -503,12 +519,17 @@ metaslab_class_histogram_verify(metaslab_class_t *mc)
 			continue;
 		}
 
+		IMPLY(mg == mg->mg_vd->vdev_log_mg,
+		    mc == spa_embedded_log_class(mg->mg_vd->vdev_spa) ||
+		    mc == spa_special_embedded_log_class(mg->mg_vd->vdev_spa));
+
 		for (i = 0; i < RANGE_TREE_HISTOGRAM_SIZE; i++)
 			mc_hist[i] += mg->mg_histogram[i];
 	}
 
-	for (i = 0; i < RANGE_TREE_HISTOGRAM_SIZE; i++)
+	for (i = 0; i < RANGE_TREE_HISTOGRAM_SIZE; i++) {
 		VERIFY3U(mc_hist[i], ==, mc->mc_histogram[i]);
+	}
 
 	kmem_free(mc_hist, sizeof (uint64_t) * RANGE_TREE_HISTOGRAM_SIZE);
 }
@@ -606,7 +627,7 @@ metaslab_class_expandable_space(metaslab_class_t *mc)
 void
 metaslab_class_evict_old(metaslab_class_t *mc, uint64_t txg)
 {
-	multilist_t *ml = mc->mc_metaslab_txg_list;
+	multilist_t *ml = &mc->mc_metaslab_txg_list;
 	for (int i = 0; i < multilist_get_num_sublists(ml); i++) {
 		multilist_sublist_t *mls = multilist_sublist_lock(ml, i);
 		metaslab_t *msp = multilist_sublist_head(mls);
@@ -1019,16 +1040,22 @@ metaslab_group_initialized(metaslab_group_t *mg)
 uint64_t
 metaslab_group_get_space(metaslab_group_t *mg)
 {
-	return ((1ULL << mg->mg_vd->vdev_ms_shift) * mg->mg_vd->vdev_ms_count);
+	/*
+	 * Note that the number of nodes in mg_metaslab_tree may be one less
+	 * than vdev_ms_count, due to the embedded log metaslab.
+	 */
+	mutex_enter(&mg->mg_lock);
+	uint64_t ms_count = avl_numnodes(&mg->mg_metaslab_tree);
+	mutex_exit(&mg->mg_lock);
+	return ((1ULL << mg->mg_vd->vdev_ms_shift) * ms_count);
 }
 
 void
 metaslab_group_histogram_verify(metaslab_group_t *mg)
 {
 	uint64_t *mg_hist;
-	vdev_t *vd = mg->mg_vd;
-	uint64_t ashift = vd->vdev_ashift;
-	int i;
+	avl_tree_t *t = &mg->mg_metaslab_tree;
+	uint64_t ashift = mg->mg_vd->vdev_ashift;
 
 	if ((zfs_flags & ZFS_DEBUG_HISTOGRAM_VERIFY) == 0)
 		return;
@@ -1039,20 +1066,24 @@ metaslab_group_histogram_verify(metaslab_group_t *mg)
 	ASSERT3U(RANGE_TREE_HISTOGRAM_SIZE, >=,
 	    SPACE_MAP_HISTOGRAM_SIZE + ashift);
 
-	for (int m = 0; m < vd->vdev_ms_count; m++) {
-		metaslab_t *msp = vd->vdev_ms[m];
-
-		/* skip if not active or not a member */
-		if (msp->ms_sm == NULL || msp->ms_group != mg)
+	mutex_enter(&mg->mg_lock);
+	for (metaslab_t *msp = avl_first(t);
+	    msp != NULL; msp = AVL_NEXT(t, msp)) {
+		VERIFY3P(msp->ms_group, ==, mg);
+		/* skip if not active */
+		if (msp->ms_sm == NULL)
 			continue;
 
-		for (i = 0; i < SPACE_MAP_HISTOGRAM_SIZE; i++)
+		for (int i = 0; i < SPACE_MAP_HISTOGRAM_SIZE; i++) {
 			mg_hist[i + ashift] +=
 			    msp->ms_sm->sm_phys->smp_histogram[i];
+		}
 	}
 
-	for (i = 0; i < RANGE_TREE_HISTOGRAM_SIZE; i ++)
+	for (int i = 0; i < RANGE_TREE_HISTOGRAM_SIZE; i ++)
 		VERIFY3U(mg_hist[i], ==, mg->mg_histogram[i]);
+
+	mutex_exit(&mg->mg_lock);
 
 	kmem_free(mg_hist, sizeof (uint64_t) * RANGE_TREE_HISTOGRAM_SIZE);
 }
@@ -1069,6 +1100,9 @@ metaslab_group_histogram_add(metaslab_group_t *mg, metaslab_t *msp)
 
 	mutex_enter(&mg->mg_lock);
 	for (int i = 0; i < SPACE_MAP_HISTOGRAM_SIZE; i++) {
+		IMPLY(mg == mg->mg_vd->vdev_log_mg,
+		    mc == spa_embedded_log_class(mg->mg_vd->vdev_spa) ||
+		    mc == spa_special_embedded_log_class(mg->mg_vd->vdev_spa));
 		mg->mg_histogram[i + ashift] +=
 		    msp->ms_sm->sm_phys->smp_histogram[i];
 		mc->mc_histogram[i + ashift] +=
@@ -1093,6 +1127,9 @@ metaslab_group_histogram_remove(metaslab_group_t *mg, metaslab_t *msp)
 		    msp->ms_sm->sm_phys->smp_histogram[i]);
 		ASSERT3U(mc->mc_histogram[i + ashift], >=,
 		    msp->ms_sm->sm_phys->smp_histogram[i]);
+		IMPLY(mg == mg->mg_vd->vdev_log_mg,
+		    mc == spa_embedded_log_class(mg->mg_vd->vdev_spa) ||
+		    mc == spa_special_embedded_log_class(mg->mg_vd->vdev_spa));
 
 		mg->mg_histogram[i + ashift] -=
 		    msp->ms_sm->sm_phys->smp_histogram[i];
@@ -1130,7 +1167,7 @@ metaslab_group_remove(metaslab_group_t *mg, metaslab_t *msp)
 
 	metaslab_class_t *mc = msp->ms_group->mg_class;
 	multilist_sublist_t *mls =
-	    multilist_sublist_lock_obj(mc->mc_metaslab_txg_list, msp);
+	    multilist_sublist_lock_obj(&mc->mc_metaslab_txg_list, msp);
 	if (multilist_link_active(&msp->ms_class_txg_node))
 		multilist_sublist_remove(mls, msp);
 	multilist_sublist_unlock(mls);
@@ -2152,20 +2189,20 @@ metaslab_potentially_evict(metaslab_class_t *mc)
 	uint64_t size =  kmem_cache_stat(zfs_btree_leaf_cache, "buf_size");
 	int tries = 0;
 	for (; allmem * zfs_metaslab_mem_limit / 100 < inuse * size &&
-	    tries < multilist_get_num_sublists(mc->mc_metaslab_txg_list) * 2;
+	    tries < multilist_get_num_sublists(&mc->mc_metaslab_txg_list) * 2;
 	    tries++) {
 		unsigned int idx = multilist_get_random_index(
-		    mc->mc_metaslab_txg_list);
+		    &mc->mc_metaslab_txg_list);
 		multilist_sublist_t *mls =
-		    multilist_sublist_lock(mc->mc_metaslab_txg_list, idx);
+		    multilist_sublist_lock(&mc->mc_metaslab_txg_list, idx);
 		metaslab_t *msp = multilist_sublist_head(mls);
 		multilist_sublist_unlock(mls);
 		while (msp != NULL && allmem * zfs_metaslab_mem_limit / 100 <
 		    inuse * size) {
 			VERIFY3P(mls, ==, multilist_sublist_lock(
-			    mc->mc_metaslab_txg_list, idx));
+			    &mc->mc_metaslab_txg_list, idx));
 			ASSERT3U(idx, ==,
-			    metaslab_idx_func(mc->mc_metaslab_txg_list, msp));
+			    metaslab_idx_func(&mc->mc_metaslab_txg_list, msp));
 
 			if (!multilist_link_active(&msp->ms_class_txg_node)) {
 				multilist_sublist_unlock(mls);
@@ -2526,7 +2563,7 @@ metaslab_unload(metaslab_t *msp)
 	if (msp->ms_group != NULL) {
 		metaslab_class_t *mc = msp->ms_group->mg_class;
 		multilist_sublist_t *mls =
-		    multilist_sublist_lock_obj(mc->mc_metaslab_txg_list, msp);
+		    multilist_sublist_lock_obj(&mc->mc_metaslab_txg_list, msp);
 		if (multilist_link_active(&msp->ms_class_txg_node))
 			multilist_sublist_remove(mls, msp);
 		multilist_sublist_unlock(mls);
@@ -2577,7 +2614,7 @@ metaslab_set_selected_txg(metaslab_t *msp, uint64_t txg)
 	ASSERT(MUTEX_HELD(&msp->ms_lock));
 	metaslab_class_t *mc = msp->ms_group->mg_class;
 	multilist_sublist_t *mls =
-	    multilist_sublist_lock_obj(mc->mc_metaslab_txg_list, msp);
+	    multilist_sublist_lock_obj(&mc->mc_metaslab_txg_list, msp);
 	if (multilist_link_active(&msp->ms_class_txg_node))
 		multilist_sublist_remove(mls, msp);
 	msp->ms_selected_txg = txg;
@@ -2587,16 +2624,21 @@ metaslab_set_selected_txg(metaslab_t *msp, uint64_t txg)
 }
 
 void
-metaslab_space_update(vdev_t *vd, metaslab_class_t *mc, int64_t alloc_delta,
+metaslab_space_update(metaslab_group_t *mg, int64_t alloc_delta,
     int64_t defer_delta, int64_t space_delta)
 {
+	vdev_t *vd = mg->mg_vd;
+	int64_t dalloc_delta = vdev_deflated_space(vd, alloc_delta);
+	int64_t ddefer_delta = vdev_deflated_space(vd, defer_delta);
+	int64_t dspace_delta = vdev_deflated_space(vd, space_delta);
+
 	vdev_space_update(vd, alloc_delta, defer_delta, space_delta);
 
 	ASSERT3P(vd->vdev_spa->spa_root_vdev, ==, vd->vdev_parent);
 	ASSERT(vd->vdev_ms_count != 0);
 
-	metaslab_class_space_update(mc, alloc_delta, defer_delta, space_delta,
-	    vdev_deflated_space(vd, space_delta));
+	metaslab_class_space_update(mg->mg_class, alloc_delta, dalloc_delta,
+	    defer_delta, ddefer_delta, space_delta, dspace_delta);
 }
 
 int
@@ -2677,8 +2719,7 @@ metaslab_init(metaslab_group_t *mg, uint64_t id, uint64_t object,
 	 */
 	if (txg <= TXG_INITIAL) {
 		metaslab_sync_done(ms, 0);
-		metaslab_space_update(vd, mg->mg_class,
-		    metaslab_allocated_space(ms), 0, 0);
+		metaslab_space_update(mg, metaslab_allocated_space(ms), 0, 0);
 	}
 
 	if (txg != 0) {
@@ -2708,7 +2749,8 @@ metaslab_fini_flush_data(metaslab_t *msp)
 	mutex_exit(&spa->spa_flushed_ms_lock);
 
 	spa_log_sm_decrement_mscount(spa, metaslab_unflushed_txg(msp));
-	spa_log_summary_decrement_mscount(spa, metaslab_unflushed_txg(msp));
+	spa_log_summary_decrement_mscount(spa, metaslab_unflushed_txg(msp),
+	    metaslab_unflushed_dirty(msp));
 }
 
 uint64_t
@@ -2732,36 +2774,47 @@ metaslab_fini(metaslab_t *msp)
 
 	mutex_enter(&msp->ms_lock);
 	VERIFY(msp->ms_group == NULL);
-	metaslab_space_update(vd, mg->mg_class,
-	    -metaslab_allocated_space(msp), 0, -msp->ms_size);
 
+	/*
+	 * If the range trees haven't been allocated, this metaslab hasn't
+	 * been through metaslab_sync_done() for the first time yet, so its
+	 * space hasn't been accounted for in its vdev and doesn't need to be
+	 * subtracted.
+	 */
+	if (msp->ms_freed != NULL) {
+		metaslab_space_update(mg, -metaslab_allocated_space(msp), 0,
+		    -msp->ms_size);
+
+	}
 	space_map_close(msp->ms_sm);
 	msp->ms_sm = NULL;
 
 	metaslab_unload(msp);
+
 	range_tree_destroy(msp->ms_allocatable);
-	range_tree_destroy(msp->ms_freeing);
-	range_tree_destroy(msp->ms_freed);
 
-	ASSERT3U(spa->spa_unflushed_stats.sus_memused, >=,
-	    metaslab_unflushed_changes_memused(msp));
-	spa->spa_unflushed_stats.sus_memused -=
-	    metaslab_unflushed_changes_memused(msp);
-	range_tree_vacate(msp->ms_unflushed_allocs, NULL, NULL);
-	range_tree_destroy(msp->ms_unflushed_allocs);
-	range_tree_vacate(msp->ms_unflushed_frees, NULL, NULL);
-	range_tree_destroy(msp->ms_unflushed_frees);
+	if (msp->ms_freed != NULL) {
+		range_tree_destroy(msp->ms_freeing);
+		range_tree_destroy(msp->ms_freed);
 
-	for (int t = 0; t < TXG_SIZE; t++) {
-		range_tree_destroy(msp->ms_allocating[t]);
-	}
+		ASSERT3U(spa->spa_unflushed_stats.sus_memused, >=,
+		    metaslab_unflushed_changes_memused(msp));
+		spa->spa_unflushed_stats.sus_memused -=
+		    metaslab_unflushed_changes_memused(msp);
+		range_tree_vacate(msp->ms_unflushed_allocs, NULL, NULL);
+		range_tree_destroy(msp->ms_unflushed_allocs);
+		range_tree_destroy(msp->ms_checkpointing);
+		range_tree_vacate(msp->ms_unflushed_frees, NULL, NULL);
+		range_tree_destroy(msp->ms_unflushed_frees);
 
-	for (int t = 0; t < TXG_DEFER_SIZE; t++) {
-		range_tree_destroy(msp->ms_defer[t]);
+		for (int t = 0; t < TXG_SIZE; t++) {
+			range_tree_destroy(msp->ms_allocating[t]);
+		}
+		for (int t = 0; t < TXG_DEFER_SIZE; t++) {
+			range_tree_destroy(msp->ms_defer[t]);
+		}
 	}
 	ASSERT0(msp->ms_deferspace);
-
-	range_tree_destroy(msp->ms_checkpointing);
 
 	for (int t = 0; t < TXG_SIZE; t++)
 		ASSERT(!txg_list_member(&vd->vdev_ms_list, msp, t));
@@ -3671,11 +3724,66 @@ metaslab_condense(metaslab_t *msp, dmu_tx_t *tx)
 	metaslab_flush_update(msp, tx);
 }
 
+static void
+metaslab_unflushed_add(metaslab_t *msp, dmu_tx_t *tx)
+{
+	spa_t *spa = msp->ms_group->mg_vd->vdev_spa;
+	ASSERT(spa_syncing_log_sm(spa) != NULL);
+	ASSERT(msp->ms_sm != NULL);
+	ASSERT(range_tree_is_empty(msp->ms_unflushed_allocs));
+	ASSERT(range_tree_is_empty(msp->ms_unflushed_frees));
+
+	mutex_enter(&spa->spa_flushed_ms_lock);
+	metaslab_set_unflushed_txg(msp, spa_syncing_txg(spa), tx);
+	metaslab_set_unflushed_dirty(msp, B_TRUE);
+	avl_add(&spa->spa_metaslabs_by_flushed, msp);
+	mutex_exit(&spa->spa_flushed_ms_lock);
+
+	spa_log_sm_increment_current_mscount(spa);
+	spa_log_summary_add_flushed_metaslab(spa, B_TRUE);
+}
+
+void
+metaslab_unflushed_bump(metaslab_t *msp, dmu_tx_t *tx, boolean_t dirty)
+{
+	spa_t *spa = msp->ms_group->mg_vd->vdev_spa;
+	ASSERT(spa_syncing_log_sm(spa) != NULL);
+	ASSERT(msp->ms_sm != NULL);
+	ASSERT(metaslab_unflushed_txg(msp) != 0);
+	ASSERT3P(avl_find(&spa->spa_metaslabs_by_flushed, msp, NULL), ==, msp);
+	ASSERT(range_tree_is_empty(msp->ms_unflushed_allocs));
+	ASSERT(range_tree_is_empty(msp->ms_unflushed_frees));
+
+	VERIFY3U(tx->tx_txg, <=, spa_final_dirty_txg(spa));
+
+	/* update metaslab's position in our flushing tree */
+	uint64_t ms_prev_flushed_txg = metaslab_unflushed_txg(msp);
+	boolean_t ms_prev_flushed_dirty = metaslab_unflushed_dirty(msp);
+	mutex_enter(&spa->spa_flushed_ms_lock);
+	avl_remove(&spa->spa_metaslabs_by_flushed, msp);
+	metaslab_set_unflushed_txg(msp, spa_syncing_txg(spa), tx);
+	metaslab_set_unflushed_dirty(msp, dirty);
+	avl_add(&spa->spa_metaslabs_by_flushed, msp);
+	mutex_exit(&spa->spa_flushed_ms_lock);
+
+	/* update metaslab counts of spa_log_sm_t nodes */
+	spa_log_sm_decrement_mscount(spa, ms_prev_flushed_txg);
+	spa_log_sm_increment_current_mscount(spa);
+
+	/* update log space map summary */
+	spa_log_summary_decrement_mscount(spa, ms_prev_flushed_txg,
+	    ms_prev_flushed_dirty);
+	spa_log_summary_add_flushed_metaslab(spa, dirty);
+
+	/* cleanup obsolete logs if any */
+	spa_cleanup_old_sm_logs(spa, tx);
+}
+
 /*
  * Called when the metaslab has been flushed (its own spacemap now reflects
  * all the contents of the pool-wide spacemap log). Updates the metaslab's
  * metadata and any pool-wide related log space map data (e.g. summary,
- * obsolete logs, etc.) to reflect that.
+ * obsolete logs, etc..) to reflect that.
  */
 static void
 metaslab_flush_update(metaslab_t *msp, dmu_tx_t *tx)
@@ -3686,8 +3794,6 @@ metaslab_flush_update(metaslab_t *msp, dmu_tx_t *tx)
 	ASSERT(MUTEX_HELD(&msp->ms_lock));
 
 	ASSERT3U(spa_sync_pass(spa), ==, 1);
-	ASSERT(range_tree_is_empty(msp->ms_unflushed_allocs));
-	ASSERT(range_tree_is_empty(msp->ms_unflushed_frees));
 
 	/*
 	 * Just because a metaslab got flushed, that doesn't mean that
@@ -3700,39 +3806,11 @@ metaslab_flush_update(metaslab_t *msp, dmu_tx_t *tx)
 	 * We may end up here from metaslab_condense() without the
 	 * feature being active. In that case this is a no-op.
 	 */
-	if (!spa_feature_is_active(spa, SPA_FEATURE_LOG_SPACEMAP))
+	if (!spa_feature_is_active(spa, SPA_FEATURE_LOG_SPACEMAP) ||
+	    metaslab_unflushed_txg(msp) == 0)
 		return;
 
-	ASSERT(spa_syncing_log_sm(spa) != NULL);
-	ASSERT(msp->ms_sm != NULL);
-	ASSERT(metaslab_unflushed_txg(msp) != 0);
-	ASSERT3P(avl_find(&spa->spa_metaslabs_by_flushed, msp, NULL), ==, msp);
-
-	VERIFY3U(tx->tx_txg, <=, spa_final_dirty_txg(spa));
-
-	/* update metaslab's position in our flushing tree */
-	uint64_t ms_prev_flushed_txg = metaslab_unflushed_txg(msp);
-	mutex_enter(&spa->spa_flushed_ms_lock);
-	avl_remove(&spa->spa_metaslabs_by_flushed, msp);
-	metaslab_set_unflushed_txg(msp, spa_syncing_txg(spa), tx);
-	avl_add(&spa->spa_metaslabs_by_flushed, msp);
-	mutex_exit(&spa->spa_flushed_ms_lock);
-
-	/* update metaslab counts of spa_log_sm_t nodes */
-	spa_log_sm_decrement_mscount(spa, ms_prev_flushed_txg);
-	spa_log_sm_increment_current_mscount(spa);
-
-	/* cleanup obsolete logs if any */
-	uint64_t log_blocks_before = spa_log_sm_nblocks(spa);
-	spa_cleanup_old_sm_logs(spa, tx);
-	uint64_t log_blocks_after = spa_log_sm_nblocks(spa);
-	VERIFY3U(log_blocks_after, <=, log_blocks_before);
-
-	/* update log space map summary */
-	uint64_t blocks_gone = log_blocks_before - log_blocks_after;
-	spa_log_summary_add_flushed_metaslab(spa);
-	spa_log_summary_decrement_mscount(spa, ms_prev_flushed_txg);
-	spa_log_summary_decrement_blkcount(spa, blocks_gone);
+	metaslab_unflushed_bump(msp, tx, B_FALSE);
 }
 
 boolean_t
@@ -3948,23 +4026,6 @@ metaslab_sync(metaslab_t *msp, uint64_t txg)
 		ASSERT0(metaslab_allocated_space(msp));
 	}
 
-	if (metaslab_unflushed_txg(msp) == 0 &&
-	    spa_feature_is_active(spa, SPA_FEATURE_LOG_SPACEMAP)) {
-		ASSERT(spa_syncing_log_sm(spa) != NULL);
-
-		metaslab_set_unflushed_txg(msp, spa_syncing_txg(spa), tx);
-		spa_log_sm_increment_current_mscount(spa);
-		spa_log_summary_add_flushed_metaslab(spa);
-
-		ASSERT(msp->ms_sm != NULL);
-		mutex_enter(&spa->spa_flushed_ms_lock);
-		avl_add(&spa->spa_metaslabs_by_flushed, msp);
-		mutex_exit(&spa->spa_flushed_ms_lock);
-
-		ASSERT(range_tree_is_empty(msp->ms_unflushed_allocs));
-		ASSERT(range_tree_is_empty(msp->ms_unflushed_frees));
-	}
-
 	if (!range_tree_is_empty(msp->ms_checkpointing) &&
 	    vd->vdev_checkpoint_sm == NULL) {
 		ASSERT(spa_has_checkpoint(spa));
@@ -4012,6 +4073,10 @@ metaslab_sync(metaslab_t *msp, uint64_t txg)
 	space_map_t *log_sm = spa_syncing_log_sm(spa);
 	if (log_sm != NULL) {
 		ASSERT(spa_feature_is_enabled(spa, SPA_FEATURE_LOG_SPACEMAP));
+		if (metaslab_unflushed_txg(msp) == 0)
+			metaslab_unflushed_add(msp, tx);
+		else if (!metaslab_unflushed_dirty(msp))
+			metaslab_unflushed_bump(msp, tx, B_TRUE);
 
 		space_map_write(log_sm, alloctree, SM_ALLOC,
 		    vd->vdev_id, tx);
@@ -4237,7 +4302,7 @@ metaslab_sync_done(metaslab_t *msp, uint64_t txg)
 		msp->ms_unflushed_frees = range_tree_create(&metaslab_rt_ops,
 		    type, mrap, start, shift);
 
-		metaslab_space_update(vd, mg->mg_class, 0, 0, msp->ms_size);
+		metaslab_space_update(mg, 0, 0, msp->ms_size);
 	}
 	ASSERT0(range_tree_space(msp->ms_freeing));
 	ASSERT0(range_tree_space(msp->ms_checkpointing));
@@ -4260,8 +4325,7 @@ metaslab_sync_done(metaslab_t *msp, uint64_t txg)
 	} else {
 		defer_delta -= range_tree_space(*defer_tree);
 	}
-	metaslab_space_update(vd, mg->mg_class, alloc_delta + defer_delta,
-	    defer_delta, 0);
+	metaslab_space_update(mg, alloc_delta + defer_delta, defer_delta, 0);
 
 	if (spa_syncing_log_sm(spa) == NULL) {
 		/*
@@ -5098,7 +5162,7 @@ metaslab_alloc_dva(spa_t *spa, metaslab_class_t *mc, uint64_t psize,
 		 * all else fails.
 		 */
 		if (vd != NULL && vd->vdev_mg != NULL) {
-			mg = vd->vdev_mg;
+			mg = vdev_get_mg(vd, mc);
 
 			if (flags & METASLAB_HINTBP_AVOID &&
 			    mg->mg_next != NULL)
@@ -5636,7 +5700,7 @@ metaslab_claim_concrete(vdev_t *vd, uint64_t offset, uint64_t size,
 	if (spa_writeable(spa)) {	/* don't dirty if we're zdb(8) */
 		metaslab_class_t *mc = msp->ms_group->mg_class;
 		multilist_sublist_t *mls =
-		    multilist_sublist_lock_obj(mc->mc_metaslab_txg_list, msp);
+		    multilist_sublist_lock_obj(&mc->mc_metaslab_txg_list, msp);
 		if (!multilist_link_active(&msp->ms_class_txg_node)) {
 			msp->ms_selected_txg = txg;
 			multilist_sublist_insert_head(mls, msp);
@@ -6033,6 +6097,12 @@ metaslab_enable(metaslab_t *msp, boolean_t sync, boolean_t unload)
 	mutex_exit(&mg->mg_ms_disabled_lock);
 }
 
+void
+metaslab_set_unflushed_dirty(metaslab_t *ms, boolean_t dirty)
+{
+	ms->ms_unflushed_dirty = dirty;
+}
+
 static void
 metaslab_update_ondisk_flush_data(metaslab_t *ms, dmu_tx_t *tx)
 {
@@ -6069,13 +6139,14 @@ metaslab_update_ondisk_flush_data(metaslab_t *ms, dmu_tx_t *tx)
 void
 metaslab_set_unflushed_txg(metaslab_t *ms, uint64_t txg, dmu_tx_t *tx)
 {
-	spa_t *spa = ms->ms_group->mg_vd->vdev_spa;
-
-	if (!spa_feature_is_active(spa, SPA_FEATURE_LOG_SPACEMAP))
-		return;
-
 	ms->ms_unflushed_txg = txg;
 	metaslab_update_ondisk_flush_data(ms, tx);
+}
+
+boolean_t
+metaslab_unflushed_dirty(metaslab_t *ms)
+{
+	return (ms->ms_unflushed_dirty);
 }
 
 uint64_t

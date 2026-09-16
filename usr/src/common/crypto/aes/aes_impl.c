@@ -20,6 +20,8 @@
  */
 /*
  * Copyright (c) 2003, 2010, Oracle and/or its affiliates. All rights reserved.
+ * Copyright 2014 by Saso Kiselkov. All rights reserved.
+ * Copyright 2026 Gernot Strasser
  */
 
 #include <sys/types.h>
@@ -30,6 +32,7 @@
 #ifndef	_KERNEL
 #include <strings.h>
 #include <stdlib.h>
+#include <sys/note.h>
 #endif	/* !_KERNEL */
 
 #ifdef __amd64
@@ -94,8 +97,8 @@ extern void aes_encrypt_impl(const uint32_t rk[], int Nr, const uint32_t pt[4],
 extern void aes_decrypt_impl(const uint32_t rk[], int Nr, const uint32_t ct[4],
 	uint32_t pt[4]);
 
-#define	AES_ENCRYPT_IMPL(a, b, c, d, e)	aes_encrypt_impl(a, b, c, d)
-#define	AES_DECRYPT_IMPL(a, b, c, d, e)	aes_decrypt_impl(a, b, c, d)
+#define	AES_ENCRYPT_IMPL(a, b, c, d)	aes_encrypt_impl(a, b, c, d)
+#define	AES_DECRYPT_IMPL(a, b, c, d)	aes_decrypt_impl(a, b, c, d)
 
 #elif defined(__amd64)
 
@@ -118,17 +121,37 @@ extern void aes_encrypt_intel(const uint32_t rk[], int Nr,
 	const uint32_t pt[4], uint32_t ct[4]);
 extern void aes_decrypt_intel(const uint32_t rk[], int Nr,
 	const uint32_t ct[4], uint32_t pt[4]);
+extern void aes_encrypt_intel8(const uint32_t rk[], int Nr,
+	const void *pt, void *ct);
+extern void aes_decrypt_intel8(const uint32_t rk[], int Nr,
+	const void *ct, void *pt);
+extern void aes_encrypt_cbc_intel8(const uint32_t rk[], int Nr,
+	const void *pt, void *ct, const void *iv);
+extern void aes_ctr_intel8(const uint32_t rk[], int Nr,
+	const void *input, void *output, uint64_t counter_upper_BE,
+	uint64_t counter_lower_LE);
+extern void aes_xor_intel(const uint8_t *, uint8_t *);
 
-static int intel_aes_instructions_present(void);
+static inline int intel_aes_instructions_present(void);
 
-#define	AES_ENCRYPT_IMPL(a, b, c, d, e) rijndael_encrypt(a, b, c, d, e)
-#define	AES_DECRYPT_IMPL(a, b, c, d, e) rijndael_decrypt(a, b, c, d, e)
+#ifdef	_KERNEL
+/*
+ * Some form of floating-point acceleration is available, so declare these.
+ * The implementations will be in a platform-specific assembly file (e.g.
+ * amd64/aes_intel.s for SSE2/AES-NI).
+ */
+extern void aes_accel_save(void *savestate);
+extern void aes_accel_restore(void *savestate);
+#endif	/* _KERNEL */
 
 #else /* Generic C implementation */
-
-#define	AES_ENCRYPT_IMPL(a, b, c, d, e)	rijndael_encrypt(a, b, c, d)
-#define	AES_DECRYPT_IMPL(a, b, c, d, e)	rijndael_decrypt(a, b, c, d)
+static void rijndael_encrypt(const uint32_t rk[], int Nr, const uint32_t pt[4],
+    uint32_t ct[4]);
+static void rijndael_decrypt(const uint32_t rk[], int Nr, const uint32_t pt[4],
+    uint32_t ct[4]);
 #define	rijndael_key_setup_enc_raw	rijndael_key_setup_enc
+#define	AES_ENCRYPT_IMPL(a, b, c, d)	rijndael_encrypt(a, b, c, d)
+#define	AES_DECRYPT_IMPL(a, b, c, d)	rijndael_decrypt(a, b, c, d)
 #endif	/* sun4u || __amd64 */
 
 #if defined(_LITTLE_ENDIAN) && !defined(__amd64)
@@ -1140,79 +1163,24 @@ aes_setupkeys(aes_key_t *key, const uint32_t *keyarr32, int keybits)
 static void
 aes_setupkeys(aes_key_t *key, const uint32_t *keyarr32, int keybits)
 {
+	AES_ACCEL_SAVESTATE(savestate);
+	aes_accel_enter(savestate);
+
 	if (intel_aes_instructions_present()) {
-		key->flags = INTEL_AES_NI_CAPABLE;
-		KPREEMPT_DISABLE;
 		key->nr = rijndael_key_setup_enc_intel(&(key->encr_ks.ks32[0]),
 		    keyarr32, keybits);
 		key->nr = rijndael_key_setup_dec_intel(&(key->decr_ks.ks32[0]),
 		    keyarr32, keybits);
-		KPREEMPT_ENABLE;
 	} else {
-		key->flags = 0;
 		key->nr = rijndael_key_setup_enc_amd64(&(key->encr_ks.ks32[0]),
 		    keyarr32, keybits);
 		key->nr = rijndael_key_setup_dec_amd64(&(key->decr_ks.ks32[0]),
 		    keyarr32, keybits);
 	}
 
+	aes_accel_exit(savestate);
 	key->type = AES_32BIT_KS;
 }
-
-/*
- * Encrypt one block of data. The block is assumed to be an array
- * of four uint32_t values, so copy for alignment (and byte-order
- * reversal for little endian systems might be necessary on the
- * input and output byte streams.
- * The size of the key schedule depends on the number of rounds
- * (which can be computed from the size of the key), i.e. 4*(Nr + 1).
- *
- * Parameters:
- * rk		Key schedule, of aes_ks_t (60 32-bit integers)
- * Nr		Number of rounds
- * pt		Input block (plain text)
- * ct		Output block (crypto text).  Can overlap with pt
- * flags	Indicates whether we're on Intel AES-NI-capable hardware
- */
-static void
-rijndael_encrypt(const uint32_t rk[], int Nr, const uint32_t pt[4],
-    uint32_t ct[4], int flags) {
-	if (flags & INTEL_AES_NI_CAPABLE) {
-		KPREEMPT_DISABLE;
-		aes_encrypt_intel(rk, Nr, pt, ct);
-		KPREEMPT_ENABLE;
-	} else {
-		aes_encrypt_amd64(rk, Nr, pt, ct);
-	}
-}
-
-/*
- * Decrypt one block of data. The block is assumed to be an array
- * of four uint32_t values, so copy for alignment (and byte-order
- * reversal for little endian systems might be necessary on the
- * input and output byte streams.
- * The size of the key schedule depends on the number of rounds
- * (which can be computed from the size of the key), i.e. 4*(Nr + 1).
- *
- * Parameters:
- * rk		Key schedule, of aes_ks_t (60 32-bit integers)
- * Nr		Number of rounds
- * ct		Input block (crypto text)
- * pt		Output block (plain text). Can overlap with pt
- * flags	Indicates whether we're on Intel AES-NI-capable hardware
- */
-static void
-rijndael_decrypt(const uint32_t rk[], int Nr, const uint32_t ct[4],
-    uint32_t pt[4], int flags) {
-	if (flags & INTEL_AES_NI_CAPABLE) {
-		KPREEMPT_DISABLE;
-		aes_decrypt_intel(rk, Nr, ct, pt);
-		KPREEMPT_ENABLE;
-	} else {
-		aes_decrypt_amd64(rk, Nr, ct, pt);
-	}
-}
-
 
 #else /* generic C implementation */
 
@@ -1622,6 +1590,21 @@ aes_init_keysched(const uint8_t *cipherKey, uint_t keyBits, void *keysched)
 	aes_setupkeys(newbie, keyarr.ka32, keyBits);
 }
 
+#if	defined(__amd64) && defined(_KERNEL)
+void
+aes_accel_enter(void *savestate)
+{
+	KPREEMPT_DISABLE;
+	aes_accel_save(savestate);
+}
+
+void
+aes_accel_exit(void *savestate)
+{
+	aes_accel_restore(savestate);
+	KPREEMPT_ENABLE;
+}
+#endif	/* defined(__amd64) && defined(_KERNEL) */
 
 /*
  * Encrypt one block using AES.
@@ -1637,12 +1620,21 @@ aes_encrypt_block(const void *ks, const uint8_t *pt, uint8_t *ct)
 {
 	aes_key_t	*ksch = (aes_key_t *)ks;
 
+#ifdef	__amd64
+	if (intel_aes_instructions_present())
+		aes_encrypt_intel(&ksch->encr_ks.ks32[0], ksch->nr,
+		    /* LINTED:  pointer alignment */
+		    (uint32_t *)pt, (uint32_t *)ct);
+	else
+		aes_encrypt_amd64(&ksch->encr_ks.ks32[0], ksch->nr,
+		    /* LINTED:  pointer alignment */
+		    (uint32_t *)pt, (uint32_t *)ct);
+#else	/* !__amd64 */
 #ifndef	AES_BYTE_SWAP
 	if (IS_P2ALIGNED2(pt, ct, sizeof (uint32_t))) {
-		/* LINTED:  pointer alignment */
 		AES_ENCRYPT_IMPL(&ksch->encr_ks.ks32[0], ksch->nr,
 		    /* LINTED:  pointer alignment */
-		    (uint32_t *)pt, (uint32_t *)ct, ksch->flags);
+		    (uint32_t *)pt, (uint32_t *)ct);
 	} else {
 #endif
 		uint32_t buffer[AES_BLOCK_LEN / sizeof (uint32_t)];
@@ -1656,10 +1648,10 @@ aes_encrypt_block(const void *ks, const uint8_t *pt, uint8_t *ct)
 		buffer[1] = htonl(*(uint32_t *)(void *)&pt[4]);
 		buffer[2] = htonl(*(uint32_t *)(void *)&pt[8]);
 		buffer[3] = htonl(*(uint32_t *)(void *)&pt[12]);
-#endif
+#endif	/* byte swap */
 
 		AES_ENCRYPT_IMPL(&ksch->encr_ks.ks32[0], ksch->nr,
-		    buffer, buffer, ksch->flags);
+		    buffer, buffer);
 
 		/* Copy result from buffer to output block */
 #ifndef	AES_BYTE_SWAP
@@ -1671,7 +1663,9 @@ aes_encrypt_block(const void *ks, const uint8_t *pt, uint8_t *ct)
 		*(uint32_t *)(void *)&ct[4] = htonl(buffer[1]);
 		*(uint32_t *)(void *)&ct[8] = htonl(buffer[2]);
 		*(uint32_t *)(void *)&ct[12] = htonl(buffer[3]);
-#endif
+#endif	/* byte swap */
+#endif	/* !__amd64 */
+
 	return (CRYPTO_SUCCESS);
 }
 
@@ -1690,12 +1684,21 @@ aes_decrypt_block(const void *ks, const uint8_t *ct, uint8_t *pt)
 {
 	aes_key_t	*ksch = (aes_key_t *)ks;
 
+#ifdef	__amd64
+	if (intel_aes_instructions_present())
+		aes_decrypt_intel(&ksch->decr_ks.ks32[0], ksch->nr,
+		    /* LINTED:  pointer alignment */
+		    (uint32_t *)ct, (uint32_t *)pt);
+	else
+		aes_decrypt_amd64(&ksch->decr_ks.ks32[0], ksch->nr,
+		    /* LINTED:  pointer alignment */
+		    (uint32_t *)ct, (uint32_t *)pt);
+#else	/* !__amd64 */
 #ifndef	AES_BYTE_SWAP
 	if (IS_P2ALIGNED2(ct, pt, sizeof (uint32_t))) {
-		/* LINTED:  pointer alignment */
 		AES_DECRYPT_IMPL(&ksch->decr_ks.ks32[0], ksch->nr,
 		    /* LINTED:  pointer alignment */
-		    (uint32_t *)ct, (uint32_t *)pt, ksch->flags);
+		    (uint32_t *)ct, (uint32_t *)pt);
 	} else {
 #endif
 		uint32_t buffer[AES_BLOCK_LEN / sizeof (uint32_t)];
@@ -1709,10 +1712,10 @@ aes_decrypt_block(const void *ks, const uint8_t *ct, uint8_t *pt)
 		buffer[1] = htonl(*(uint32_t *)(void *)&ct[4]);
 		buffer[2] = htonl(*(uint32_t *)(void *)&ct[8]);
 		buffer[3] = htonl(*(uint32_t *)(void *)&ct[12]);
-#endif
+#endif	/* byte swap */
 
 		AES_DECRYPT_IMPL(&ksch->decr_ks.ks32[0], ksch->nr,
-		    buffer, buffer, ksch->flags);
+		    buffer, buffer);
 
 		/* Copy result from buffer to output block */
 #ifndef	AES_BYTE_SWAP
@@ -1724,11 +1727,247 @@ aes_decrypt_block(const void *ks, const uint8_t *ct, uint8_t *pt)
 	*(uint32_t *)(void *)&pt[4] = htonl(buffer[1]);
 	*(uint32_t *)(void *)&pt[8] = htonl(buffer[2]);
 	*(uint32_t *)(void *)&pt[12] = htonl(buffer[3]);
+#endif	/* byte swap */
+#endif	/* !__amd64 */
+
+	return (CRYPTO_SUCCESS);
+}
+
+/*
+ * Perform AES ECB encryption on a sequence of blocks. On x86-64 CPUs with
+ * the AES-NI extension, this performs the encryption in increments of 8
+ * blocks at a time, exploiting instruction parallelism more efficiently.
+ * On other platforms, this simply encrypts the blocks in sequence.
+ */
+int
+aes_encrypt_ecb(const void *ks, const uint8_t *pt, uint8_t *ct, uint64_t length)
+{
+	aes_key_t *ksch = (aes_key_t *)ks;
+	uint64_t i = 0;
+
+#ifdef	__amd64
+	if (intel_aes_instructions_present()) {
+		/* 8-block accelerated path */
+		for (; i + 8 * AES_BLOCK_LEN <= length; i += 8 * AES_BLOCK_LEN)
+			aes_encrypt_intel8(&ksch->encr_ks.ks32[0], ksch->nr,
+			    &pt[i], &ct[i]);
+		/* tail of partial 8-block stride */
+		for (; i < length; i += AES_BLOCK_LEN)
+			aes_encrypt_intel(&ksch->encr_ks.ks32[0], ksch->nr,
+			    (void *)&pt[i], (void *)&ct[i]);
+	} else {
+		for (; i < length; i += AES_BLOCK_LEN)
+			aes_encrypt_amd64(&ksch->encr_ks.ks32[0], ksch->nr,
+			    (void *)&pt[i], (void *)&ct[i]);
+	}
+#elif	defined(sun4u)
+	for (; i < length; i += AES_BLOCK_LEN)
+		aes_encrypt_impl(&ksch->encr_ks.ks32[0], ksch->nr,
+		    (void *)&pt[i], (void *)&ct[i]);
+#else	/* Generic C implementation */
+	for (; i < length; i += AES_BLOCK_LEN)
+		(void) aes_encrypt_block(ksch, (void *)&pt[i], (void *)&ct[i]);
 #endif
 
 	return (CRYPTO_SUCCESS);
 }
 
+/*
+ * Same as aes_encrypt_ecb, but performs decryption.
+ */
+int
+aes_decrypt_ecb(const void *ks, const uint8_t *ct, uint8_t *pt, uint64_t length)
+{
+	aes_key_t *ksch = (aes_key_t *)ks;
+	uint64_t i = 0;
+
+#ifdef	__amd64
+	if (intel_aes_instructions_present()) {
+		for (; i + 8 * AES_BLOCK_LEN <= length; i += 8 * AES_BLOCK_LEN)
+			aes_decrypt_intel8(&ksch->decr_ks.ks32[0], ksch->nr,
+			    &ct[i], &pt[i]);
+		for (; i < length; i += AES_BLOCK_LEN)
+			aes_decrypt_intel(&ksch->decr_ks.ks32[0], ksch->nr,
+			    (void *)&ct[i], (void *)&pt[i]);
+	} else {
+		for (; i < length; i += AES_BLOCK_LEN)
+			aes_decrypt_amd64(&ksch->decr_ks.ks32[0], ksch->nr,
+			    (void *)&ct[i], (void *)&pt[i]);
+	}
+#elif	defined(sun4u)
+	for (; i < length; i += AES_BLOCK_LEN)
+		aes_decrypt_impl(&ksch->decr_ks.ks32[0], ksch->nr,
+		    (void *)&ct[i], (void *)&pt[i]);
+#else	/* Generic C implementation */
+	for (; i < length; i += AES_BLOCK_LEN)
+		(void) aes_decrypt_block(ksch, (void *)&ct[i], (void *)&pt[i]);
+#endif
+
+	return (CRYPTO_SUCCESS);
+}
+
+/*
+ * Encrypts a sequence of consecutive AES blocks in CBC mode. On x86-64
+ * with the AES-NI extension, the encryption is performed on 8 blocks at
+ * a time using an optimized assembly implementation, giving a speed boost
+ * of around 75%. On other platforms, this simply performs CBC encryption
+ * in sequence on the blocks.
+ *
+ * Decryption acceleration is implemented in the kernel kcf block cipher
+ * modes code (cbc.c), because that doesn't require a complete hand-tuned
+ * CBC implementation in assembly.
+ */
+int
+aes_encrypt_cbc(const void *ks, const uint8_t *pt, uint8_t *ct,
+    const uint8_t *iv, uint64_t length)
+{
+	aes_key_t *ksch = (aes_key_t *)ks;
+	size_t i = 0;
+	/*
+	 * Scratch block for the single-block loops: pt and ct may be the
+	 * same buffer (in-place encryption, e.g. a NULL output buffer in
+	 * cbc_encrypt_contiguous_blocks()), so we must not write ct[i]
+	 * before pt[i] has been consumed.
+	 */
+	uint64_t tmp[2];
+
+#ifdef	__amd64
+	if (intel_aes_instructions_present()) {
+		/* 8-block accelerated CBC */
+		for (; i + 8 * AES_BLOCK_LEN <= length;
+		    i += 8 * AES_BLOCK_LEN) {
+			aes_encrypt_cbc_intel8(&ksch->encr_ks.ks32[0],
+			    ksch->nr, &pt[i], &ct[i], iv);
+			iv = &ct[i + 7 * AES_BLOCK_LEN];
+		}
+		/* tail */
+		for (; i < length; i += AES_BLOCK_LEN) {
+			bcopy(iv, tmp, AES_BLOCK_LEN);
+			aes_xor_intel(&pt[i], (uint8_t *)tmp);
+			aes_encrypt_intel(&ksch->encr_ks.ks32[0], ksch->nr,
+			    (void *)tmp, (void *)&ct[i]);
+			iv = &ct[i];
+		}
+	} else {
+		for (; i < length; i += AES_BLOCK_LEN) {
+			bcopy(iv, tmp, AES_BLOCK_LEN);
+			aes_xor_intel(&pt[i], (uint8_t *)tmp);
+			aes_encrypt_amd64(&ksch->encr_ks.ks32[0], ksch->nr,
+			    (void *)tmp, (void *)&ct[i]);
+			iv = &ct[i];
+		}
+	}
+#elif	defined(sun4u)
+	for (; i < length; i += AES_BLOCK_LEN) {
+		bcopy(iv, tmp, AES_BLOCK_LEN);
+		aes_xor_block(&pt[i], (uint8_t *)tmp);
+		aes_encrypt_impl(&ksch->encr_ks.ks32[0], ksch->nr,
+		    (void *)tmp, (void *)&ct[i]);
+		iv = &ct[i];
+	}
+#else	/* Generic C implementation */
+	for (; i < length; i += AES_BLOCK_LEN) {
+		bcopy(iv, tmp, AES_BLOCK_LEN);
+		aes_xor_block(&pt[i], (uint8_t *)tmp);
+		(void) aes_encrypt_block(ksch, (void *)tmp, (void *)&ct[i]);
+		iv = &ct[i];
+	}
+#endif
+
+	return (CRYPTO_SUCCESS);
+}
+
+/*
+ * Performs high-performance counter mode encryption and decryption on
+ * a sequence of blocks. In CTR mode, encryption and decryption are the
+ * same operation, just with the plaintext and ciphertext reversed:
+ * plaintext = CTR(CTR(plaintext, K), K)
+ * Blocks also do not interdepend on each other, so it is an excellent
+ * mode when high performance is required and data authentication/integrity
+ * checking is provided via some other means, or isn't necessary.
+ *
+ * On x86-64 with the AES-NI extension, this code performs CTR mode
+ * encryption in parallel on 8 blocks at a time and can provide in
+ * excess of 3GB/s/core of encryption/decryption performance (<1 CPB).
+ */
+int
+aes_ctr_mode(const void *ks, const uint8_t *input, uint8_t *output,
+    uint64_t length, uint64_t counter[2])
+{
+	aes_key_t *ksch = (aes_key_t *)ks;
+	uint64_t i = 0;
+	/*
+	 * Keystream scratch block for the single-block loops; input and
+	 * output may alias (in-place operation), so the keystream must
+	 * not be generated in output[i] before input[i] has been read.
+	 */
+	uint64_t tmp[2];
+
+	/* swap lower part to host order for arithmetic */
+	counter[1] = ntohll(counter[1]);
+
+#ifdef	__amd64
+	if (intel_aes_instructions_present()) {
+		/* 8-block accelerated CTR */
+		for (; i + 8 * AES_BLOCK_LEN <= length;
+		    i += 8 * AES_BLOCK_LEN) {
+			aes_ctr_intel8(&ksch->encr_ks.ks32[0], ksch->nr,
+			    &input[i], &output[i], counter[0], counter[1]);
+			/*
+			 * Advance the low 64 bits of the counter by 8.  This is
+			 * a 64-bit counter (nonce in counter[0], counter in
+			 * counter[1]); on overflow it wraps to 0 and must NOT
+			 * carry into the nonce.  aes_ctr_intel8() forms each of
+			 * its 8 counter blocks with a fixed upper half and a
+			 * plain 64-bit add of the lower half (see PREP_CTR_BLOCKS
+			 * in aes_intel.S), and the scalar tail below wraps the
+			 * same way, so a wrap here needs no special handling.
+			 */
+			counter[1] += 8;
+		}
+		/* tail */
+		for (; i < length; i += AES_BLOCK_LEN) {
+			tmp[0] = counter[0];
+			tmp[1] = htonll(counter[1]++);
+			aes_encrypt_intel(&ksch->encr_ks.ks32[0], ksch->nr,
+			    (void *)tmp, (void *)tmp);
+			aes_xor_intel(&input[i], (uint8_t *)tmp);
+			bcopy(tmp, &output[i], AES_BLOCK_LEN);
+		}
+	} else {
+		for (; i < length; i += AES_BLOCK_LEN) {
+			tmp[0] = counter[0];
+			tmp[1] = htonll(counter[1]++);
+			aes_encrypt_amd64(&ksch->encr_ks.ks32[0], ksch->nr,
+			    (void *)tmp, (void *)tmp);
+			aes_xor_intel(&input[i], (uint8_t *)tmp);
+			bcopy(tmp, &output[i], AES_BLOCK_LEN);
+		}
+	}
+#elif	defined(sun4u)
+	for (; i < length; i += AES_BLOCK_LEN) {
+		tmp[0] = counter[0];
+		tmp[1] = htonll(counter[1]++);
+		aes_encrypt_impl(&ksch->encr_ks.ks32[0], ksch->nr,
+		    (void *)tmp, (void *)tmp);
+		aes_xor_block(&input[i], (uint8_t *)tmp);
+		bcopy(tmp, &output[i], AES_BLOCK_LEN);
+	}
+#else	/* Generic C implementation */
+	for (; i < length; i += AES_BLOCK_LEN) {
+		tmp[0] = counter[0];
+		tmp[1] = htonll(counter[1]++);
+		(void) aes_encrypt_block(ksch, (void *)tmp, (void *)tmp);
+		aes_xor_block(&input[i], (uint8_t *)tmp);
+		bcopy(tmp, &output[i], AES_BLOCK_LEN);
+	}
+#endif
+
+	/* swap lower part back to big endian */
+	counter[1] = htonll(counter[1]);
+
+	return (CRYPTO_SUCCESS);
+}
 
 /*
  * Allocate key schedule for AES.
@@ -1762,14 +2001,13 @@ aes_alloc_keysched(size_t *size, int kmflag)
 
 #ifdef __amd64
 /*
- * Return 1 if executing on Intel with AES-NI instructions,
- * otherwise 0 (i.e., Intel without AES-NI or AMD64).
+ * Return 1 if executing on x86-64 with AES-NI instructions, otherwise 0.
  * Cache the result, as the CPU can't change.
  *
  * Note: the userland version uses getisax().  The kernel version uses
  * global variable x86_featureset.
  */
-static int
+static inline int
 intel_aes_instructions_present(void)
 {
 	static int	cached_result = -1;

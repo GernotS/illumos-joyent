@@ -21,7 +21,9 @@
 
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2011, 2019 by Delphix. All rights reserved.
+ * Copyright (c) 2011, 2021 by Delphix. All rights reserved.
+ * Copyright 2025 iXsystems, Inc.
+ * Copyright 2026 Gernot Strasser
  * Copyright (c) 2015, Nexenta Systems, Inc.  All rights reserved.
  * Copyright (c) 2014 Spectra Logic Corporation, All rights reserved.
  * Copyright 2013 Saso Kiselkov. All rights reserved.
@@ -32,8 +34,13 @@
  * Copyright (c) 2017, Intel Corporation.
  * Copyright 2020 Joshua M. Clulow <josh@sysmgr.org>
  * Copyright 2021 OmniOS Community Edition (OmniOSce) Association.
+ * Copyright (c) 2021, Colm Buckley <colm@tuatha.org>
  * Copyright 2022 Oxide Computer Company
  * Copyright 2026 Edgecast Cloud LLC.
+ * Copyright 2023 MNX Cloud, Inc.
+ * Copyright (c) 2023 Hewlett Packard Enterprise Development LP.
+ * Copyright (c) 2023-2026, Klara, Inc.
+ * Copyright (c) 2026, TrueNAS.
  */
 
 /*
@@ -290,10 +297,16 @@ spa_prop_get_config(spa_t *spa, nvlist_t **nvp)
 		alloc = metaslab_class_get_alloc(mc);
 		alloc += metaslab_class_get_alloc(spa_special_class(spa));
 		alloc += metaslab_class_get_alloc(spa_dedup_class(spa));
+		alloc += metaslab_class_get_alloc(spa_embedded_log_class(spa));
+		alloc += metaslab_class_get_alloc(
+		    spa_special_embedded_log_class(spa));
 
 		size = metaslab_class_get_space(mc);
 		size += metaslab_class_get_space(spa_special_class(spa));
 		size += metaslab_class_get_space(spa_dedup_class(spa));
+		size += metaslab_class_get_space(spa_embedded_log_class(spa));
+		size += metaslab_class_get_space(
+		    spa_special_embedded_log_class(spa));
 
 		spa_prop_add_list(*nvp, ZPOOL_PROP_NAME, spa_name(spa), 0, src);
 		spa_prop_add_list(*nvp, ZPOOL_PROP_SIZE, NULL, size, src);
@@ -352,6 +365,11 @@ spa_prop_get_config(spa_t *spa, nvlist_t **nvp)
 	}
 
 	spa_prop_add_list(*nvp, ZPOOL_PROP_GUID, NULL, spa_guid(spa), src);
+
+	spa_prop_add_list(*nvp, ZPOOL_PROP_DEDUP_TABLE_SIZE, NULL,
+	    ddt_get_ddt_dsize(spa), src);
+	spa_prop_add_list(*nvp, ZPOOL_PROP_DEDUP_TABLE_QUOTA, NULL,
+	    spa->spa_dedup_table_quota, src);
 
 	if (spa->spa_comment != NULL) {
 		spa_prop_add_list(*nvp, ZPOOL_PROP_COMMENT, spa->spa_comment,
@@ -705,6 +723,10 @@ spa_prop_validate(spa_t *spa, nvlist_t *props)
 			if (error == 0 &&
 			    intval != 0 && intval < ZIO_DEDUPDITTO_MIN)
 				error = SET_ERROR(EINVAL);
+			break;
+
+		case ZPOOL_PROP_DEDUP_TABLE_QUOTA:
+			error = nvpair_value_uint64(elem, &intval);
 			break;
 		}
 
@@ -1159,6 +1181,10 @@ spa_activate(spa_t *spa, int mode)
 
 	spa->spa_normal_class = metaslab_class_create(spa, zfs_metaslab_ops);
 	spa->spa_log_class = metaslab_class_create(spa, zfs_metaslab_ops);
+	spa->spa_embedded_log_class =
+	    metaslab_class_create(spa, zfs_metaslab_ops);
+	spa->spa_special_embedded_log_class =
+	    metaslab_class_create(spa, zfs_metaslab_ops);
 	spa->spa_special_class = metaslab_class_create(spa, zfs_metaslab_ops);
 	spa->spa_dedup_class = metaslab_class_create(spa, zfs_metaslab_ops);
 
@@ -1269,6 +1295,12 @@ spa_deactivate(spa_t *spa)
 
 	metaslab_class_destroy(spa->spa_log_class);
 	spa->spa_log_class = NULL;
+
+	metaslab_class_destroy(spa->spa_embedded_log_class);
+	spa->spa_embedded_log_class = NULL;
+
+	metaslab_class_destroy(spa->spa_special_embedded_log_class);
+	spa->spa_special_embedded_log_class = NULL;
 
 	metaslab_class_destroy(spa->spa_special_class);
 	spa->spa_special_class = NULL;
@@ -2025,6 +2057,9 @@ spa_check_logs(spa_t *spa)
 	return (rv);
 }
 
+/*
+ * Passivate any log vdevs (note, does not apply to embedded log metaslabs).
+ */
 static boolean_t
 spa_passivate_log(spa_t *spa)
 {
@@ -2038,10 +2073,10 @@ spa_passivate_log(spa_t *spa)
 
 	for (int c = 0; c < rvd->vdev_children; c++) {
 		vdev_t *tvd = rvd->vdev_child[c];
-		metaslab_group_t *mg = tvd->vdev_mg;
 
 		if (tvd->vdev_islog) {
-			metaslab_group_passivate(mg);
+			ASSERT3P(tvd->vdev_log_mg, ==, NULL);
+			metaslab_group_passivate(tvd->vdev_mg);
 			slog_found = B_TRUE;
 		}
 	}
@@ -2049,6 +2084,9 @@ spa_passivate_log(spa_t *spa)
 	return (slog_found);
 }
 
+/*
+ * Activate any log vdevs (note, does not apply to embedded log metaslabs).
+ */
 static void
 spa_activate_log(spa_t *spa)
 {
@@ -2058,10 +2096,11 @@ spa_activate_log(spa_t *spa)
 
 	for (int c = 0; c < rvd->vdev_children; c++) {
 		vdev_t *tvd = rvd->vdev_child[c];
-		metaslab_group_t *mg = tvd->vdev_mg;
 
-		if (tvd->vdev_islog)
-			metaslab_group_activate(mg);
+		if (tvd->vdev_islog) {
+			ASSERT3P(tvd->vdev_log_mg, ==, NULL);
+			metaslab_group_activate(tvd->vdev_mg);
+		}
 	}
 }
 
@@ -3628,6 +3667,8 @@ spa_ld_get_props(spa_t *spa)
 		spa_prop_find(spa, ZPOOL_PROP_MULTIHOST, &spa->spa_multihost);
 		spa_prop_find(spa, ZPOOL_PROP_DEDUPDITTO,
 		    &spa->spa_dedup_ditto);
+		spa_prop_find(spa, ZPOOL_PROP_DEDUP_TABLE_QUOTA,
+		    &spa->spa_dedup_table_quota);
 		spa_prop_find(spa, ZPOOL_PROP_AUTOTRIM, &spa->spa_autotrim);
 		spa->spa_autoreplace = (autoreplace != 0);
 	}
@@ -3756,7 +3797,7 @@ spa_ld_load_vdev_metadata(spa_t *spa)
 
 	error = spa_ld_log_spacemaps(spa);
 	if (error != 0) {
-		spa_load_failed(spa, "spa_ld_log_sm_data failed [error=%d]",
+		spa_load_failed(spa, "spa_ld_log_spacemaps failed [error=%d]",
 		    error);
 		return (spa_vdev_err(rvd, VDEV_AUX_CORRUPT_DATA, error));
 	}
@@ -5189,6 +5230,7 @@ spa_create(const char *pool, nvlist_t *nvroot, nvlist_t *props,
 	spa->spa_removing_phys.sr_removing_vdev = -1;
 	spa->spa_removing_phys.sr_prev_indirect_vdev = -1;
 	spa->spa_indirect_vdevs_loaded = B_TRUE;
+	spa->spa_deflate = (version >= SPA_VERSION_RAIDZ_DEFLATE);
 
 	/*
 	 * Create "The Godfather" zio to hold all async IOs
@@ -5304,7 +5346,6 @@ spa_create(const char *pool, nvlist_t *nvroot, nvlist_t *props,
 
 	/* Newly created pools with the right version are always deflated. */
 	if (version >= SPA_VERSION_RAIDZ_DEFLATE) {
-		spa->spa_deflate = TRUE;
 		if (zap_add(spa->spa_meta_objset,
 		    DMU_POOL_DIRECTORY_OBJECT, DMU_POOL_DEFLATE,
 		    sizeof (uint64_t), 1, &spa->spa_deflate, tx) != 0) {
@@ -7620,12 +7661,20 @@ spa_async_thread(void *arg)
 		old_space = metaslab_class_get_space(spa_normal_class(spa));
 		old_space += metaslab_class_get_space(spa_special_class(spa));
 		old_space += metaslab_class_get_space(spa_dedup_class(spa));
+		old_space += metaslab_class_get_space(
+		    spa_embedded_log_class(spa));
+		old_space += metaslab_class_get_space(
+		    spa_special_embedded_log_class(spa));
 
 		spa_config_update(spa, SPA_CONFIG_UPDATE_POOL);
 
 		new_space = metaslab_class_get_space(spa_normal_class(spa));
 		new_space += metaslab_class_get_space(spa_special_class(spa));
 		new_space += metaslab_class_get_space(spa_dedup_class(spa));
+		new_space += metaslab_class_get_space(
+		    spa_embedded_log_class(spa));
+		new_space += metaslab_class_get_space(
+		    spa_special_embedded_log_class(spa));
 		mutex_exit(&spa_namespace_lock);
 
 		/*
@@ -8251,6 +8300,9 @@ spa_sync_props(void *arg, dmu_tx_t *tx)
 				break;
 			case ZPOOL_PROP_DEDUPDITTO:
 				spa->spa_dedup_ditto = intval;
+				break;
+			case ZPOOL_PROP_DEDUP_TABLE_QUOTA:
+				spa->spa_dedup_table_quota = intval;
 				break;
 			default:
 				break;

@@ -1391,6 +1391,8 @@ ZFS_COMMON_OBJS +=		\
 	cityhash.o		\
 	dbuf.o			\
 	ddt.o			\
+	ddt_log.o		\
+	ddt_stats.o		\
 	ddt_zap.o		\
 	dmu.o			\
 	dmu_diff.o		\
@@ -2405,6 +2407,9 @@ KTEST_KTEST_OBJS += ktest_selftest.o
 STREAM_KTEST_OBJS += stream_ktest.o
 
 SHA2_KTEST_OBJS += sha2_ktest.o
+AES_GCM_KTEST_OBJS += aes_gcm_ktest.o
+AES_CTR_KTEST_OBJS += aes_ctr_ktest.o
+AES_KTEST_OBJS = $(AES_GCM_KTEST_OBJS) $(AES_CTR_KTEST_OBJS)
 
 #
 # EEPROM framework driver

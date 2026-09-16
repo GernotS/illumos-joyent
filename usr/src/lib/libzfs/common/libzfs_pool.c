@@ -29,6 +29,7 @@
  * Copyright (c) 2017, Intel Corporation.
  * Copyright 2022 OmniOS Community Edition (OmniOSce) Association.
  * Copyright 2022 Oxide Computer Company
+ * Copyright 2026 Gernot Strasser
  */
 
 #include <ctype.h>
@@ -2196,10 +2197,55 @@ xlate_init_err(int err)
 }
 
 /*
+ * Prune the DDT on this pool.  `unit` is AGE (amount = seconds) or
+ * PERCENTAGE (amount = 1-100).  Returns 0 on success, -1 on failure with
+ * the libzfs error set.
+ */
+int
+zpool_ddt_prune(zpool_handle_t *zhp, zpool_ddt_prune_unit_t unit,
+    uint64_t amount)
+{
+	libzfs_handle_t *hdl = zhp->zpool_hdl;
+	nvlist_t *innvl;
+	zfs_cmd_t zc = { 0 };
+	char msg[1024];
+	int ret;
+
+	if (nvlist_alloc(&innvl, NV_UNIQUE_NAME, 0) != 0)
+		return (no_memory(hdl));
+
+	if (nvlist_add_int32(innvl, ZPOOL_DDT_PRUNE_UNIT, (int32_t)unit) != 0 ||
+	    nvlist_add_uint64(innvl, ZPOOL_DDT_PRUNE_AMOUNT, amount) != 0) {
+		nvlist_free(innvl);
+		return (no_memory(hdl));
+	}
+
+	(void) strlcpy(zc.zc_name, zhp->zpool_name, sizeof (zc.zc_name));
+
+	if (zcmd_write_src_nvlist(hdl, &zc, innvl) != 0) {
+		nvlist_free(innvl);
+		return (-1);
+	}
+
+	ret = zfs_ioctl(hdl, ZFS_IOC_DDT_PRUNE, &zc);
+
+	zcmd_free_nvlists(&zc);
+	nvlist_free(innvl);
+
+	if (ret != 0) {
+		(void) snprintf(msg, sizeof (msg), dgettext(TEXT_DOMAIN,
+		    "cannot prune DDT on '%s'"), zhp->zpool_name);
+		(void) zpool_standard_error(hdl, errno, msg);
+		return (-1);
+	}
+	return (0);
+}
+
+/*
  * Begin, suspend, or cancel the initialization (initializing of all free
  * blocks) for the given vdevs in the given pool.
  */
-int
+static int
 zpool_initialize_impl(zpool_handle_t *zhp, pool_initialize_func_t cmd_type,
     nvlist_t *vds, boolean_t wait)
 {
@@ -2282,6 +2328,25 @@ zpool_initialize(zpool_handle_t *zhp, pool_initialize_func_t cmd_type,
     nvlist_t *vds)
 {
 	return (zpool_initialize_impl(zhp, cmd_type, vds, B_FALSE));
+}
+
+int
+zpool_prefetch(zpool_handle_t *zhp, zpool_prefetch_type_t type)
+{
+	libzfs_handle_t *hdl = zhp->zpool_hdl;
+	char msg[1024];
+	int error;
+
+	error = lzc_pool_prefetch(zhp->zpool_name, type);
+	if (error != 0) {
+		(void) snprintf(msg, sizeof (msg), dgettext(TEXT_DOMAIN,
+		    "cannot prefetch %s in '%s'"),
+		    type == ZPOOL_PREFETCH_DDT ? "ddt" : "", zhp->zpool_name);
+		(void) zpool_standard_error(hdl, error, msg);
+		return (-1);
+	}
+
+	return (0);
 }
 
 int

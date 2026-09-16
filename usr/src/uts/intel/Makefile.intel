@@ -791,6 +791,7 @@ MISC_KMODS	+= mac_ktest
 MISC_KMODS	+= ktest_ktest
 MISC_KMODS	+= stream_ktest
 MISC_KMODS	+= sha2_ktest
+MISC_KMODS	+= aes_ktest
 
 #
 #	I2C Devices and Framework

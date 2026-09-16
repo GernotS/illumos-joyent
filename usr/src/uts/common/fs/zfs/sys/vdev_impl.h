@@ -20,7 +20,8 @@
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2011, 2020 by Delphix. All rights reserved.
+ * Copyright (c) 2011, 2021 by Delphix. All rights reserved.
+ * Copyright 2026 Gernot Strasser
  * Copyright (c) 2017, Intel Corporation.
  * Copyright 2019 Joyent, Inc.
  * Copyright 2020 Joshua M. Clulow <josh@sysmgr.org>
@@ -245,6 +246,7 @@ struct vdev {
 	uint64_t	vdev_ms_shift;	/* metaslab size shift		*/
 	uint64_t	vdev_ms_count;	/* number of metaslabs		*/
 	metaslab_group_t *vdev_mg;	/* metaslab group		*/
+	metaslab_group_t *vdev_log_mg;	/* embedded slog metaslab group	*/
 	metaslab_t	**vdev_ms;	/* metaslab array		*/
 	txg_list_t	vdev_ms_list;	/* per-txg dirty metaslab lists	*/
 	txg_list_t	vdev_dtl_list;	/* per-txg dirty DTL lists	*/
@@ -576,6 +578,7 @@ extern boolean_t vdev_obsolete_counts_are_precise(vdev_t *vd);
  * Other miscellaneous functions
  */
 int vdev_checkpoint_sm_object(vdev_t *vd);
+void vdev_metaslab_group_create(vdev_t *vd);
 
 /*
  * The vdev_buf_t is used to translate between zio_t and buf_t, and back again.

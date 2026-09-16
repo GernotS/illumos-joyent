@@ -28,6 +28,9 @@
  * Copyright (c) 2011, 2017 by Delphix. All rights reserved.
  * Copyright (c) 2018 DilOS
  * Copyright 2026 Oxide Computer Company
+ * Portions Copyright (c) 2024, Klara, Inc.
+ * Portions Copyright (c) 2024, iXsystems, Inc.
+ * Copyright (c) 2019 Datto Inc.
  */
 
 #include <sys/dmu.h>
@@ -75,12 +78,12 @@ static xuio_stats_t xuio_stats = {
 int zfs_nopwrite_enabled = 1;
 
 /*
- * Tunable to control percentage of dirtied blocks from frees in one TXG.
- * After this threshold is crossed, additional dirty blocks from frees
- * wait until the next TXG.
+ * Tunable to control percentage of dirtied L1 blocks from frees allowed into
+ * one TXG. After this threshold is crossed, additional dirty blocks from frees
+ * will wait until the next TXG.
  * A value of zero will disable this throttle.
  */
-uint32_t zfs_per_txg_dirty_frees_percent = 30;
+uint32_t zfs_per_txg_dirty_frees_percent = 5;
 
 /*
  * This can be used for testing, to ensure that certain actions happen
@@ -763,6 +766,102 @@ dmu_prefetch(objset_t *os, uint64_t object, int64_t level, uint64_t offset,
 	dnode_rele(dn, FTAG);
 }
 
+typedef struct {
+	kmutex_t	dpa_lock;
+	kcondvar_t	dpa_cv;
+	uint64_t	dpa_pending_io;
+} dmu_prefetch_arg_t;
+
+static void
+dmu_prefetch_done(void *arg, boolean_t issued)
+{
+	(void) issued;
+	dmu_prefetch_arg_t *dpa = arg;
+
+	mutex_enter(&dpa->dpa_lock);
+	ASSERT3U(dpa->dpa_pending_io, >, 0);
+	if (--dpa->dpa_pending_io == 0)
+		cv_broadcast(&dpa->dpa_cv);
+	mutex_exit(&dpa->dpa_lock);
+}
+
+static void
+dmu_prefetch_wait_by_dnode(dnode_t *dn, uint64_t offset, uint64_t len)
+{
+	dmu_prefetch_arg_t dpa;
+
+	mutex_init(&dpa.dpa_lock, NULL, MUTEX_DEFAULT, NULL);
+	cv_init(&dpa.dpa_cv, NULL, CV_DEFAULT, NULL);
+
+	rw_enter(&dn->dn_struct_rwlock, RW_READER);
+
+	uint64_t start = dbuf_whichblock(dn, 0, offset);
+	uint64_t end = dbuf_whichblock(dn, 0, offset + len - 1) + 1;
+	dpa.dpa_pending_io = end - start;
+
+	for (uint64_t blk = start; blk < end; blk++) {
+		(void) dbuf_prefetch_impl(dn, 0, blk, ZIO_PRIORITY_ASYNC_READ,
+		    0, dmu_prefetch_done, &dpa);
+	}
+
+	rw_exit(&dn->dn_struct_rwlock);
+
+	/* wait for prefetch L0 reads to finish */
+	mutex_enter(&dpa.dpa_lock);
+	while (dpa.dpa_pending_io > 0)
+		cv_wait(&dpa.dpa_cv, &dpa.dpa_lock);
+	mutex_exit(&dpa.dpa_lock);
+
+	mutex_destroy(&dpa.dpa_lock);
+	cv_destroy(&dpa.dpa_cv);
+}
+
+/*
+ * Issue prefetch I/Os for the given L0 block range and wait for the I/O
+ * to complete. This does not enforce dmu_prefetch_max and will prefetch
+ * the entire range. The blocks are read from disk into the ARC but no
+ * decompression occurs (i.e., the dbuf cache is not required).
+ */
+int
+dmu_prefetch_wait(objset_t *os, uint64_t object, uint64_t offset, uint64_t size)
+{
+	dnode_t *dn;
+	int err = 0;
+
+	err = dnode_hold(os, object, FTAG, &dn);
+	if (err != 0)
+		return (err);
+
+	/*
+	 * Chunk the requests (16 indirects worth) so that we can be interrupted
+	 */
+	uint64_t chunksize;
+	if (dn->dn_indblkshift) {
+		uint64_t nbps = 1ULL << (dn->dn_indblkshift - SPA_BLKPTRSHIFT);
+		chunksize = (nbps * 16) << dn->dn_datablkshift;
+	} else {
+		chunksize = dn->dn_datablksz;
+	}
+
+	while (size > 0) {
+		uint64_t mylen = MIN(size, chunksize);
+
+		dmu_prefetch_wait_by_dnode(dn, offset, mylen);
+
+		offset += mylen;
+		size -= mylen;
+
+		if (issig(JUSTLOOKING) && issig(FORREAL)) {
+			err = SET_ERROR(EINTR);
+			break;
+		}
+	}
+
+	dnode_rele(dn, FTAG);
+
+	return (err);
+}
+
 /*
  * Get the next "chunk" of file data to free.  We traverse the file from
  * the end so that the file gets shorter over time (if we crashes in the
@@ -771,25 +870,38 @@ dmu_prefetch(objset_t *os, uint64_t object, int64_t level, uint64_t offset,
  *
  * On input, *start should be the first offset that does not need to be
  * freed (e.g. "offset + length").  On return, *start will be the first
- * offset that should be freed.
+ * offset that should be freed and l1blks is set to the number of level 1
+ * indirect blocks found within the chunk.
  */
 static int
-get_next_chunk(dnode_t *dn, uint64_t *start, uint64_t minimum)
+get_next_chunk(dnode_t *dn, uint64_t *start, uint64_t minimum, uint64_t *l1blks)
 {
+	uint64_t blks;
 	uint64_t maxblks = DMU_MAX_ACCESS >> (dn->dn_indblkshift + 1);
 	/* bytes of data covered by a level-1 indirect block */
 	uint64_t iblkrange =
 	    dn->dn_datablksz * EPB(dn->dn_indblkshift, SPA_BLKPTRSHIFT);
+	uint64_t total_l1blks;
 
 	ASSERT3U(minimum, <=, *start);
 
-	if (*start - minimum <= iblkrange * maxblks) {
+	/*
+	 * Check if we can free the entire range assuming that all of the
+	 * L1 blocks in this range have data. If we can, we use this
+	 * worst case value as an estimate so we can avoid having to look
+	 * at the object's actual data.
+	 */
+	total_l1blks =
+	    (roundup(*start, iblkrange) - (minimum / iblkrange * iblkrange)) /
+	    iblkrange;
+	if (total_l1blks <= maxblks) {
+		*l1blks = total_l1blks;
 		*start = minimum;
 		return (0);
 	}
 	ASSERT(ISP2(iblkrange));
 
-	for (uint64_t blks = 0; *start > minimum && blks < maxblks; blks++) {
+	for (blks = 0; *start > minimum && blks < maxblks; blks++) {
 		int err;
 
 		/*
@@ -807,6 +919,7 @@ get_next_chunk(dnode_t *dn, uint64_t *start, uint64_t minimum)
 			*start = minimum;
 			break;
 		} else if (err != 0) {
+			*l1blks = blks;
 			return (err);
 		}
 
@@ -815,6 +928,8 @@ get_next_chunk(dnode_t *dn, uint64_t *start, uint64_t minimum)
 	}
 	if (*start < minimum)
 		*start = minimum;
+	*l1blks = blks;
+
 	return (0);
 }
 
@@ -850,14 +965,15 @@ dmu_free_long_range_impl(objset_t *os, dnode_t *dn, uint64_t offset,
 		dirty_frees_threshold =
 		    zfs_per_txg_dirty_frees_percent * zfs_dirty_data_max / 100;
 	else
-		dirty_frees_threshold = zfs_dirty_data_max / 4;
+		dirty_frees_threshold = zfs_dirty_data_max / 20;
 
 	if (length == DMU_OBJECT_END || offset + length > object_size)
 		length = object_size - offset;
 
 	while (length != 0) {
 		uint64_t chunk_end, chunk_begin, chunk_len;
-		uint64_t long_free_dirty_all_txgs = 0;
+		uint64_t l1blks;
+		uint64_t txg, long_free_dirty;
 		dmu_tx_t *tx;
 
 		if (dmu_objset_zfs_unmounting(dn->dn_objset))
@@ -866,31 +982,13 @@ dmu_free_long_range_impl(objset_t *os, dnode_t *dn, uint64_t offset,
 		chunk_end = chunk_begin = offset + length;
 
 		/* move chunk_begin backwards to the beginning of this chunk */
-		err = get_next_chunk(dn, &chunk_begin, offset);
+		err = get_next_chunk(dn, &chunk_begin, offset, &l1blks);
 		if (err)
 			return (err);
 		ASSERT3U(chunk_begin, >=, offset);
 		ASSERT3U(chunk_begin, <=, chunk_end);
 
 		chunk_len = chunk_end - chunk_begin;
-
-		mutex_enter(&dp->dp_lock);
-		for (int t = 0; t < TXG_SIZE; t++) {
-			long_free_dirty_all_txgs +=
-			    dp->dp_long_free_dirty_pertxg[t];
-		}
-		mutex_exit(&dp->dp_lock);
-
-		/*
-		 * To avoid filling up a TXG with just frees wait for
-		 * the next TXG to open before freeing more chunks if
-		 * we have reached the threshold of frees
-		 */
-		if (dirty_frees_threshold != 0 &&
-		    long_free_dirty_all_txgs >= dirty_frees_threshold) {
-			txg_wait_open(dp, 0, B_TRUE);
-			continue;
-		}
 
 		tx = dmu_tx_create(os);
 		dmu_tx_hold_free(tx, dn->dn_object, chunk_begin, chunk_len);
@@ -906,13 +1004,41 @@ dmu_free_long_range_impl(objset_t *os, dnode_t *dn, uint64_t offset,
 			return (err);
 		}
 
+		txg = dmu_tx_get_txg(tx);
+
 		mutex_enter(&dp->dp_lock);
-		dp->dp_long_free_dirty_pertxg[dmu_tx_get_txg(tx) & TXG_MASK] +=
-		    chunk_len;
+		long_free_dirty = dp->dp_long_free_dirty_pertxg[txg & TXG_MASK];
+		mutex_exit(&dp->dp_lock);
+
+		/*
+		 * To avoid filling up a TXG with just frees, wait for
+		 * the next TXG to open before freeing more chunks if
+		 * we have reached the threshold of frees.
+		 */
+		if (dirty_frees_threshold != 0 &&
+		    long_free_dirty >= dirty_frees_threshold) {
+			dmu_tx_commit(tx);
+			txg_wait_open(dp, 0, B_TRUE);
+			continue;
+		}
+
+		/*
+		 * In order to prevent unnecessary write throttling, for each
+		 * TXG, we track the cumulative size of L1 blocks being dirtied
+		 * in dnode_free_range() below. We compare this number to a
+		 * tunable threshold, past which we prevent new L1 dirty freeing
+		 * blocks from being added into the open TXG. See
+		 * dmu_free_long_range_impl() for details. The threshold
+		 * prevents write throttle activation due to dirty freeing L1
+		 * blocks taking up a large percentage of zfs_dirty_data_max.
+		 */
+		mutex_enter(&dp->dp_lock);
+		dp->dp_long_free_dirty_pertxg[txg & TXG_MASK] +=
+		    l1blks << dn->dn_indblkshift;
 		mutex_exit(&dp->dp_lock);
 		DTRACE_PROBE3(free__long__range,
-		    uint64_t, long_free_dirty_all_txgs, uint64_t, chunk_len,
-		    uint64_t, dmu_tx_get_txg(tx));
+		    uint64_t, long_free_dirty, uint64_t, chunk_len,
+		    uint64_t, txg);
 		dnode_free_range(dn, chunk_begin, chunk_len, tx);
 
 		dmu_tx_commit(tx);
@@ -1704,6 +1830,32 @@ dmu_return_arcbuf(arc_buf_t *buf)
 	arc_buf_destroy(buf, FTAG);
 }
 
+/*
+ * A "lightweight" write is faster than a regular write (e.g.
+ * dmu_write_by_dnode() or dmu_assign_arcbuf_by_dnode()), because it avoids the
+ * CPU cost of creating a dmu_buf_impl_t and arc_buf_[hdr_]_t.  However, the
+ * data can not be read or overwritten until the transaction's txg has been
+ * synced.  This makes it appropriate for workloads that are known to be
+ * (temporarily) write-only, like "zfs receive".
+ *
+ * A single block is written, starting at the specified offset in bytes.  If
+ * the call is successful, it returns 0 and the provided abd has been
+ * consumed (the caller should not free it).
+ */
+int
+dmu_lightweight_write_by_dnode(dnode_t *dn, uint64_t offset, abd_t *abd,
+    const zio_prop_t *zp, enum zio_flag flags, dmu_tx_t *tx)
+{
+	dbuf_dirty_record_t *dr =
+	    dbuf_dirty_lightweight(dn, dbuf_whichblock(dn, 0, offset), tx);
+	if (dr == NULL)
+		return (SET_ERROR(EIO));
+	dr->dt.dll.dr_abd = abd;
+	dr->dt.dll.dr_props = *zp;
+	dr->dt.dll.dr_flags = flags;
+	return (0);
+}
+
 void
 dmu_copy_from_buf(objset_t *os, uint64_t object, uint64_t offset,
     dmu_buf_t *handle, dmu_tx_t *tx)
@@ -1777,8 +1929,8 @@ dmu_assign_arcbuf_by_dnode(dnode_t *dn, uint64_t offset, arc_buf_t *buf,
 		return (SET_ERROR(EIO));
 
 	/*
-	 * We can only assign if the offset is aligned, the arc buf is the
-	 * same size as the dbuf, and the dbuf is not metadata.
+	 * We can only assign if the offset is aligned and the arc buf is the
+	 * same size as the dbuf.
 	 */
 	if (offset == db->db.db_offset && blksz == db->db.db_size) {
 		dbuf_assign_arcbuf(db, buf, tx);
@@ -2069,7 +2221,7 @@ dmu_sync(zio_t *pio, uint64_t txg, dmu_sync_cb_t *done, zgd_t *zgd)
 	dmu_buf_impl_t *db = (dmu_buf_impl_t *)zgd->zgd_db;
 	objset_t *os = db->db_objset;
 	dsl_dataset_t *ds = os->os_dsl_dataset;
-	dbuf_dirty_record_t *dr;
+	dbuf_dirty_record_t *dr, *dr_next;
 	dmu_sync_arg_t *dsa;
 	zbookmark_phys_t zb;
 	zio_prop_t zp;
@@ -2116,9 +2268,7 @@ dmu_sync(zio_t *pio, uint64_t txg, dmu_sync_cb_t *done, zgd_t *zgd)
 		return (dmu_sync_late_arrival(pio, os, done, zgd, &zp, &zb));
 	}
 
-	dr = db->db_last_dirty;
-	while (dr && dr->dr_txg != txg)
-		dr = dr->dr_next;
+	dr = dbuf_find_dirty_eq(db, txg);
 
 	if (dr == NULL) {
 		/*
@@ -2129,7 +2279,8 @@ dmu_sync(zio_t *pio, uint64_t txg, dmu_sync_cb_t *done, zgd_t *zgd)
 		return (SET_ERROR(ENOENT));
 	}
 
-	ASSERT(dr->dr_next == NULL || dr->dr_next->dr_txg < txg);
+	dr_next = list_next(&db->db_dirty_records, dr);
+	ASSERT(dr_next == NULL || dr_next->dr_txg < txg);
 
 	if (db->db_blkptr != NULL) {
 		/*
@@ -2170,7 +2321,7 @@ dmu_sync(zio_t *pio, uint64_t txg, dmu_sync_cb_t *done, zgd_t *zgd)
 	 */
 	DB_DNODE_ENTER(db);
 	dn = DB_DNODE(db);
-	if (dr->dr_next != NULL || dnode_block_freed(dn, db->db_blkid))
+	if (dr_next != NULL || dnode_block_freed(dn, db->db_blkid))
 		zp.zp_nopwrite = B_FALSE;
 	DB_DNODE_EXIT(db);
 
@@ -2322,6 +2473,13 @@ dmu_object_set_compress(objset_t *os, uint64_t object, uint8_t compress,
  */
 int zfs_redundant_metadata_most_ditto_level = 2;
 
+/*
+ * Override copies= for dedup state objects (DDT ZAPs and the dedup log).
+ * 0 means the traditional behaviour, i.e. the default for the containing
+ * objset, which is 3 for the MOS.
+ */
+uint_t dmu_ddt_copies = 0;
+
 void
 dmu_write_policy(objset_t *os, dnode_t *dn, int level, int wp, zio_prop_t *zp)
 {
@@ -2371,6 +2529,27 @@ dmu_write_policy(objset_t *os, dnode_t *dn, int level, int wp, zio_prop_t *zp)
 		    (level >= zfs_redundant_metadata_most_ditto_level ||
 		    DMU_OT_IS_METADATA(type) || (wp & WP_SPILL))))
 			copies++;
+
+		if (dmu_ddt_copies > 0) {
+			/*
+			 * If this tunable is set and this is a write for a
+			 * dedup entry store (ZAP or log), treat it like
+			 * redundant_metadata=most on a regular dataset: this
+			 * many copies, and one more for higher indirect
+			 * blocks.  Needed because dedup objects live in the
+			 * MOS, which always gets the highest possible copies.
+			 */
+			dmu_object_type_t stype =
+			    dn ? dn->dn_storage_type : DMU_OT_NONE;
+			if (stype == DMU_OT_NONE)
+				stype = type;
+			if (stype == DMU_OT_DDT_ZAP) {
+				copies = dmu_ddt_copies;
+				if (level >=
+				    zfs_redundant_metadata_most_ditto_level)
+					copies++;
+			}
+		}
 	} else if (wp & WP_NOFILL) {
 		ASSERT(level == 0);
 
@@ -2450,9 +2629,12 @@ dmu_write_policy(objset_t *os, dnode_t *dn, int level, int wp, zio_prop_t *zp)
 	zp->zp_copies = MIN(copies, spa_max_replication(os->os_spa));
 	zp->zp_dedup = dedup;
 	zp->zp_dedup_verify = dedup && dedup_verify;
+	zp->zp_no_gang = B_FALSE;
 	zp->zp_nopwrite = nopwrite;
-	zp->zp_zpl_smallblk = DMU_OT_IS_FILE(zp->zp_type) ?
+	zp->zp_zpl_smallblk = (DMU_OT_IS_FILE(zp->zp_type) ||
+	zp->zp_type == DMU_OT_ZVOL) ?
 	    os->os_zpl_special_smallblock : 0;
+	zp->zp_storage_type = dn ? dn->dn_storage_type : DMU_OT_NONE;
 	zp->zp_encrypt = encrypt;
 	zp->zp_byteorder = ZFS_HOST_BYTEORDER;
 	bzero(zp->zp_salt, ZIO_DATA_SALT_LEN);

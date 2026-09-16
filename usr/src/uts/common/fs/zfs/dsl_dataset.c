@@ -236,9 +236,44 @@ dsl_dataset_block_kill(dsl_dataset_t *ds, const blkptr_t *bp, dmu_tx_t *tx,
 
 	if (bp->blk_birth > dsl_dataset_phys(ds)->ds_prev_snap_txg) {
 		int64_t delta;
+		boolean_t defer;
 
-		dprintf_bp(bp, "freeing ds=%llu", ds->ds_object);
-		dsl_free(tx->tx_pool, tx->tx_txg, bp);
+		/*
+		 * For most blocks dsl_free() -> zio_free() just calls
+		 * metaslab_free() and does no I/O.  Some blocks need more
+		 * than that -- at least gang and deduplicated blocks -- and
+		 * for those zio_free() issues a ZIO_TYPE_FREE and returns.
+		 *
+		 * Freeing a large object calls us once per block, and every
+		 * one of those that induces I/O puts another zio_t on the
+		 * pipeline.  A 2TB object of 128K blocks is 16M blocks; at
+		 * 1280 bytes per zio_t that is a 20GB resident allocation
+		 * out of zio_cache for a single unlink, which the kernel
+		 * will not satisfy -- the machine goes out of memory, and on
+		 * the next boot it does it again while importing the pool.
+		 *
+		 * Detect the cases that would make zio_free() issue I/O and
+		 * put those blocks on the pool's free bpobj instead.  That is
+		 * where blocks from destroyed datasets already go; the async
+		 * destroy machinery in dsl_scan.c picks them up and trickles
+		 * them out at a bounded rate.
+		 *
+		 * Ported from OpenZFS 46c4f2ce0b (PR #16722), which closes
+		 * upstream #16697, #16708 and #6783.  Upstream also defers
+		 * cloned blocks via brt_maybe_exists(); illumos has no block
+		 * cloning, so that term is omitted here.
+		 */
+		defer = spa_version(spa) >= SPA_VERSION_DEADLISTS &&
+		    (BP_IS_GANG(bp) || BP_GET_DEDUP(bp));
+
+		if (defer) {
+			dprintf_bp(bp, "putting on free list: %s", "");
+			bpobj_enqueue(&ds->ds_dir->dd_pool->dp_free_bpobj,
+			    bp, tx);
+		} else {
+			dprintf_bp(bp, "freeing ds=%llu", ds->ds_object);
+			dsl_free(tx->tx_pool, tx->tx_txg, bp);
+		}
 
 		mutex_enter(&ds->ds_lock);
 		ASSERT(dsl_dataset_phys(ds)->ds_unique_bytes >= used ||
@@ -250,6 +285,17 @@ dsl_dataset_block_kill(dsl_dataset_t *ds, const blkptr_t *bp, dmu_tx_t *tx,
 		    delta, -compressed, -uncompressed, tx);
 		dsl_dir_transfer_space(ds->ds_dir, -used - delta,
 		    DD_USED_REFRSRV, DD_USED_HEAD, tx);
+
+		/*
+		 * The block is now owned by the free bpobj rather than by
+		 * this dataset, so charge it to the free dir.  The async
+		 * destroy pass credits it back in dsl_scan_free_block_cb()
+		 * when it actually frees the block.
+		 */
+		if (defer) {
+			dsl_dir_diduse_space(tx->tx_pool->dp_free_dir,
+			    DD_USED_HEAD, used, compressed, uncompressed, tx);
+		}
 	} else {
 		dprintf_bp(bp, "putting on dead list: %s", "");
 		if (async) {
@@ -535,6 +581,7 @@ dsl_dataset_hold_obj(dsl_pool_t *dp, uint64_t dsobj, void *tag,
 		ds->ds_dbuf = dbuf;
 		ds->ds_object = dsobj;
 		ds->ds_is_snapshot = dsl_dataset_phys(ds)->ds_num_children != 0;
+		list_link_init(&ds->ds_synced_link);
 
 		err = dsl_dir_hold_obj(dp, dsl_dataset_phys(ds)->ds_dir_obj,
 		    NULL, ds, &ds->ds_dir);
@@ -2001,10 +2048,7 @@ dsl_dataset_sync_done(dsl_dataset_t *ds, dmu_tx_t *tx)
 	bplist_iterate(&ds->ds_pending_deadlist,
 	    deadlist_enqueue_cb, &ds->ds_deadlist, tx);
 
-	if (os->os_synced_dnodes != NULL) {
-		multilist_destroy(os->os_synced_dnodes);
-		os->os_synced_dnodes = NULL;
-	}
+	multilist_destroy(&os->os_synced_dnodes);
 
 	if (os->os_encrypted)
 		os->os_next_write_raw[tx->tx_txg & TXG_MASK] = B_FALSE;

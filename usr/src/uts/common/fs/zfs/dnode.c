@@ -20,7 +20,7 @@
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2012, 2019 by Delphix. All rights reserved.
+ * Copyright (c) 2012, 2020 by Delphix. All rights reserved.
  * Copyright (c) 2014 Spectra Logic Corporation, All rights reserved.
  * Copyright (c) 2014 Integros [integros.com]
  * Copyright 2017 RackTop Systems.
@@ -389,6 +389,14 @@ dnode_setbonuslen(dnode_t *dn, int newsize, dmu_tx_t *tx)
 	rw_enter(&dn->dn_struct_rwlock, RW_WRITER);
 	ASSERT3U(newsize, <=, DN_SLOTS_TO_BONUSLEN(dn->dn_num_slots) -
 	    (dn->dn_nblkptr-1) * sizeof (blkptr_t));
+
+	if (newsize < dn->dn_bonuslen) {
+		/* clear any data after the end of the new size */
+		size_t diff = dn->dn_bonuslen - newsize;
+		char *data_end = ((char *)dn->dn_bonus->db.db_data) + newsize;
+		bzero(data_end, diff);
+	}
+
 	dn->dn_bonuslen = newsize;
 	if (newsize == 0)
 		dn->dn_next_bonuslen[tx->tx_txg & TXG_MASK] = DN_ZERO_BONUSLEN;
@@ -406,6 +414,17 @@ dnode_setbonus_type(dnode_t *dn, dmu_object_type_t newtype, dmu_tx_t *tx)
 	dn->dn_bonustype = newtype;
 	dn->dn_next_bonustype[tx->tx_txg & TXG_MASK] = dn->dn_bonustype;
 	rw_exit(&dn->dn_struct_rwlock);
+}
+
+void
+dnode_set_storage_type(dnode_t *dn, dmu_object_type_t newtype)
+{
+	/*
+	 * This is not in the dnode_phys, but it should be, and perhaps one day
+	 * will. For now we require it be set after taking a hold.
+	 */
+	ASSERT3U(zfs_refcount_count(&dn->dn_holds), >=, 1);
+	dn->dn_storage_type = newtype;
 }
 
 void
@@ -471,6 +490,8 @@ dnode_create(objset_t *os, dnode_phys_t *dnp, dmu_buf_impl_t *db,
 	dn->dn_maxblkid = dnp->dn_maxblkid;
 	dn->dn_have_spill = ((dnp->dn_flags & DNODE_FLAG_SPILL_BLKPTR) != 0);
 	dn->dn_id_flags = 0;
+
+	dn->dn_storage_type = DMU_OT_NONE;
 
 	dmu_zfetch_init(&dn->dn_zfetch, dn);
 
@@ -558,6 +579,8 @@ dnode_destroy(dnode_t *dn)
 	dn->dn_newprojid = ZFS_DEFAULT_PROJID;
 	dn->dn_id_flags = 0;
 
+	dn->dn_storage_type = DMU_OT_NONE;
+
 	dmu_zfetch_fini(&dn->dn_zfetch);
 	kmem_cache_free(dnode_cache, dn);
 	arc_space_return(sizeof (dnode_t), ARC_SPACE_OTHER);
@@ -605,7 +628,6 @@ dnode_allocate(dnode_t *dn, dmu_object_type_t ot, int blocksize, int ibs,
 	ASSERT(dn->dn_type == DMU_OT_NONE);
 	ASSERT0(dn->dn_maxblkid);
 	ASSERT0(dn->dn_allocated_txg);
-	ASSERT0(dn->dn_dirty_txg);
 	ASSERT0(dn->dn_assigned_txg);
 	ASSERT(zfs_refcount_is_zero(&dn->dn_tx_holds));
 	ASSERT3U(zfs_refcount_count(&dn->dn_holds), <=, 1);
@@ -645,6 +667,8 @@ dnode_allocate(dnode_t *dn, dmu_object_type_t ot, int blocksize, int ibs,
 	dn->dn_dirtyctx = 0;
 
 	dn->dn_free_txg = 0;
+	dn->dn_dirty_txg = 0;
+
 	if (dn->dn_dirtyctx_firstset) {
 		kmem_free(dn->dn_dirtyctx_firstset, 1);
 		dn->dn_dirtyctx_firstset = NULL;
@@ -820,6 +844,7 @@ dnode_move_impl(dnode_t *odn, dnode_t *ndn)
 	ndn->dn_newgid = odn->dn_newgid;
 	ndn->dn_newprojid = odn->dn_newprojid;
 	ndn->dn_id_flags = odn->dn_id_flags;
+	ndn->dn_storage_type = odn->dn_storage_type;
 	dmu_zfetch_init(&ndn->dn_zfetch, NULL);
 	list_move_tail(&ndn->dn_zfetch.zf_stream, &odn->dn_zfetch.zf_stream);
 	ndn->dn_zfetch.zf_dnode = odn->dn_zfetch.zf_dnode;
@@ -883,6 +908,7 @@ dnode_move_impl(dnode_t *odn, dnode_t *ndn)
 	odn->dn_newgid = 0;
 	odn->dn_newprojid = ZFS_DEFAULT_PROJID;
 	odn->dn_id_flags = 0;
+	odn->dn_storage_type = DMU_OT_NONE;
 
 	/*
 	 * Mark the dnode.
@@ -1667,7 +1693,7 @@ dnode_setdirty(dnode_t *dn, dmu_tx_t *tx)
 	 */
 	dmu_objset_userquota_get_ids(dn, B_TRUE, tx);
 
-	multilist_t *dirtylist = os->os_dirty_dnodes[txg & TXG_MASK];
+	multilist_t *dirtylist = &os->os_dirty_dnodes[txg & TXG_MASK];
 	multilist_sublist_t *mls = multilist_sublist_lock_obj(dirtylist, dn);
 
 	/*
@@ -1802,6 +1828,7 @@ dnode_set_nlevels_impl(dnode_t *dn, int new_nlevels, dmu_tx_t *tx)
 
 	ASSERT(RW_WRITE_HELD(&dn->dn_struct_rwlock));
 
+	ASSERT3U(new_nlevels, >, dn->dn_nlevels);
 	dn->dn_nlevels = new_nlevels;
 
 	ASSERT3U(new_nlevels, >, dn->dn_next_nlevels[txgoff]);
@@ -1819,10 +1846,12 @@ dnode_set_nlevels_impl(dnode_t *dn, int new_nlevels, dmu_tx_t *tx)
 	list = &dn->dn_dirty_records[txgoff];
 	for (dr = list_head(list); dr; dr = dr_next) {
 		dr_next = list_next(&dn->dn_dirty_records[txgoff], dr);
-		if (dr->dr_dbuf->db_level != new_nlevels-1 &&
+
+		IMPLY(dr->dr_dbuf == NULL, old_nlevels == 1);
+		if (dr->dr_dbuf == NULL ||
+		    (dr->dr_dbuf->db_level == old_nlevels - 1 &&
 		    dr->dr_dbuf->db_blkid != DMU_BONUS_BLKID &&
-		    dr->dr_dbuf->db_blkid != DMU_SPILL_BLKID) {
-			ASSERT(dr->dr_dbuf->db_level == old_nlevels-1);
+		    dr->dr_dbuf->db_blkid != DMU_SPILL_BLKID)) {
 			list_remove(&dn->dn_dirty_records[txgoff], dr);
 			list_insert_tail(&new->dt.di.dr_children, dr);
 			dr->dr_parent = new;
@@ -2063,7 +2092,7 @@ dnode_free_range(dnode_t *dn, uint64_t off, uint64_t len, dmu_tx_t *tx)
 			db_lock_type_t dblt = dmu_buf_lock_parent(db, RW_READER,
 			    FTAG);
 			/* don't dirty if it isn't on disk and isn't dirty */
-			dirty = db->db_last_dirty ||
+			dirty = !list_is_empty(&db->db_dirty_records) ||
 			    (db->db_blkptr && !BP_IS_HOLE(db->db_blkptr));
 			dmu_buf_unlock_parent(db, dblt, FTAG);
 			if (dirty) {
@@ -2106,7 +2135,7 @@ dnode_free_range(dnode_t *dn, uint64_t off, uint64_t len, dmu_tx_t *tx)
 			/* don't dirty if not on disk and not dirty */
 			db_lock_type_t type = dmu_buf_lock_parent(db, RW_READER,
 			    FTAG);
-			dirty = db->db_last_dirty ||
+			dirty = !list_is_empty(&db->db_dirty_records) ||
 			    (db->db_blkptr && !BP_IS_HOLE(db->db_blkptr));
 			dmu_buf_unlock_parent(db, type, FTAG);
 			if (dirty) {

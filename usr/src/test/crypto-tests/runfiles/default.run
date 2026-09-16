@@ -52,6 +52,9 @@ tests = ['aes_cbc_32', 'aes_ccm_32', 'aes_cmac_32',
 post = cleanup
 post_user = root
 
+[/opt/crypto-tests/tests/aes/ktest]
+user = root
+tests = ['aes_ktest']
 [/opt/crypto-tests/tests/digest/pkcs]
 tests = ['sha1_32', 'sha256_32', 'sha384_32', 'sha512_32', 'sha512_224_32',
          'sha512_256_32', 'md5_32',

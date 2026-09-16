@@ -20,7 +20,8 @@
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2012, 2019 by Delphix. All rights reserved.
+ * Copyright (c) 2012, 2021 by Delphix. All rights reserved.
+ * Copyright 2026 Gernot Strasser
  */
 
 #ifndef _SYS_ZFS_DEBUG_H
@@ -62,6 +63,7 @@ extern boolean_t zfs_free_leak_on_eio;
 #define	ZFS_DEBUG_INDIRECT_REMAP	(1 << 9)
 #define	ZFS_DEBUG_TRIM			(1 << 11)
 #define	ZFS_DEBUG_LOG_SPACEMAP		(1 << 12)
+#define	ZFS_DEBUG_METASLAB_ALLOC	(1 << 13)
 
 #ifdef ZFS_DEBUG
 extern void __dprintf(const char *file, const char *func,

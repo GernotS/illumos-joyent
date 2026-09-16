@@ -21,7 +21,8 @@
 
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2011, 2018 by Delphix. All rights reserved.
+ * Copyright (c) 2011, 2021 by Delphix. All rights reserved.
+ * Copyright 2026 Gernot Strasser
  * Copyright 2011 Nexenta Systems, Inc. All rights reserved.
  * Copyright (c) 2012, Joyent, Inc. All rights reserved.
  * Copyright 2013 DEY Storage Systems, Inc.
@@ -141,9 +142,6 @@ typedef enum dmu_object_byteswap {
 
 #define	DMU_OT_IS_DDT(ot) \
 	((ot) == DMU_OT_DDT_ZAP)
-
-#define	DMU_OT_IS_ZIL(ot) \
-	((ot) == DMU_OT_INTENT_LOG)
 
 /* Note: ztest uses DMU_OT_UINT64_OTHER as a proxy for file blocks */
 #define	DMU_OT_IS_FILE(ot) \
@@ -376,7 +374,9 @@ typedef struct dmu_buf {
 #define	DMU_POOL_L2CACHE		"l2cache"
 #define	DMU_POOL_TMP_USERREFS		"tmp_userrefs"
 #define	DMU_POOL_DDT			"DDT-%s-%s-%s"
+#define	DMU_POOL_DDT_DIR		"DDT-%s"
 #define	DMU_POOL_DDT_STATS		"DDT-statistics"
+#define	DMU_POOL_DDT_LOG		"DDT-log-%s-%u"
 #define	DMU_POOL_CREATION_VERSION	"creation_version"
 #define	DMU_POOL_SCAN			"scan"
 #define	DMU_POOL_FREE_BPOBJ		"free_bpobj"
@@ -752,6 +752,7 @@ struct blkptr *dmu_buf_get_blkptr(dmu_buf_t *db);
  * (ie. you've called dmu_tx_hold_object(tx, db->db_object)).
  */
 void dmu_buf_will_dirty(dmu_buf_t *db, dmu_tx_t *tx);
+boolean_t dmu_buf_is_dirty(dmu_buf_t *db, dmu_tx_t *tx);
 void dmu_buf_set_crypt_params(dmu_buf_t *db_fake, boolean_t byteorder,
     const uint8_t *salt, const uint8_t *iv, const uint8_t *mac, dmu_tx_t *tx);
 
@@ -888,6 +889,8 @@ extern int zfs_max_recordsize;
  */
 void dmu_prefetch(objset_t *os, uint64_t object, int64_t level, uint64_t offset,
     uint64_t len, enum zio_priority pri);
+int dmu_prefetch_wait(objset_t *os, uint64_t object, uint64_t offset,
+    uint64_t size);
 
 typedef struct dmu_object_info {
 	/* All sizes are in bytes unless otherwise indicated. */
@@ -1083,6 +1086,8 @@ int dmu_diff(const char *tosnap_name, const char *fromsnap_name,
 /* CRC64 table */
 #define	ZFS_CRC64_POLY	0xC96C5795D7870F42ULL	/* ECMA-182, reflected form */
 extern uint64_t zfs_crc64_table[256];
+
+extern uint64_t dmu_prefetch_max;
 
 #ifdef	__cplusplus
 }

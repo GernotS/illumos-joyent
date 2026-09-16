@@ -25,6 +25,8 @@
  *
  * Copyright 2017 Nexenta Systems, Inc.  All rights reserved.
  * Copyright (c) 2012, 2020 by Delphix. All rights reserved.
+ * Copyright 2025 iXsystems, Inc.
+ * Copyright 2026 Gernot Strasser
  * Copyright (c) 2014 Integros [integros.com]
  * Copyright 2019 Joyent, Inc.
  * Copyright 2026 Oxide Computer Company
@@ -1082,7 +1084,26 @@ zvol_log_write(zvol_state_t *zv, dmu_tx_t *tx, offset_t off, ssize_t resid,
 		write_state = WR_INDIRECT;
 	} else if (!spa_has_slogs(zilog->zl_spa) &&
 	    resid >= blocksize && blocksize > zvol_immediate_write_sz) {
-		write_state = WR_INDIRECT;
+		/*
+		 * Large writes would normally go indirect when there are no
+		 * dedicated slogs.  However, if the pool has a special
+		 * allocation class, prefer to treat it as a slog (writing the
+		 * data into the ZIL) unless this block will itself land on a
+		 * special vdev, in which case an indirect write avoids a
+		 * double-write.  See zil_special_is_slog.
+		 */
+		boolean_t indirect = B_TRUE;
+		if (spa_has_special(zilog->zl_spa)) {
+			boolean_t on_special = (blocksize <=
+			    zilog->zl_os->os_zpl_special_smallblock);
+			indirect = (on_special || !zil_special_is_slog);
+		}
+		if (indirect)
+			write_state = WR_INDIRECT;
+		else if (commit)
+			write_state = WR_COPIED;
+		else
+			write_state = WR_NEED_COPY;
 	} else if (commit) {
 		write_state = WR_COPIED;
 	} else {

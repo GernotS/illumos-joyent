@@ -24,6 +24,9 @@
  *
  * Copyright 2019 Joyent, Inc.
  */
+/*
+ * Copyright 2014 by Saso Kiselkov. All rights reserved.
+ */
 
 #ifndef _KERNEL
 #include <strings.h>
@@ -34,10 +37,14 @@
 
 #include <sys/debug.h>
 #include <sys/types.h>
+#define	INLINE_CRYPTO_GET_PTRS
 #include <modes/modes.h>
 #include <sys/crypto/common.h>
 #include <sys/crypto/impl.h>
 #include <sys/byteorder.h>
+#include <sys/cmn_err.h>
+
+boolean_t ctr_fastpath_enabled = B_TRUE;
 
 /*
  * CTR (counter mode) is a stream cipher.  That is, it generates a
@@ -161,12 +168,46 @@ ctr_xor(ctr_ctx_t *ctx, const uint8_t *in, uint8_t *out, size_t outlen,
 }
 
 /*
+ * Determine whether the bulk CTR helper (cipher_ctr) may be used for a
+ * request of `nblocks' blocks.  cipher_ctr advances the counter with
+ * plain 64-bit arithmetic on the lower counter word, which matches the
+ * generic masked counter semantics (ctr_lower_mask/ctr_upper_mask, i.e.
+ * a counter of ulCounterBits < 128 that must wrap within its field
+ * without disturbing the nonce bits) only as long as no wrap of the
+ * masked counter field can occur.  Allow the fastpath only when this
+ * request cannot wrap; otherwise the generic per-block path performs
+ * the proper masked counter stepping.
+ */
+static boolean_t
+ctr_fastpath_counter_ok(const ctr_ctx_t *ctx, size_t nblocks)
+{
+	uint64_t cur = ntohll(ctx->ctr_cb[1]);
+
+	if (ctx->ctr_upper_mask == 0) {
+		uint64_t mask = ntohll(ctx->ctr_lower_mask);
+
+		return (nblocks <= mask - (cur & mask));
+	}
+
+	/*
+	 * Counter wider than 64 bits: cipher_ctr implementations only
+	 * propagate the lower-word carry into the upper word on some
+	 * code paths, so require that the lower 64-bit word cannot wrap
+	 * during this request.
+	 */
+	return (nblocks <= UINT64_MAX - cur);
+}
+
+/*
  * Encrypt and decrypt multiple blocks of data in counter mode.
  */
 int
 ctr_mode_contiguous_blocks(ctr_ctx_t *ctx, char *in, size_t in_length,
     crypto_data_t *out, size_t block_size,
-    int (*cipher)(const void *ks, const uint8_t *pt, uint8_t *ct))
+    int (*cipher)(const void *ks, const uint8_t *pt, uint8_t *ct),
+    void (*xor_block)(const uint8_t *, uint8_t *),
+    int (*cipher_ctr)(const void *ks, const uint8_t *pt, uint8_t *ct,
+    uint64_t len, uint64_t counter[2]))
 {
 	size_t in_remainder = in_length;
 	uint8_t *inp = (uint8_t *)in;
@@ -194,6 +235,96 @@ ctr_mode_contiguous_blocks(ctr_ctx_t *ctx, char *in, size_t in_length,
 	 */
 	if (out->cd_offset + in_length > out->cd_length)
 		return (CRYPTO_BUFFER_TOO_SMALL);
+
+	if (ctr_fastpath_enabled && cipher_ctr != NULL &&
+	    ctx->ctr_remainder_len == 0 && in_length > 0) {
+		size_t head, body, tail;
+		int rv;
+
+		/*
+		 * ctr_xor() advances to the next keystream block lazily, so
+		 * a stream that has consumed exactly a whole number of
+		 * blocks is left with ctr_offset == block_size, which keeps
+		 * it off the fastpath.  Step to the next block now; this is
+		 * exactly what ctr_xor() would do for the next input byte.
+		 */
+		if (ctx->ctr_offset == block_size)
+			ctr_new_keyblock(ctx, cipher);
+
+		/*
+		 * Re-enter the fastpath for streams that are not
+		 * block-aligned: use up the current keystream block on the
+		 * generic path, run the block-aligned middle through the
+		 * fastpath and finish the sub-block tail generically.
+		 */
+		head = (ctx->ctr_offset == 0) ? 0 :
+		    block_size - ctx->ctr_offset;
+		if (in_length > block_size && head < in_length) {
+			body = (in_length - head) & ~(block_size - 1);
+			tail = in_length - head - body;
+			if (body != 0 && (head != 0 || tail != 0)) {
+				if (head != 0 && (rv =
+				    ctr_mode_contiguous_blocks(ctx, in, head,
+				    out, block_size, cipher, xor_block,
+				    cipher_ctr)) != CRYPTO_SUCCESS)
+					return (rv);
+				if (head != 0 && ctx->ctr_offset == block_size)
+					ctr_new_keyblock(ctx, cipher);
+				ASSERT0(ctx->ctr_offset);
+				if ((rv = ctr_mode_contiguous_blocks(ctx,
+				    in + head, body, out, block_size, cipher,
+				    xor_block, cipher_ctr)) != CRYPTO_SUCCESS ||
+				    tail == 0)
+					return (rv);
+				return (ctr_mode_contiguous_blocks(ctx,
+				    in + head + body, tail, out, block_size,
+				    cipher, xor_block, cipher_ctr));
+			}
+		}
+	}
+
+	/*
+	 * CTR fastpath: block-aligned input written in bulk by cipher_ctr
+	 * into a single contiguous output buffer.
+	 *
+	 * ctr_offset must be 0, i.e. no bytes of the keystream block for
+	 * the current counter value in ctr_cb may have been handed out
+	 * yet, because the fastpath consumes that counter value for its
+	 * first block.  ctr_fastpath_counter_ok() ensures the masked
+	 * counter field cannot wrap within this request, making
+	 * cipher_ctr's plain 64-bit counter arithmetic equivalent to the
+	 * generic masked stepping in ctr_new_keyblock().
+	 */
+	if (ctr_fastpath_enabled && cipher_ctr != NULL && in_length > 0 &&
+	    ctx->ctr_remainder_len == 0 && ctx->ctr_offset == 0 &&
+	    (in_length & (block_size - 1)) == 0 &&
+	    CRYPTO_DATA_IS_CONTIGUOUS(out, in_length) &&
+	    ctr_fastpath_counter_ok(ctx, in_length / block_size)) {
+		uint64_t counter[2];
+		uint8_t *outp = CRYPTO_DATA_FIRST_BLOCK(out);
+
+		counter[0] = ctx->ctr_cb[0];
+		counter[1] = ctx->ctr_cb[1];
+		cipher_ctr(ctx->ctr_keysched, (uint8_t *)in, outp, in_length,
+		    counter);
+		ctx->ctr_cb[0] = counter[0];
+		ctx->ctr_cb[1] = counter[1];
+
+		/*
+		 * Restore the invariant that ctr_keystream holds the
+		 * (unconsumed, ctr_offset == 0) keystream block for the
+		 * counter value in ctr_cb, so that a subsequent slow-path
+		 * call continues the keystream correctly instead of
+		 * reusing the stale block generated for a counter value
+		 * the bulk operation above has already consumed.
+		 */
+		cipher(ctx->ctr_keysched, (uint8_t *)ctx->ctr_cb,
+		    (uint8_t *)ctx->ctr_keystream);
+		ctx->ctr_offset = 0;
+
+		out->cd_offset += in_length;
+		return (CRYPTO_SUCCESS);
+	}
 
 	crypto_init_ptrs(out, &iov_or_mp, &offset);
 
@@ -239,7 +370,7 @@ ctr_mode_contiguous_blocks(ctr_ctx_t *ctx, char *in, size_t in_length,
 int
 ctr_init_ctx(ctr_ctx_t *ctr_ctx, ulong_t count, uint8_t *cb,
     int (*cipher)(const void *ks, const uint8_t *pt, uint8_t *ct),
-    void (*copy_block)(uint8_t *, uint8_t *))
+    void (*copy_block)(const uint8_t *, uint8_t *))
 {
 	uint64_t upper_mask = 0;
 	uint64_t lower_mask = 0;

@@ -20,7 +20,9 @@
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2011, 2019 by Delphix. All rights reserved.
+ * Copyright (c) 2011, 2021 by Delphix. All rights reserved.
+ * Copyright 2025 iXsystems, Inc.
+ * Copyright 2026 Gernot Strasser
  * Copyright 2011 Nexenta Systems, Inc.  All rights reserved.
  * Copyright (c) 2014 Spectra Logic Corporation, All rights reserved.
  * Copyright 2013 Saso Kiselkov. All rights reserved.
@@ -877,6 +879,8 @@ extern void spa_import_progress_remove(spa_t *);
 /* Pool configuration locks */
 extern int spa_config_tryenter(spa_t *spa, int locks, void *tag, krw_t rw);
 extern void spa_config_enter(spa_t *spa, int locks, void *tag, krw_t rw);
+extern void spa_config_enter_priority(spa_t *spa, int locks, void *tag,
+    krw_t rw);
 extern void spa_config_exit(spa_t *spa, int locks, void *tag);
 extern int spa_config_held(spa_t *spa, int locks, krw_t rw);
 
@@ -935,10 +939,12 @@ extern uint64_t spa_version(spa_t *spa);
 extern boolean_t spa_deflate(spa_t *spa);
 extern metaslab_class_t *spa_normal_class(spa_t *spa);
 extern metaslab_class_t *spa_log_class(spa_t *spa);
+extern metaslab_class_t *spa_embedded_log_class(spa_t *spa);
+extern metaslab_class_t *spa_special_embedded_log_class(spa_t *spa);
 extern metaslab_class_t *spa_special_class(spa_t *spa);
 extern metaslab_class_t *spa_dedup_class(spa_t *spa);
-extern metaslab_class_t *spa_preferred_class(spa_t *spa, uint64_t size,
-    dmu_object_type_t objtype, uint_t level, uint_t special_smallblk);
+extern boolean_t spa_special_has_ddt(spa_t *spa);
+extern metaslab_class_t *spa_preferred_class(spa_t *spa, const zio_t *zio);
 
 extern void spa_evicting_os_register(spa_t *, objset_t *os);
 extern void spa_evicting_os_deregister(spa_t *, objset_t *os);
@@ -980,6 +986,7 @@ extern uint64_t dva_get_dsize_sync(spa_t *spa, const dva_t *dva);
 extern uint64_t bp_get_dsize_sync(spa_t *spa, const blkptr_t *bp);
 extern uint64_t bp_get_dsize(spa_t *spa, const blkptr_t *bp);
 extern boolean_t spa_has_slogs(spa_t *spa);
+extern boolean_t spa_has_special(spa_t *spa);
 extern boolean_t spa_is_root(spa_t *spa);
 extern boolean_t spa_writeable(spa_t *spa);
 extern boolean_t spa_has_pending_synctask(spa_t *spa);

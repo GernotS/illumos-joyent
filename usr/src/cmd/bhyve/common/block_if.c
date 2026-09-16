@@ -1183,6 +1183,30 @@ blockif_candelete(struct blockif_ctxt *bc)
 }
 
 #ifndef __FreeBSD__
+/*
+ * Flush the backing store from the caller's context instead of queueing a
+ * request.  Intended for completion handlers running on a block i/o thread,
+ * which must not depend on a free slot in the request queue.
+ */
+int
+blockif_flush_sync(struct blockif_ctxt *bc)
+{
+	assert(bc->bc_magic == BLOCKIF_SIG);
+	return (blockif_flush_bc(bc));
+}
+
+/*
+ * Report whether the write cache of the backing store can actually be
+ * controlled.  blockif_set_wce() succeeds silently when it cannot, so callers
+ * that advertise a cache to the guest must ask first.
+ */
+int
+blockif_wce_toggleable(struct blockif_ctxt *bc)
+{
+	assert(bc->bc_magic == BLOCKIF_SIG);
+	return (bc->bc_wce != WCE_NONE);
+}
+
 int
 blockif_set_wce(struct blockif_ctxt *bc, int wc_enable)
 {

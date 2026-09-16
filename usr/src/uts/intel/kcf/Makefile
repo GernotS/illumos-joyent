@@ -21,6 +21,7 @@
 #
 # Copyright 2010 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
+# Copyright 2014 by Saso Kiselkov. All rights reserved.
 #
 # Copyright (c) 2019, Joyent, Inc.
 
@@ -35,7 +36,7 @@ COM_DIR = $(COMMONBASE)/crypto
 #
 MODULE		= kcf
 KCF_OBJS_32	=
-KCF_OBJS_64	= gcm_intel.o
+KCF_OBJS_64	= gcm_intel.o gcm_intel_cryptogams.o
 KCF_OBJS	+= $(KCF_OBJS_$(CLASS))
 OBJECTS		= $(KCF_OBJS:%=$(OBJS_DIR)/%)
 ROOTMODULE	= $(ROOT_MISC_DIR)/$(MODULE)

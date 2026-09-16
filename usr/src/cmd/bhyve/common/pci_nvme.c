@@ -199,6 +199,9 @@ struct pci_nvme_blockstore {
 	uint32_t	sectsz_bits;
 	uint64_t	eui64;
 	uint32_t	deallocate:1;
+#ifndef	__FreeBSD__
+	uint32_t	wce:1;		/* backing store has a toggleable cache */
+#endif
 };
 
 /*
@@ -225,6 +228,9 @@ struct pci_nvme_ioreq {
 	uint64_t	prev_gpaddr;
 	size_t		prev_size;
 	size_t		bytes;
+#ifndef	__FreeBSD__
+	bool		fua;		/* complete only once on stable storage */
+#endif
 
 	struct blockif_req io_req;
 
@@ -442,6 +448,12 @@ static void nvme_feature_async_event(struct pci_nvme_softc *,
     struct nvme_feature_obj *,
     struct nvme_command *,
     struct nvme_completion *);
+#ifndef	__FreeBSD__
+static void nvme_feature_volatile_wc(struct pci_nvme_softc *,
+    struct nvme_feature_obj *,
+    struct nvme_command *,
+    struct nvme_completion *);
+#endif
 
 static void *aen_thr(void *arg);
 
@@ -598,7 +610,29 @@ pci_nvme_init_ctrldata(struct pci_nvme_softc *sc)
 
 	cd->fna = NVMEM(NVME_CTRLR_DATA_FNA_FORMAT_ALL);
 
+#ifdef	__FreeBSD__
 	cd->vwc = NVMEF(NVME_CTRLR_DATA_VWC_ALL, NVME_CTRLR_DATA_VWC_ALL_NO);
+#else
+	/*
+	 * Advertise a volatile write cache only when the backing store has one
+	 * we can actually turn off again (see pci_nvme_parse_config()).  A guest
+	 * told that no cache is present will never issue FLUSH, which forces
+	 * every write through to stable storage -- on a zvol that means a
+	 * zil_commit() per write.  With the cache advertised, the guest issues
+	 * FLUSH when it needs durability and that reaches the backing store as
+	 * fsync(), which specfs turns into DKIOCFLUSHWRITECACHE.
+	 *
+	 * A flush covers the whole backing store, so it applies to all
+	 * namespaces.
+	 */
+	if (sc->nvstore.wce) {
+		cd->vwc = NVMEF(NVME_CTRLR_DATA_VWC_PRESENT, 1) |
+		    NVMEF(NVME_CTRLR_DATA_VWC_ALL, NVME_CTRLR_DATA_VWC_ALL_YES);
+	} else {
+		cd->vwc = NVMEF(NVME_CTRLR_DATA_VWC_ALL,
+		    NVME_CTRLR_DATA_VWC_ALL_NO);
+	}
+#endif
 
 #ifdef	__FreeBSD__
 	ret = snprintf(cd->subnqn, sizeof(cd->subnqn),
@@ -722,6 +756,14 @@ pci_nvme_init_features(struct pci_nvme_softc *sc)
 			/* Enable all AENs by default */
 			sc->feat[fid].cdw11 = PCI_NVME_AEN_DEFAULT_MASK;
 			break;
+#ifndef	__FreeBSD__
+		case NVME_FEAT_VOLATILE_WRITE_CACHE:
+			if (!sc->nvstore.wce)
+				break;		/* leave it invalid */
+			sc->feat[fid].set = nvme_feature_volatile_wc;
+			sc->feat[fid].cdw11 = 1;
+			break;
+#endif
 		default:
 			sc->feat[fid].set = nvme_feature_invalid_cb;
 			sc->feat[fid].get = nvme_feature_invalid_cb;
@@ -1730,6 +1772,30 @@ nvme_feature_async_event(struct pci_nvme_softc *sc __unused,
 		pci_nvme_status_genc(&compl->status, NVME_SC_INVALID_FIELD);
 }
 
+#ifndef	__FreeBSD__
+static void
+nvme_feature_volatile_wc(struct pci_nvme_softc *sc,
+    struct nvme_feature_obj *feat,
+    struct nvme_command *command,
+    struct nvme_completion *compl)
+{
+	const int enable = (command->cdw11 & 1) != 0 ? 1 : 0;
+
+	if (sc->nvstore.type != NVME_STOR_BLOCKIF) {
+		pci_nvme_status_genc(&compl->status, NVME_SC_INVALID_FIELD);
+		return;
+	}
+
+	if (blockif_set_wce(sc->nvstore.ctx, enable) != 0) {
+		pci_nvme_status_genc(&compl->status,
+		    NVME_SC_INTERNAL_DEVICE_ERROR);
+		return;
+	}
+
+	feat->cdw11 = enable;
+}
+#endif
+
 #define NVME_TEMP_THRESH_OVER	0
 #define NVME_TEMP_THRESH_UNDER	1
 static void
@@ -2312,6 +2378,9 @@ pci_nvme_release_ioreq(struct pci_nvme_softc *sc, struct pci_nvme_ioreq *req)
 	req->sc = NULL;
 	req->nvme_sq = NULL;
 	req->sqid = 0;
+#ifndef	__FreeBSD__
+	req->fua = false;
+#endif
 
 	pthread_mutex_lock(&sc->mtx);
 
@@ -2364,6 +2433,19 @@ pci_nvme_io_done(struct blockif_req *br, int err)
 	uint16_t code, status;
 
 	DPRINTF("%s error %d %s", __func__, err, strerror(err));
+
+#ifndef	__FreeBSD__
+	/*
+	 * Run the flush here, on the block i/o thread that just finished the
+	 * write, rather than queueing another request: the queue slot for this
+	 * request has not been returned yet, so an enqueue could fail with the
+	 * queue full.
+	 */
+	if (err == 0 && req->fua) {
+		req->fua = false;
+		err = blockif_flush_sync(req->sc->nvstore.ctx);
+	}
+#endif
 
 	/* TODO return correct error */
 	code = err ? NVME_SC_DATA_TRANSFER_ERROR : NVME_SC_SUCCESS;
@@ -2550,6 +2632,16 @@ nvme_opc_write_read(struct pci_nvme_softc *sc,
 
 	req->bytes = bytes;
 	req->io_req.br_offset = lba;
+#ifndef	__FreeBSD__
+	/*
+	 * Force Unit Access (cdw12 bit 30) means the command may only be
+	 * completed once the data is on stable storage.  It is only meaningful
+	 * when we have told the guest a volatile cache exists; without one
+	 * every write is already write-through.
+	 */
+	req->fua = is_write && nvstore->wce &&
+	    (cmd->cdw12 & (1U << 30)) != 0;
+#endif
 
 	/* PRP bits 1:0 must be zero */
 	cmd->prp1 &= ~0x3UL;
@@ -3289,6 +3381,18 @@ pci_nvme_parse_config(struct pci_nvme_softc *sc, nvlist_t *nvl)
 		}
 		sc->nvstore.type = NVME_STOR_BLOCKIF;
 		sc->nvstore.size = blockif_size(sc->nvstore.ctx);
+#ifndef	__FreeBSD__
+		/*
+		 * blockif_open() leaves the backing store's write cache
+		 * disabled.  Turn it on if the store supports toggling; the
+		 * guest is told about it through the VWC field of IDENTIFY and
+		 * flushes when it needs to.  If the toggle is unavailable the
+		 * store is already effectively write-through, so leave it.
+		 */
+		if (blockif_wce_toggleable(sc->nvstore.ctx) &&
+		    blockif_set_wce(sc->nvstore.ctx, 1) == 0)
+			sc->nvstore.wce = 1;
+#endif
 	}
 
 	if (sectsz == 512 || sectsz == 4096 || sectsz == 8192)

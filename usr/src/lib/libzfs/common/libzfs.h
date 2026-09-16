@@ -289,10 +289,13 @@ typedef struct trimflags {
  * Functions to manipulate pool and vdev state
  */
 extern int zpool_scan(zpool_handle_t *, pool_scan_func_t, pool_scrub_cmd_t);
+extern int zpool_ddt_prune(zpool_handle_t *, zpool_ddt_prune_unit_t,
+    uint64_t);
 extern int zpool_initialize(zpool_handle_t *, pool_initialize_func_t,
     nvlist_t *);
 extern int zpool_initialize_wait(zpool_handle_t *, pool_initialize_func_t,
     nvlist_t *);
+extern int zpool_prefetch(zpool_handle_t *, zpool_prefetch_type_t);
 extern int zpool_trim(zpool_handle_t *, pool_trim_func_t, nvlist_t *,
     trimflags_t *);
 

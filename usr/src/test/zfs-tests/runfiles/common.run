@@ -62,7 +62,7 @@ tests = ['alloc_class_001_pos', 'alloc_class_002_neg', 'alloc_class_003_pos',
     'alloc_class_004_pos', 'alloc_class_005_pos', 'alloc_class_006_pos',
     'alloc_class_007_pos', 'alloc_class_008_pos', 'alloc_class_009_pos',
     'alloc_class_010_pos', 'alloc_class_011_neg', 'alloc_class_012_pos',
-    'alloc_class_013_pos']
+    'alloc_class_013_pos', 'alloc_class_014_pos']
 tags = ['functional', 'alloc_class']
 
 [tests/functional/atime]
@@ -540,6 +540,18 @@ tags = ['functional', 'compression']
 tests = ['ctime_001_pos' ]
 tags = ['functional', 'ctime']
 
+[tests/functional/dedup]
+tests = ['dedup_ddt_stray_class', 'dedup_fdt_create', 'dedup_fdt_import',
+    'dedup_fdt_pacing', 'dedup_gang_copies',
+    'dedup_legacy_create', 'dedup_legacy_import',
+    'dedup_legacy_fdt_upgrade', 'dedup_legacy_fdt_mixed', 'dedup_log_zdb_leak',
+    'dedup_prune', 'dedup_prune_all',
+    'dedup_prune_deadlock', 'dedup_prune_leak', 'dedup_prune_race',
+    'dedup_quota', 'dedup_zap_shrink']
+pre =
+post =
+tags = ['functional', 'dedup']
+
 [tests/functional/delegate]
 tests = ['zfs_allow_001_pos', 'zfs_allow_002_pos', 'zfs_allow_003_pos',
     'zfs_allow_004_pos', 'zfs_allow_005_pos', 'zfs_allow_006_pos',
@@ -733,8 +745,10 @@ tests = ['removal_sanity', 'removal_all_vdev', 'removal_check_space',
     'removal_multiple_indirection', 'removal_remap',
     'removal_remap_deadlists',
     'removal_with_add', 'removal_with_create_fs', 'removal_with_dedup',
-    'removal_with_export', 'removal_with_ganging', 'removal_with_remap',
+    'removal_with_export', 'removal_with_ganging',
+    'removal_with_missing_log', 'removal_with_remap',
     'removal_with_remove', 'removal_with_scrub', 'removal_with_send',
+    'removal_with_special_embedded_log', 'removal_missing_special_refused',
     'removal_with_send_recv', 'removal_with_snapshot', 'removal_with_write',
     'removal_with_zdb', 'removal_resume_export',
     'remove_mirror', 'remove_mirror_sanity', 'remove_raidz']

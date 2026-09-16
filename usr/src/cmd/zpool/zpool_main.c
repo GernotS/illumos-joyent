@@ -33,6 +33,10 @@
  * Copyright 2020 Joyent, Inc.
  * Copyright (c) 2012 by Cyril Plisko. All rights reserved.
  * Copyright 2019 OmniOS Community Edition (OmniOSce) Association.
+ * Copyright (c) 2021, Colm Buckley <colm@tuatha.org>
+ * Copyright (c) 2021, 2023-2026, Klara, Inc.
+ * Copyright (c) 2021, 2025 Hewlett Packard Enterprise Development LP.
+ * Copyright (c) 2026, TrueNAS.
  */
 
 #include <assert.h>
@@ -101,6 +105,8 @@ static int zpool_do_replace(int, char **);
 static int zpool_do_split(int, char **);
 
 static int zpool_do_initialize(int, char **);
+static int zpool_do_prefetch(int, char **);
+static int zpool_do_ddt_prune(int, char **);
 static int zpool_do_scrub(int, char **);
 static int zpool_do_resilver(int, char **);
 static int zpool_do_trim(int, char **);
@@ -157,6 +163,8 @@ typedef enum {
 	HELP_REPLACE,
 	HELP_REMOVE,
 	HELP_INITIALIZE,
+	HELP_PREFETCH,
+	HELP_DDT_PRUNE,
 	HELP_SCRUB,
 	HELP_RESILVER,
 	HELP_TRIM,
@@ -292,6 +300,8 @@ static zpool_command_t command_table[] = {
 	{ "split",	zpool_do_split,		HELP_SPLIT		},
 	{ NULL },
 	{ "initialize",	zpool_do_initialize,	HELP_INITIALIZE		},
+	{ "prefetch",	zpool_do_prefetch,	HELP_PREFETCH		},
+	{ "ddtprune",	zpool_do_ddt_prune,	HELP_DDT_PRUNE		},
 	{ "resilver",	zpool_do_resilver,	HELP_RESILVER		},
 	{ "scrub",	zpool_do_scrub,		HELP_SCRUB		},
 	{ "trim",	zpool_do_trim,		HELP_TRIM		},
@@ -381,6 +391,10 @@ get_usage(zpool_help_t idx)
 	case HELP_INITIALIZE:
 		return (gettext("\tinitialize [-c | -s] [-w] <pool> "
 		    "[<device> ...]\n"));
+	case HELP_PREFETCH:
+		return (gettext("\tprefetch -t <type> <pool>\n"));
+	case HELP_DDT_PRUNE:
+		return (gettext("\tddtprune -d|-p <amount> <pool>\n"));
 	case HELP_SCRUB:
 		return (gettext("\tscrub [-s | -p] [-w] <pool> ...\n"));
 	case HELP_RESILVER:
@@ -6686,6 +6700,157 @@ zpool_do_initialize(int argc, char **argv)
 	zpool_close(zhp);
 
 	return (err);
+}
+
+/*
+ * zpool prefetch -t <type> <pool>
+ *
+ * Prefetch a particular type of data in the specified pool.
+ */
+int
+zpool_do_prefetch(int argc, char **argv)
+{
+	int c;
+	char *poolname;
+	char *typestr = NULL;
+	zpool_prefetch_type_t type;
+	zpool_handle_t *zhp;
+	int err = 0;
+
+	while ((c = getopt(argc, argv, "t:")) != -1) {
+		switch (c) {
+		case 't':
+			typestr = optarg;
+			break;
+		case ':':
+			(void) fprintf(stderr, gettext("missing argument for "
+			    "'%c' option\n"), optopt);
+			usage(B_FALSE);
+			break;
+		case '?':
+			(void) fprintf(stderr, gettext("invalid option '%c'\n"),
+			    optopt);
+			usage(B_FALSE);
+		}
+	}
+	argc -= optind;
+	argv += optind;
+
+	if (typestr == NULL) {
+		(void) fprintf(stderr, gettext("missing prefetch type "
+		    "(-t)\n"));
+		usage(B_FALSE);
+	}
+
+	if (argc < 1) {
+		(void) fprintf(stderr, gettext("missing pool name argument\n"));
+		usage(B_FALSE);
+	}
+
+	if (argc > 1) {
+		(void) fprintf(stderr, gettext("too many arguments\n"));
+		usage(B_FALSE);
+	}
+
+	poolname = argv[0];
+
+	if (strcmp(typestr, "ddt") == 0) {
+		type = ZPOOL_PREFETCH_DDT;
+	} else {
+		(void) fprintf(stderr, gettext("unsupported prefetch type\n"));
+		usage(B_FALSE);
+	}
+
+	if ((zhp = zpool_open(g_zfs, poolname)) == NULL)
+		return (1);
+
+	err = zpool_prefetch(zhp, type);
+
+	zpool_close(zhp);
+
+	return (err);
+}
+
+/*
+ * zpool ddtprune -d|-p <amount> <pool>
+ *
+ *	-d <days>	Prune entries <days> old and older
+ *	-p <percent>	Prune <percent> amount of entries
+ *
+ * Prune single reference entries from DDT to satisfy the amount specified.
+ */
+int
+zpool_do_ddt_prune(int argc, char **argv)
+{
+	zpool_ddt_prune_unit_t unit = ZPOOL_DDT_PRUNE_NONE;
+	uint64_t amount = 0;
+	zpool_handle_t *zhp;
+	char *endptr;
+	int c;
+
+	while ((c = getopt(argc, argv, "d:p:")) != -1) {
+		switch (c) {
+		case 'd':
+			if (unit == ZPOOL_DDT_PRUNE_PERCENTAGE) {
+				(void) fprintf(stderr, gettext("-d cannot be "
+				    "combined with -p option\n"));
+				usage(B_FALSE);
+			}
+			errno = 0;
+			amount = strtoull(optarg, &endptr, 0);
+			if (errno != 0 || *endptr != '\0' || amount == 0) {
+				(void) fprintf(stderr,
+				    gettext("invalid days value\n"));
+				usage(B_FALSE);
+			}
+			amount *= 86400;	/* convert days to seconds */
+			unit = ZPOOL_DDT_PRUNE_AGE;
+			break;
+		case 'p':
+			if (unit == ZPOOL_DDT_PRUNE_AGE) {
+				(void) fprintf(stderr, gettext("-p cannot be "
+				    "combined with -d option\n"));
+				usage(B_FALSE);
+			}
+			errno = 0;
+			amount = strtoull(optarg, &endptr, 0);
+			if (errno != 0 || *endptr != '\0' ||
+			    amount == 0 || amount > 100) {
+				(void) fprintf(stderr,
+				    gettext("invalid percentage value\n"));
+				usage(B_FALSE);
+			}
+			unit = ZPOOL_DDT_PRUNE_PERCENTAGE;
+			break;
+		case '?':
+			(void) fprintf(stderr, gettext("invalid option '%c'\n"),
+			    optopt);
+			usage(B_FALSE);
+		}
+	}
+	argc -= optind;
+	argv += optind;
+
+	if (unit == ZPOOL_DDT_PRUNE_NONE) {
+		(void) fprintf(stderr,
+		    gettext("missing amount option (-d|-p <value>)\n"));
+		usage(B_FALSE);
+	} else if (argc < 1) {
+		(void) fprintf(stderr, gettext("missing pool argument\n"));
+		usage(B_FALSE);
+	} else if (argc > 1) {
+		(void) fprintf(stderr, gettext("too many arguments\n"));
+		usage(B_FALSE);
+	}
+	zhp = zpool_open(g_zfs, argv[0]);
+	if (zhp == NULL)
+		return (-1);
+
+	int error = zpool_ddt_prune(zhp, unit, amount);
+
+	zpool_close(zhp);
+
+	return (error);
 }
 
 /*

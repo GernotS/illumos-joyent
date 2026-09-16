@@ -1036,6 +1036,43 @@ xhci_endpoint_tick(void *arg)
 		return;
 	}
 
+	/*
+	 * xhci_endpoint_quiesce() dropped xhci_lock above to issue the stop and
+	 * reset endpoint commands. During that window a normal completion event
+	 * for this very transfer may have been delivered and serviced by
+	 * xhci_endpoint_transfer_callback(), which removes the transfer from
+	 * xep_transfers, returns the request to USBA and frees the transfer. If
+	 * that happened, the transfer we sampled at the top of this routine is
+	 * gone and must not be touched: skipping the ring a second time, or
+	 * completing the request again, would dereference a usba_req_wrapper_t
+	 * that the client has already freed.
+	 *
+	 * Detect that the head is no longer the transfer we timed out. The
+	 * endpoint is still stopped from the quiesce above, so re-point the
+	 * dequeue pointer at the ring's current position to restart it, then
+	 * reschedule and return without completing the transfer.
+	 */
+	if (list_head(&xep->xep_transfers) != xt) {
+		mutex_exit(&xhcip->xhci_lock);
+		ret = xhci_command_set_tr_dequeue(xhcip, xd, xep);
+		mutex_enter(&xhcip->xhci_lock);
+		xep->xep_state &= ~XHCI_ENDPOINT_QUIESCE;
+		if (ret == USB_SUCCESS) {
+			xep->xep_state &= ~XHCI_ENDPOINT_TIMED_OUT;
+		} else {
+			xhci_error(xhcip, "failed to set transfer ring dequeue "
+			    "pointer of endpoint %u of device on slot %d and "
+			    "port %d after a timeout raced a completion: "
+			    "device remains timed out, please use cfgadm to "
+			    "recover", xep->xep_num, xd->xd_slot, xd->xd_port);
+		}
+		xep->xep_timeout = timeout(xhci_endpoint_tick, xep,
+		    drv_usectohz(XHCI_TICK_TIMEOUT_US));
+		mutex_exit(&xhcip->xhci_lock);
+		cv_broadcast(&xep->xep_state_cv);
+		return;
+	}
+
 	xhci_ring_skip_transfer(&xep->xep_ring, xt);
 	(void) list_remove_head(&xep->xep_transfers);
 	mutex_exit(&xhcip->xhci_lock);

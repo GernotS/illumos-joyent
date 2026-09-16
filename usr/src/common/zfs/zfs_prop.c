@@ -497,7 +497,8 @@ zfs_prop_init(void)
 	    SPA_OLD_MAXBLOCKSIZE, PROP_INHERIT,
 	    ZFS_TYPE_FILESYSTEM, "512 to 1M, power of 2", "RECSIZE");
 	zprop_register_number(ZFS_PROP_SPECIAL_SMALL_BLOCKS,
-	    "special_small_blocks", 0, PROP_INHERIT, ZFS_TYPE_FILESYSTEM,
+	    "special_small_blocks", 0, PROP_INHERIT,
+            ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME,
 	    "zero or 512 to 128K, power of 2", "SPECIAL_SMALL_BLOCKS");
 
 	/* hidden properties */

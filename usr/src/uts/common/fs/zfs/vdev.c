@@ -21,7 +21,9 @@
 
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2011, 2018 by Delphix. All rights reserved.
+ * Copyright (c) 2011, 2021 by Delphix. All rights reserved.
+ * Copyright 2025 iXsystems, Inc.
+ * Copyright 2026 Gernot Strasser
  * Copyright 2017 Nexenta Systems, Inc.
  * Copyright (c) 2014 Integros [integros.com]
  * Copyright 2016 Toomas Soome <tsoome@me.com>
@@ -74,6 +76,27 @@ static vdev_ops_t *vdev_ops_table[] = {
 
 /* maximum scrub/resilver I/O queue per leaf vdev */
 int zfs_scrub_limit = 10;
+
+/*
+ * One metaslab from each (normal-class) vdev is used by the ZIL.  These are
+ * called "embedded slog metaslabs", are referenced by vdev_log_mg, and are
+ * part of the spa_embedded_log_class.  The metaslab with the most free space
+ * in each vdev is selected for this purpose when the pool is opened (or a
+ * vdev is added).  See vdev_metaslab_init().
+ *
+ * Log blocks can be allocated from the following locations.  Each one is tried
+ * in order until the allocation succeeds:
+ * 1. dedicated log vdevs, aka "slog" (spa_log_class)
+ * 2. embedded slog metaslabs (spa_embedded_log_class)
+ * 3. other metaslabs in normal vdevs (spa_normal_class)
+ *
+ * zfs_embedded_slog_min_ms disables the embedded slog if there are fewer
+ * than this number of metaslabs in the vdev.  This ensures that we don't set
+ * aside an unreasonable amount of space for the ZIL.  If set to less than
+ * 1 << (spa_slop_shift + 1), on small pools the usable space may be reduced
+ * (by more than 1<<spa_slop_shift) due to the embedded slog metaslab.
+ */
+int zfs_embedded_slog_min_ms = 64;
 
 /* default target for number of metaslabs per top-level vdev */
 int zfs_vdev_default_ms_count = 200;
@@ -199,6 +222,23 @@ vdev_getops(const char *type)
 			break;
 
 	return (ops);
+}
+
+/*
+ * Given a vdev and a metaslab class, find which metaslab group we're
+ * interested in. All vdevs may belong to two different metaslab classes.
+ * Dedicated slog devices use only the primary metaslab group, rather than a
+ * separate log group. For embedded slogs, the vdev_log_mg will be non-NULL.
+ */
+metaslab_group_t *
+vdev_get_mg(vdev_t *vd, metaslab_class_t *mc)
+{
+	if ((mc == spa_embedded_log_class(vd->vdev_spa) ||
+	    mc == spa_special_embedded_log_class(vd->vdev_spa)) &&
+	    vd->vdev_log_mg != NULL)
+		return (vd->vdev_log_mg);
+	else
+		return (vd->vdev_mg);
 }
 
 /*
@@ -517,6 +557,10 @@ vdev_alloc_common(spa_t *spa, uint_t id, uint64_t guid, vdev_ops_t *ops)
 	vd->vdev_ops = ops;
 	vd->vdev_state = VDEV_STATE_CLOSED;
 	vd->vdev_ishole = (ops == &vdev_hole_ops);
+
+	list_link_init(&vd->vdev_config_dirty_node);
+	list_link_init(&vd->vdev_state_dirty_node);
+
 	vic->vic_prev_indirect_vdev = UINT64_MAX;
 
 	rw_init(&vd->vdev_indirect_rwlock, NULL, RW_DEFAULT, NULL);
@@ -883,6 +927,11 @@ vdev_free(vdev_t *vd)
 		metaslab_group_destroy(vd->vdev_mg);
 		vd->vdev_mg = NULL;
 	}
+	if (vd->vdev_log_mg != NULL) {
+		ASSERT0(vd->vdev_ms_count);
+		metaslab_group_destroy(vd->vdev_log_mg);
+		vd->vdev_log_mg = NULL;
+	}
 
 	ASSERT0(vd->vdev_stat.vs_space);
 	ASSERT0(vd->vdev_stat.vs_dspace);
@@ -990,14 +1039,20 @@ vdev_top_transfer(vdev_t *svd, vdev_t *tvd)
 
 	if (tvd->vdev_mg)
 		ASSERT3P(tvd->vdev_mg, ==, svd->vdev_mg);
+	if (tvd->vdev_log_mg)
+		ASSERT3P(tvd->vdev_log_mg, ==, svd->vdev_log_mg);
 	tvd->vdev_mg = svd->vdev_mg;
+	tvd->vdev_log_mg = svd->vdev_log_mg;
 	tvd->vdev_ms = svd->vdev_ms;
 
 	svd->vdev_mg = NULL;
+	svd->vdev_log_mg = NULL;
 	svd->vdev_ms = NULL;
 
 	if (tvd->vdev_mg != NULL)
 		tvd->vdev_mg->mg_vd = tvd;
+	if (tvd->vdev_log_mg != NULL)
+		tvd->vdev_log_mg->mg_vd = tvd;
 
 	tvd->vdev_checkpoint_sm = svd->vdev_checkpoint_sm;
 	svd->vdev_checkpoint_sm = NULL;
@@ -1156,7 +1211,7 @@ vdev_remove_parent(vdev_t *cvd)
 	vdev_free(mvd);
 }
 
-static void
+void
 vdev_metaslab_group_create(vdev_t *vd)
 {
 	spa_t *spa = vd->vdev_spa;
@@ -1190,6 +1245,28 @@ vdev_metaslab_group_create(vdev_t *vd)
 		vd->vdev_mg = metaslab_group_create(mc, vd,
 		    spa->spa_alloc_count);
 
+		if (!vd->vdev_islog) {
+			/*
+			 * Unlike OpenZFS (which wraps the allocator index by the
+			 * group's allocator count), illumos indexes a group's
+			 * per-allocator arrays with the raw allocator returned by
+			 * zio_alloc_zil() (0 .. spa_alloc_count-1).  So the log
+			 * group must be sized for spa_alloc_count allocators, the
+			 * same as every other metaslab group; creating it with a
+			 * single allocator overruns mg_primaries[] et al. and
+			 * corrupts the heap.
+			 */
+			if (mc == spa_special_class(spa)) {
+				vd->vdev_log_mg = metaslab_group_create(
+				    spa_special_embedded_log_class(spa), vd,
+				    spa->spa_alloc_count);
+			} else {
+				vd->vdev_log_mg = metaslab_group_create(
+				    spa_embedded_log_class(spa), vd,
+				    spa->spa_alloc_count);
+			}
+		}
+
 		/*
 		 * The spa ashift values currently only reflect the
 		 * general vdev classes. Class destination is late
@@ -1209,8 +1286,6 @@ int
 vdev_metaslab_init(vdev_t *vd, uint64_t txg)
 {
 	spa_t *spa = vd->vdev_spa;
-	objset_t *mos = spa->spa_meta_objset;
-	uint64_t m;
 	uint64_t oldc = vd->vdev_ms_count;
 	uint64_t newc = vd->vdev_asize >> vd->vdev_ms_shift;
 	metaslab_t **mspp;
@@ -1238,16 +1313,17 @@ vdev_metaslab_init(vdev_t *vd, uint64_t txg)
 
 	vd->vdev_ms = mspp;
 	vd->vdev_ms_count = newc;
-	for (m = oldc; m < newc; m++) {
-		uint64_t object = 0;
 
+	for (uint64_t m = oldc; m < newc; m++) {
+		uint64_t object = 0;
 		/*
 		 * vdev_ms_array may be 0 if we are creating the "fake"
 		 * metaslabs for an indirect vdev for zdb's leak detection.
 		 * See zdb_leak_init().
 		 */
 		if (txg == 0 && vd->vdev_ms_array != 0) {
-			error = dmu_read(mos, vd->vdev_ms_array,
+			error = dmu_read(spa->spa_meta_objset,
+			    vd->vdev_ms_array,
 			    m * sizeof (uint64_t), sizeof (uint64_t), &object,
 			    DMU_READ_PREFETCH);
 			if (error != 0) {
@@ -1257,17 +1333,6 @@ vdev_metaslab_init(vdev_t *vd, uint64_t txg)
 			}
 		}
 
-#ifndef _KERNEL
-		/*
-		 * To accomodate zdb_leak_init() fake indirect
-		 * metaslabs, we allocate a metaslab group for
-		 * indirect vdevs which normally don't have one.
-		 */
-		if (vd->vdev_mg == NULL) {
-			ASSERT0(vdev_is_concrete(vd));
-			vdev_metaslab_group_create(vd);
-		}
-#endif
 		error = metaslab_init(vd->vdev_mg, m, object, txg,
 		    &(vd->vdev_ms[m]));
 		if (error != 0) {
@@ -1275,6 +1340,49 @@ vdev_metaslab_init(vdev_t *vd, uint64_t txg)
 			    error);
 			return (error);
 		}
+	}
+
+	/*
+	 * Find the emptiest metaslab on the vdev and mark it for use for
+	 * embedded slog by moving it from the regular to the log metaslab
+	 * group.  This works for normal and special vdevs.
+	 */
+	if ((vd->vdev_mg->mg_class == spa_normal_class(spa) ||
+	    vd->vdev_mg->mg_class == spa_special_class(spa)) &&
+	    vd->vdev_ms_count > zfs_embedded_slog_min_ms &&
+	    avl_is_empty(&vd->vdev_log_mg->mg_metaslab_tree)) {
+		uint64_t slog_msid = 0;
+		uint64_t smallest = UINT64_MAX;
+
+		/*
+		 * Note, we only search the new metaslabs, because the old
+		 * (pre-existing) ones may be active (e.g. have non-empty
+		 * range_tree's), and we don't move them to the new
+		 * metaslab_t.
+		 */
+		for (uint64_t m = oldc; m < newc; m++) {
+			uint64_t alloc =
+			    space_map_allocated(vd->vdev_ms[m]->ms_sm);
+			if (alloc < smallest) {
+				slog_msid = m;
+				smallest = alloc;
+			}
+		}
+		metaslab_t *slog_ms = vd->vdev_ms[slog_msid];
+		/*
+		 * The metaslab was marked as dirty at the end of
+		 * metaslab_init(). Remove it from the dirty list so that we
+		 * can uninitialize and reinitialize it to the new class.
+		 * Since it may be dirty in any txg slot, clear all of them.
+		 */
+		for (int t = 0; t < TXG_SIZE; t++) {
+			(void) txg_list_remove_this(&vd->vdev_ms_list,
+			    slog_ms, t);
+		}
+		uint64_t sm_obj = space_map_object(slog_ms->ms_sm);
+		metaslab_fini(slog_ms);
+		VERIFY0(metaslab_init(vd->vdev_log_mg, slog_msid, sm_obj, txg,
+		    &vd->vdev_ms[slog_msid]));
 	}
 
 	if (txg == 0)
@@ -1287,17 +1395,12 @@ vdev_metaslab_init(vdev_t *vd, uint64_t txg)
 	 */
 	if (!expanding && !vd->vdev_removing) {
 		metaslab_group_activate(vd->vdev_mg);
+		if (vd->vdev_log_mg != NULL)
+			metaslab_group_activate(vd->vdev_log_mg);
 	}
 
 	if (txg == 0)
 		spa_config_exit(spa, SCL_ALLOC, FTAG);
-
-	/*
-	 * Regardless whether this vdev was just added or it is being
-	 * expanded, the metaslab count has changed. Recalculate the
-	 * block limit.
-	 */
-	spa_log_sm_set_blocklimit(spa);
 
 	return (0);
 }
@@ -1322,7 +1425,12 @@ vdev_metaslab_fini(vdev_t *vd)
 
 	if (vd->vdev_ms != NULL) {
 		metaslab_group_t *mg = vd->vdev_mg;
+
 		metaslab_group_passivate(mg);
+		if (vd->vdev_log_mg != NULL) {
+			ASSERT(!vd->vdev_islog);
+			metaslab_group_passivate(vd->vdev_log_mg);
+		}
 
 		uint64_t count = vd->vdev_ms_count;
 		for (uint64_t m = 0; m < count; m++) {
@@ -1332,11 +1440,13 @@ vdev_metaslab_fini(vdev_t *vd)
 		}
 		kmem_free(vd->vdev_ms, count * sizeof (metaslab_t *));
 		vd->vdev_ms = NULL;
-
 		vd->vdev_ms_count = 0;
 
-		for (int i = 0; i < RANGE_TREE_HISTOGRAM_SIZE; i++)
+		for (int i = 0; i < RANGE_TREE_HISTOGRAM_SIZE; i++) {
 			ASSERT0(mg->mg_histogram[i]);
+			if (vd->vdev_log_mg != NULL)
+				ASSERT0(vd->vdev_log_mg->mg_histogram[i]);
+		}
 	}
 	ASSERT0(vd->vdev_ms_count);
 }
@@ -3187,8 +3297,11 @@ vdev_sync_done(vdev_t *vd, uint64_t txg)
 	    != NULL)
 		metaslab_sync_done(msp, txg);
 
-	if (reassess)
+	if (reassess) {
 		metaslab_sync_reassess(vd->vdev_mg);
+		if (vd->vdev_log_mg != NULL)
+			metaslab_sync_reassess(vd->vdev_log_mg);
+	}
 }
 
 void
@@ -3475,6 +3588,7 @@ top:
 			/*
 			 * Prevent any future allocations.
 			 */
+			ASSERT3P(tvd->vdev_log_mg, ==, NULL);
 			metaslab_group_passivate(mg);
 			(void) spa_vdev_state_exit(spa, vd, 0);
 
@@ -3853,6 +3967,12 @@ vdev_get_stats_ex(vdev_t *vd, vdev_stat_t *vs, vdev_stat_ex_t *vsx)
 		}
 		if (vd->vdev_aux == NULL && vd == vd->vdev_top &&
 		    vdev_is_concrete(vd)) {
+			/*
+			 * The vdev fragmentation rating doesn't take into
+			 * account the embedded slog metaslab (vdev_log_mg).
+			 * Since it's only one metaslab, it would have a tiny
+			 * impact on the overall fragmentation.
+			 */
 			vs->vs_fragmentation = (vd->vdev_mg != NULL) ?
 			    vd->vdev_mg->mg_fragmentation : 0;
 		}
@@ -4013,6 +4133,27 @@ vdev_stat_update(zio_t *zio, uint64_t psize)
 	 * errors.
 	 */
 	if (zio->io_vd == NULL && (zio->io_flags & ZIO_FLAG_DONT_PROPAGATE))
+		return;
+
+	/*
+	 * A DDT "extend" child write -- one that only grows an existing flat
+	 * slot by a few DVAs -- must not gang, because a gang DVA cannot be
+	 * merged into a slot holding non-gang DVAs.  zio_write_gang_block()
+	 * signals that by setting EAGAIN, and zio_done() reissues the write
+	 * as a plain non-deduplicated block, which succeeds.
+	 *
+	 * That EAGAIN is an internal control signal, not an I/O failure, and
+	 * no device was involved: io_vd is NULL, so it would be charged to
+	 * the root vdev and surface as a phantom pool-level write error with
+	 * every leaf reading zero.  Like the intent-log case just above, it
+	 * is not a pool-level error, so do not count it.
+	 *
+	 * EAGAIN has exactly one producer in the ZIO pipeline -- the
+	 * zp_no_gang bail in zio_write_gang_block() -- so this cannot mask a
+	 * real device error.  Both the DDT child that raises it and the
+	 * logical zio that inherits it are caught here.
+	 */
+	if (zio->io_vd == NULL && zio->io_error == EAGAIN)
 		return;
 
 	mutex_enter(&vd->vdev_stat_lock);

@@ -21,6 +21,7 @@
 
 #
 # Copyright (c) 2008, 2010, Oracle and/or its affiliates. All rights reserved.
+# Copyright 2014 by Saso Kiselkov. All rights reserved.
 #
 # Copyright (c) 2018, Joyent, Inc.
 

@@ -18,6 +18,7 @@
 # Copyright 2021 Jason King
 # Copyright 2024 OmniOS Community Edition (OmniOSce) Association.
 # Copyright 2026 Oxide Computer Company
+# Copyright 2026 Gernot Strasser
 #
 
 set name=pkg.fmri value=pkg:/system/test/zfstest@$(PKGVERS)
@@ -236,6 +237,8 @@ file path=opt/zfs-tests/tests/functional/alloc_class/alloc_class_011_neg \
 file path=opt/zfs-tests/tests/functional/alloc_class/alloc_class_012_pos \
     mode=0555
 file path=opt/zfs-tests/tests/functional/alloc_class/alloc_class_013_pos \
+    mode=0555
+file path=opt/zfs-tests/tests/functional/alloc_class/alloc_class_014_pos \
     mode=0555
 file path=opt/zfs-tests/tests/functional/alloc_class/cleanup mode=0555
 file path=opt/zfs-tests/tests/functional/alloc_class/setup mode=0555
@@ -2395,6 +2398,24 @@ dir  path=opt/zfs-tests/tests/functional/ctime
 file path=opt/zfs-tests/tests/functional/ctime/cleanup mode=0555
 file path=opt/zfs-tests/tests/functional/ctime/ctime_001_pos mode=0555
 file path=opt/zfs-tests/tests/functional/ctime/setup mode=0555
+dir  path=opt/zfs-tests/tests/functional/dedup
+file path=opt/zfs-tests/tests/functional/dedup/dedup_ddt_stray_class mode=0555
+file path=opt/zfs-tests/tests/functional/dedup/dedup_fdt_create mode=0555
+file path=opt/zfs-tests/tests/functional/dedup/dedup_fdt_import mode=0555
+file path=opt/zfs-tests/tests/functional/dedup/dedup_fdt_pacing mode=0555
+file path=opt/zfs-tests/tests/functional/dedup/dedup_gang_copies mode=0555
+file path=opt/zfs-tests/tests/functional/dedup/dedup_legacy_create mode=0555
+file path=opt/zfs-tests/tests/functional/dedup/dedup_legacy_fdt_mixed mode=0555
+file path=opt/zfs-tests/tests/functional/dedup/dedup_legacy_fdt_upgrade mode=0555
+file path=opt/zfs-tests/tests/functional/dedup/dedup_legacy_import mode=0555
+file path=opt/zfs-tests/tests/functional/dedup/dedup_log_zdb_leak mode=0555
+file path=opt/zfs-tests/tests/functional/dedup/dedup_prune mode=0555
+file path=opt/zfs-tests/tests/functional/dedup/dedup_prune_all mode=0555
+file path=opt/zfs-tests/tests/functional/dedup/dedup_prune_deadlock mode=0555
+file path=opt/zfs-tests/tests/functional/dedup/dedup_prune_leak mode=0555
+file path=opt/zfs-tests/tests/functional/dedup/dedup_prune_race mode=0555
+file path=opt/zfs-tests/tests/functional/dedup/dedup_quota mode=0555
+file path=opt/zfs-tests/tests/functional/dedup/dedup_zap_shrink mode=0555
 dir  path=opt/zfs-tests/tests/functional/delegate
 file path=opt/zfs-tests/tests/functional/delegate/cleanup mode=0555
 file path=opt/zfs-tests/tests/functional/delegate/delegate.cfg mode=0444
@@ -2878,6 +2899,12 @@ file path=opt/zfs-tests/tests/functional/removal/removal_with_create_fs \
 file path=opt/zfs-tests/tests/functional/removal/removal_with_dedup mode=0555
 file path=opt/zfs-tests/tests/functional/removal/removal_with_export mode=0555
 file path=opt/zfs-tests/tests/functional/removal/removal_with_ganging mode=0555
+file path=opt/zfs-tests/tests/functional/removal/removal_missing_special_refused \
+    mode=0555
+file path=opt/zfs-tests/tests/functional/removal/removal_with_missing_log \
+    mode=0555
+file path=opt/zfs-tests/tests/functional/removal/removal_with_special_embedded_log \
+    mode=0555
 file path=opt/zfs-tests/tests/functional/removal/removal_with_remap mode=0555
 file path=opt/zfs-tests/tests/functional/removal/removal_with_remove mode=0555
 file path=opt/zfs-tests/tests/functional/removal/removal_with_scrub mode=0555

@@ -21,6 +21,7 @@
 
 #
 # Copyright (c) 2008, 2010, Oracle and/or its affiliates. All rights reserved.
+# Copyright 2014 by Saso Kiselkov. All rights reserved.
 # Copyright 2017 Jason King
 # Copyright (c) 2019, Joyent, Inc.
 #
@@ -33,7 +34,7 @@ include		../Makefile.com
 AES_PSM_OBJS =	aes_amd64.o aes_intel.o aeskey.o
 ARCFOUR_PSM_OBJS = arcfour-x86_64.o
 BIGNUM_PSM_OBJS = bignum_amd64.o bignum_amd64_asm.o
-MODES_PSM_OBJS = gcm_intel.o
+MODES_PSM_OBJS = gcm_intel.o gcm_intel_cryptogams.o
 
 include		$(SRC)/lib/Makefile.lib
 include		$(SRC)/lib/Makefile.lib.64
@@ -52,7 +53,7 @@ ARCFOUR_PSM_SRC = arcfour-x86_64.S
 BIGNUM_PSM_SRC = $(BIGNUM_DIR)/$(MACH64)/bignum_amd64.c \
 		$(BIGNUM_DIR)/$(MACH64)/bignum_amd64_asm.S
 
-MODES_PSM_SRC = $(MODES_DIR)/$(MACH64)/gcm_intel.S
+MODES_PSM_SRC = $(MODES_DIR)/$(MACH64)/gcm_intel.S $(MODES_DIR)/$(MACH64)/gcm_intel_cryptogams.S
 
 # Sources need to be redefined after Makefile.lib inclusion.
 SRCS =		$(AES_SRC) $(ARCFOUR_SRC) $(BIGNUM_SRC) $(BLOWFISH_SRC) \

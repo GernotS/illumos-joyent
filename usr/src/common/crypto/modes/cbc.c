@@ -23,6 +23,9 @@
  * Use is subject to license terms.
  * Copyright 2017 Nexenta Systems, Inc.  All rights reserved.
  */
+/*
+ * Copyright 2014 by Saso Kiselkov. All rights reserved.
+ */
 
 #ifndef _KERNEL
 #include <strings.h>
@@ -33,6 +36,7 @@
 
 #include <sys/debug.h>
 #include <sys/types.h>
+#define INLINE_CRYPTO_GET_PTRS
 #include <modes/modes.h>
 #include <sys/crypto/common.h>
 #include <sys/crypto/impl.h>
@@ -42,6 +46,38 @@
 #define	CONST_RB_128	0x87
 #define	CONST_RB_64	0x1B
 
+boolean_t cbc_fastpath_enabled = B_TRUE;
+
+static void
+cbc_decrypt_fastpath(cbc_ctx_t *ctx, const uint8_t *data, size_t length,
+    uint8_t *out, size_t block_size,
+    int (*decrypt)(const void *, const uint8_t *, uint8_t *),
+    int (*decrypt_ecb)(const void *, const uint8_t *, uint8_t *, uint64_t),
+    void (*xor_block)(const uint8_t *, uint8_t *),
+    void (*xor_block_range)(const uint8_t *, uint8_t *, uint64_t))
+{
+	const uint8_t *iv = (uint8_t *)ctx->cbc_iv;
+
+	/* Use bulk decryption when available. */
+	if (decrypt_ecb != NULL) {
+		decrypt_ecb(ctx->cbc_keysched, data, out, length);
+	} else {
+		for (size_t i = 0; i < length; i += block_size)
+			decrypt(ctx->cbc_keysched, &data[i], &out[i]);
+	}
+
+	/* Use bulk XOR when available. */
+	if (xor_block_range != NULL && length >= 2 * block_size) {
+		xor_block(iv, out);
+		xor_block_range(data, &out[block_size], length - block_size);
+	} else {
+		for (size_t i = 0; i < length; i += block_size) {
+			xor_block(iv, &out[i]);
+			iv = &data[i];
+		}
+	}
+}
+
 /*
  * Algorithm independent CBC functions.
  */
@@ -49,8 +85,10 @@ int
 cbc_encrypt_contiguous_blocks(cbc_ctx_t *ctx, char *data, size_t length,
     crypto_data_t *out, size_t block_size,
     int (*encrypt)(const void *, const uint8_t *, uint8_t *),
-    void (*copy_block)(uint8_t *, uint8_t *),
-    void (*xor_block)(uint8_t *, uint8_t *))
+    void (*copy_block)(const uint8_t *, uint8_t *),
+    void (*xor_block)(const uint8_t *, uint8_t *),
+    int (*encrypt_cbc)(const void *, const uint8_t *, uint8_t *,
+    const uint8_t *, uint64_t))
 {
 	size_t remainder = length;
 	size_t need;
@@ -62,6 +100,74 @@ cbc_encrypt_contiguous_blocks(cbc_ctx_t *ctx, char *data, size_t length,
 	uint8_t *out_data_1;
 	uint8_t *out_data_2;
 	size_t out_data_1_len;
+
+	/*
+	 * Re-enter the fastpath for streams that are not block-aligned;
+	 * see cbc_decrypt_contiguous_blocks().  The per-block path below
+	 * leaves the chaining value in cbc_iv, which is where
+	 * encrypt_cbc() picks it up.  CMAC never takes the fastpath.
+	 */
+	if (cbc_fastpath_enabled && encrypt_cbc != NULL && out != NULL &&
+	    (ctx->cbc_flags & CMAC_MODE) == 0 && length > block_size) {
+		size_t head = (ctx->cbc_remainder_len == 0) ? 0 :
+		    block_size - ctx->cbc_remainder_len;
+		size_t body = (length - head) & ~(block_size - 1);
+		size_t tail = length - head - body;
+		int rv;
+
+		if (body != 0 && (head != 0 || tail != 0)) {
+			if (head != 0 && (rv = cbc_encrypt_contiguous_blocks(
+			    ctx, data, head, out, block_size, encrypt,
+			    copy_block, xor_block, encrypt_cbc)) !=
+			    CRYPTO_SUCCESS)
+				return (rv);
+			ASSERT0(ctx->cbc_remainder_len);
+			if ((rv = cbc_encrypt_contiguous_blocks(ctx,
+			    data + head, body, out, block_size, encrypt,
+			    copy_block, xor_block, encrypt_cbc)) !=
+			    CRYPTO_SUCCESS || tail == 0)
+				return (rv);
+			return (cbc_encrypt_contiguous_blocks(ctx,
+			    data + head + body, tail, out, block_size, encrypt,
+			    copy_block, xor_block, encrypt_cbc));
+		}
+	}
+
+	/*
+	 * CBC encryption fastpath requirements:
+	 * - fastpath is enabled
+	 * - algorithm-specific acceleration function is available
+	 * - the operation is not CMAC: CMAC must not emit any ciphertext
+	 *   before cmac_mode_final(), so it always uses the per-block path
+	 *   below (which honors the CMAC_MODE no-output contract).  The
+	 *   bulk encrypt_cbc() routine writes the full result to `out',
+	 *   which for a MAC update is only a single-block scratch buffer.
+	 * - input is block-aligned
+	 * - the whole result fits in the output's first segment
+	 *   (CRYPTO_DATA_IS_CONTIGUOUS) and within cd_length
+	 *   (CRYPTO_DATA_HAS_ROOM), so encrypt_cbc() can never store past
+	 *   the end of a short output buffer, or the user requested that
+	 *   we overwrite their input buffer (input/output aliasing allowed)
+	 */
+	if (cbc_fastpath_enabled && encrypt_cbc != NULL && length != 0 &&
+	    (ctx->cbc_flags & CMAC_MODE) == 0 &&
+	    ctx->cbc_remainder_len == 0 && (length & (block_size - 1)) == 0 &&
+	    (out == NULL ||
+	    (CRYPTO_DATA_IS_CONTIGUOUS(out, length) &&
+	    CRYPTO_DATA_HAS_ROOM(out, length)))) {
+		if (out == NULL) {
+			encrypt_cbc(ctx->cbc_keysched, (uint8_t *)data,
+			    (uint8_t *)data, (uint8_t *)ctx->cbc_iv, length);
+			ctx->cbc_lastp = (uint8_t *)&data[length - block_size];
+		} else {
+			uint8_t *outp = CRYPTO_DATA_FIRST_BLOCK(out);
+			encrypt_cbc(ctx->cbc_keysched, (uint8_t *)data, outp,
+			    (uint8_t *)ctx->cbc_iv, length);
+			out->cd_offset += length;
+			ctx->cbc_lastp = &outp[length - block_size];
+		}
+		goto out;
+	}
 
 	if (length + ctx->cbc_remainder_len < ctx->max_remain) {
 		/* accumulate bytes here and return */
@@ -186,8 +292,10 @@ int
 cbc_decrypt_contiguous_blocks(cbc_ctx_t *ctx, char *data, size_t length,
     crypto_data_t *out, size_t block_size,
     int (*decrypt)(const void *, const uint8_t *, uint8_t *),
-    void (*copy_block)(uint8_t *, uint8_t *),
-    void (*xor_block)(uint8_t *, uint8_t *))
+    void (*copy_block)(const uint8_t *, uint8_t *),
+    void (*xor_block)(const uint8_t *, uint8_t *),
+    int (*decrypt_ecb)(const void *, const uint8_t *, uint8_t *, uint64_t),
+    void (*xor_block_range)(const uint8_t *, uint8_t *, uint64_t))
 {
 	size_t remainder = length;
 	size_t need;
@@ -199,6 +307,88 @@ cbc_decrypt_contiguous_blocks(cbc_ctx_t *ctx, char *data, size_t length,
 	uint8_t *out_data_1;
 	uint8_t *out_data_2;
 	size_t out_data_1_len;
+
+	/*
+	 * Re-enter the fastpath for streams that are not block-aligned.
+	 * Once a caller has left bytes in cbc_remainder -- after an
+	 * unaligned update, or because it deliberately holds back a whole
+	 * block as pkcs11_softtoken does for CKM_AES_CBC_PAD -- every later
+	 * call would otherwise run entirely on the per-block path below.
+	 * Instead, complete the buffered block with just enough input
+	 * (the per-block path), hand the block-aligned middle to the
+	 * fastpath, and buffer the sub-block tail.  The per-block path may
+	 * leave cbc_lastp on cbc_lastblock; the fastpath below picks the
+	 * chaining value up from there.
+	 */
+	if (cbc_fastpath_enabled && out != NULL && length > block_size) {
+		size_t head = 0, body, tail;
+		int rv;
+
+		if (ctx->cbc_remainder_len > 0) {
+			/* a full held-back block still needs one more */
+			head = block_size - ctx->cbc_remainder_len;
+			if (head == 0)
+				head = block_size;
+		}
+		body = (length - head) & ~(block_size - 1);
+		tail = length - head - body;
+
+		if (body != 0 && (head != 0 || tail != 0)) {
+			if (head != 0 && (rv = cbc_decrypt_contiguous_blocks(
+			    ctx, data, head, out, block_size, decrypt,
+			    copy_block, xor_block, decrypt_ecb,
+			    xor_block_range)) != CRYPTO_SUCCESS)
+				return (rv);
+			ASSERT0(ctx->cbc_remainder_len);
+			if ((rv = cbc_decrypt_contiguous_blocks(ctx,
+			    data + head, body, out, block_size, decrypt,
+			    copy_block, xor_block, decrypt_ecb,
+			    xor_block_range)) != CRYPTO_SUCCESS)
+				return (rv);
+			if (tail == 0)
+				return (CRYPTO_SUCCESS);
+			return (cbc_decrypt_contiguous_blocks(ctx,
+			    data + head + body, tail, out, block_size, decrypt,
+			    copy_block, xor_block, decrypt_ecb,
+			    xor_block_range));
+		}
+	}
+
+	/*
+	 * CBC decryption fastpath requirements:
+	 * - fastpath is enabled
+	 * - input is block-aligned
+	 * - output is a single contiguous region that doesn't overlap the
+	 *   input (cbc_decrypt_fastpath() XORs with ciphertext it has
+	 *   already overwritten when run in place)
+	 */
+	if (cbc_fastpath_enabled && ctx->cbc_remainder_len == 0 &&
+	    length != 0 && (length & (block_size - 1)) == 0 &&
+	    CRYPTO_DATA_IS_CONTIGUOUS(out, length) &&
+	    CRYPTO_DATA_HAS_ROOM(out, length) &&
+	    ((uint8_t *)CRYPTO_DATA_FIRST_BLOCK(out) + length <= datap ||
+	    datap + length <= (uint8_t *)CRYPTO_DATA_FIRST_BLOCK(out))) {
+		uint8_t *outp = CRYPTO_DATA_FIRST_BLOCK(out);
+
+		/*
+		 * The slow path below alternates the chaining value between
+		 * cbc_iv and cbc_lastblock (see OTHER()) and may leave
+		 * cbc_lastp pointing at cbc_lastblock.  The fastpath chains
+		 * from cbc_iv, so bring it up to date first.
+		 */
+		if (ctx->cbc_lastp != (uint8_t *)ctx->cbc_iv) {
+			copy_block(ctx->cbc_lastp, (uint8_t *)ctx->cbc_iv);
+			ctx->cbc_lastp = (uint8_t *)ctx->cbc_iv;
+		}
+
+		cbc_decrypt_fastpath(ctx, (uint8_t *)data, length, outp,
+		    block_size, decrypt, decrypt_ecb, xor_block,
+		    xor_block_range);
+		out->cd_offset += length;
+		bcopy(&data[length - block_size], ctx->cbc_iv, block_size);
+		ctx->cbc_lastp = (uint8_t *)ctx->cbc_iv;
+		return (CRYPTO_SUCCESS);
+	}
 
 	if (length + ctx->cbc_remainder_len < block_size) {
 		/* accumulate bytes here and return */
@@ -297,7 +487,7 @@ cbc_decrypt_contiguous_blocks(cbc_ctx_t *ctx, char *data, size_t length,
 
 int
 cbc_init_ctx(cbc_ctx_t *cbc_ctx, char *param, size_t param_len,
-    size_t block_size, void (*copy_block)(uint8_t *, uint64_t *))
+    size_t block_size, void (*copy_block)(const uint8_t *, uint64_t *))
 {
 	/*
 	 * Copy IV into context.
@@ -416,7 +606,7 @@ cmac_left_shift_block_by1(uint8_t *block, size_t block_size)
 int
 cmac_mode_final(cbc_ctx_t *cbc_ctx, crypto_data_t *out,
     int (*encrypt_block)(const void *, const uint8_t *, uint8_t *),
-    void (*xor_block)(uint8_t *, uint8_t *))
+    void (*xor_block)(const uint8_t *, uint8_t *))
 {
 	uint8_t buf[AES_BLOCK_LEN] = {0};
 	uint8_t *M_last = (uint8_t *)cbc_ctx->cbc_remainder;

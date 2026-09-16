@@ -22,6 +22,8 @@
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2019, Joyent, Inc. All rights reserved.
  * Copyright (c) 2011, 2018 by Delphix. All rights reserved.
+ * Copyright 2025 iXsystems, Inc.
+ * Copyright 2026 Gernot Strasser
  * Copyright (c) 2014 Integros [integros.com]
  * Copyright 2026 Oxide Computer Company
  */
@@ -142,6 +144,15 @@ boolean_t zil_nocacheflush = B_FALSE;
  * zil_commmit zio's at ZIO_PRIORITY_SYNC_WRITE.
  */
 uint64_t zil_slog_bulk = 0x100000000ULL;
+
+/*
+ * When enabled and blocks go to a normal vdev, treat special vdevs as SLOG,
+ * writing the data into the ZIL (WR_COPIED/WR_NEED_COPY).  Disabling this
+ * forces indirect writes (WR_INDIRECT) to preserve special vdev throughput
+ * and endurance, likely at the cost of normal vdev latency.  Only has an
+ * effect on pools with a special allocation class but no dedicated slog.
+ */
+int zil_special_is_slog = 1;
 
 static kmem_cache_t *zil_lwb_cache;
 static kmem_cache_t *zil_zcw_cache;
@@ -758,7 +769,13 @@ zil_destroy(zilog_t *zilog, boolean_t keep_first)
 
 	zilog->zl_old_header = *zh;		/* debugging aid */
 
-	if (BP_IS_HOLE(&zh->zh_log))
+	/*
+	 * The log may already be a hole while zh_flags (e.g.
+	 * ZIL_REPLAY_NEEDED) is still set, if zil_claim() cleared the
+	 * log of a missing device.  There is still work to do then.
+	 * (OpenZFS 1e1d64d)
+	 */
+	if (BP_IS_HOLE(&zh->zh_log) && zh->zh_flags == 0)
 		return;
 
 	tx = dmu_tx_create(zilog->zl_os);
@@ -825,6 +842,15 @@ zil_claim(dsl_pool_t *dp, dsl_dataset_t *ds, void *txarg)
 	zilog = dmu_objset_zil(os);
 	zh = zil_header_in_syncing_context(zilog);
 	ASSERT3U(tx->tx_txg, ==, spa_first_txg(zilog->zl_spa));
+
+	/*
+	 * If the log is empty, then there is nothing to do here.
+	 */
+	if (BP_IS_HOLE(&zh->zh_log)) {
+		dmu_objset_disown(os, B_FALSE, FTAG);
+		return (0);
+	}
+
 	first_txg = spa_min_claim_txg(zilog->zl_spa);
 
 	/*
@@ -857,11 +883,19 @@ zil_claim(dsl_pool_t *dp, dsl_dataset_t *ds, void *txarg)
 	if (spa_get_log_state(zilog->zl_spa) == SPA_LOG_CLEAR ||
 	    (zilog->zl_spa->spa_uberblock.ub_checkpoint_txg != 0 &&
 	    zh->zh_claim_txg == 0)) {
-		if (!BP_IS_HOLE(&zh->zh_log)) {
+		if (zilog->zl_spa->spa_uberblock.ub_checkpoint_txg != 0 &&
+		    zh->zh_log.blk_birth < first_txg) {
 			(void) zil_parse(zilog, zil_clear_log_block,
 			    zil_noop_log_record, tx, first_txg, B_FALSE);
+		} else {
+			zio_free(zilog->zl_spa, first_txg, &zh->zh_log);
 		}
-		BP_ZERO(&zh->zh_log);
+		/*
+		 * Clear the whole header, not just zh_log: leaving
+		 * ZIL_REPLAY_NEEDED set would block later log vdev
+		 * removal.  (OpenZFS 1e1d64d)
+		 */
+		bzero(zh, sizeof (zil_header_t));
 		if (os->os_encrypted)
 			os->os_next_write_raw[tx->tx_txg & TXG_MASK] = B_TRUE;
 		dsl_dataset_dirty(dmu_objset_ds(os), tx);
@@ -883,7 +917,7 @@ zil_claim(dsl_pool_t *dp, dsl_dataset_t *ds, void *txarg)
 	 * or destroy beyond the last block we successfully claimed.
 	 */
 	ASSERT3U(zh->zh_claim_txg, <=, first_txg);
-	if (zh->zh_claim_txg == 0 && !BP_IS_HOLE(&zh->zh_log)) {
+	if (zh->zh_claim_txg == 0) {
 		(void) zil_parse(zilog, zil_claim_log_block,
 		    zil_claim_log_record, tx, first_txg, B_FALSE);
 		zh->zh_claim_txg = first_txg;

@@ -22,6 +22,8 @@
  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright 2011 Nexenta Systems, Inc. All rights reserved.
  * Copyright (c) 2012, 2017 by Delphix. All rights reserved.
+ * Portions Copyright (c) 2024, Klara, Inc.
+ * Portions Copyright (c) 2024, iXsystems, Inc.
  * Copyright (c) 2014 Integros [integros.com]
  */
 
@@ -30,6 +32,7 @@
 #include <sys/zfs_acl.h>
 #include <sys/zfs_ioctl.h>
 #include <sys/fs/zfs.h>
+#include <sys/int_limits.h>
 
 #include "zfs_prop.h"
 
@@ -82,6 +85,10 @@ zpool_prop_init(void)
 	    ZFS_TYPE_POOL, "<size>", "FREE");
 	zprop_register_number(ZPOOL_PROP_FREEING, "freeing", 0, PROP_READONLY,
 	    ZFS_TYPE_POOL, "<size>", "FREEING");
+	zprop_register_number(ZPOOL_PROP_DEDUP_TABLE_SIZE, "dedup_table_size",
+	    0, PROP_READONLY, ZFS_TYPE_POOL, "<size>", "DDTSIZE");
+	zprop_register_number(ZPOOL_PROP_DEDUP_TABLE_QUOTA, "dedup_table_quota",
+	    UINT64_MAX, PROP_DEFAULT, ZFS_TYPE_POOL, "<size>", "DDTQUOTA");
 	zprop_register_number(ZPOOL_PROP_CHECKPOINT, "checkpoint", 0,
 	    PROP_READONLY, ZFS_TYPE_POOL, "<size>", "CKPOINT");
 	zprop_register_number(ZPOOL_PROP_LEAKED, "leaked", 0, PROP_READONLY,

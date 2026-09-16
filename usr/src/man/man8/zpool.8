@@ -28,6 +28,7 @@
 .\" Copyright (c) 2012 Cyril Plisko. All Rights Reserved.
 .\" Copyright 2024 OmniOS Community Edition (OmniOSce) Association.
 .\" Copyright 2025 Hans Rosenfeld
+.\" Copyright 2026 Gernot Strasser
 .\"
 .Dd September 6, 2025
 .Dt ZPOOL 8
@@ -118,6 +119,14 @@
 .Op Fl w
 .Ar pool
 .Op Ar device Ns ...
+.Nm
+.Cm prefetch
+.Fl t Ar type
+.Ar pool
+.Nm
+.Cm ddtprune
+.Fl d Ar days Ns | Ns Fl p Ar percent
+.Ar pool
 .Nm
 .Cm iostat
 .Op Oo Fl lq Oc | Ns Fl rw
@@ -568,8 +577,8 @@ current state of the pool won't be scanned during a scrub.
 The allocations in the special class are dedicated to specific block types.
 By default this includes all metadata, the indirect blocks of user data, and
 any dedup data.
-The class can also be provisioned to accept a limited percentage of small file
-data blocks.
+The class can also be provisioned to accept small file blocks or zvol blocks
+on a per dataset granularity.
 .Pp
 A pool must always have at least one general (non-specified) vdev before
 other devices can be assigned to the special class.
@@ -580,7 +589,7 @@ Dedup data can be excluded from the special class by setting the
 .Sy zfs_ddt_data_is_special
 zfs kernel variable to false (0).
 .Pp
-Inclusion of small file blocks in the special class is opt-in.
+Inclusion of small file or zvol blocks in the special class is opt-in.
 Each dataset can control the size of small file blocks allowed in the special
 class by setting the
 .Sy special_small_blocks
@@ -609,6 +618,8 @@ option.
 Percentage of pool space used.
 This property can also be referred to by its shortened column name,
 .Sy cap .
+.It Sy dedup_table_size
+Total on-disk size of the deduplication table.
 .It Sy expandsize
 Amount of uninitialized space within the pool or device that can be used to
 increase the total capacity of the pool.
@@ -780,6 +791,27 @@ A text string consisting of printable ASCII characters that will be stored
 such that it is available even if the pool becomes faulted.
 An administrator can provide additional information about a pool using this
 property.
+.It Sy dedup_table_quota Ns = Ns Ar number Ns | Ns Sy none Ns | Ns Sy auto
+This property sets a limit on the on-disk size of the pool's dedup table.
+Entries will not be added to the dedup table once this size is reached;
+if a dedup table already exists, and is larger than this size, they
+will not be removed as part of setting this property.
+Existing entries will still have their reference counts updated.
+.Pp
+The actual size limit of the table may be above or below the quota,
+depending on the actual on-disk size of the entries (which may be
+approximated for purposes of calculating the quota).
+That is, setting a quota size of 1M may result in the maximum size being
+slightly below, or slightly above, that value.
+Set to
+.Sy none
+to disable.
+In automatic mode, which is the default, the size of a dedicated dedup vdev
+is used as the quota limit.
+.Pp
+The
+.Sy dedup_table_quota
+property works for both legacy and fast dedup tables.
 .It Sy dedupditto Ns = Ns Ar number
 Threshold for the number of block ditto copies.
 If the reference count for a deduplicated block increases above this number, a
@@ -1645,6 +1677,63 @@ with no flags on the relevant target devices.
 .It Fl w, -wait
 Wait until the devices have finished initializing before returning.
 .El
+.It Xo
+.Nm
+.Cm prefetch
+.Fl t Ar type
+.Ar pool
+.Xc
+Prefetch data of the specified type for the given pool, currently only
+.Sy ddt
+.Pq the dedup table ,
+which improves write performance when the DDT is resident in the ARC.
+.It Xo
+.Nm
+.Cm ddtprune
+.Fl d Ar days Ns | Ns Fl p Ar percent
+.Ar pool
+.Xc
+Prune entries from the dedup table (DDT), removing single-reference
+.Pq unique
+entries to make room for new deduplicated blocks.
+With
+.Fl d ,
+prune unique entries older than
+.Ar days
+days.
+With
+.Fl p ,
+prune approximately
+.Ar percent
+.Pq Sy 1 Ns - Ns Sy 100
+of the unique entries, oldest first.
+Only entries created after this feature was enabled are eligible for pruning.
+.Pp
+Prune candidates are applied in batches of
+.Sy zfs_ddt_prunes_per_txg
+.Pq default 50000
+entries, with each batch forcing a transaction group commit.
+On pools with millions of prunable unique entries these forced commits
+dominate the elapsed time of the prune; raising the tunable reduces
+the number of commits proportionally.
+For a one-off prune of a large table, set it at runtime:
+.Bd -literal -offset indent
+# echo 'zfs_ddt_prunes_per_txg/W 0t500000' | mdb -kw
+.Ed
+.Pp
+or persistently in
+.Pa /etc/system :
+.Bd -literal -offset indent
+set zfs:zfs_ddt_prunes_per_txg = 500000
+.Ed
+.Pp
+Larger batches make each syncing transaction group correspondingly
+heavier, which briefly delays concurrent write activity; values much
+above 500000 yield little further improvement because the remaining
+cost is per-entry processing rather than commit overhead.
+If the dedup table is not resident in the ARC, run
+.Nm zpool Cm prefetch Fl t Sy ddt
+first and allow it to complete.
 .It Xo
 .Nm
 .Cm iostat

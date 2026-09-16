@@ -134,6 +134,7 @@ $endif
 	ecb_alloc_ctx;
 	gcm_alloc_ctx;
 	gcm_decrypt_final;
+	gcm_decrypt_update_out_len;
 	gcm_encrypt_final;
 	gcm_init_ctx;
 	gmac_alloc_ctx;
