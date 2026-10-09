@@ -27,6 +27,7 @@ WORK=${WORK:-/var/tmp/ddtprune-repro.$$}
 MNT=/$POOL/fs
 typeset -i fail=0
 typeset -A saved
+typeset -i zdb_rc=0
 
 log()  { print -- "$*"; }
 pass() { log "  PASS: $*"; }
@@ -94,8 +95,20 @@ assert_fdt() {
 }
 
 zdb_clean() {
-	zdb -bcc $POOL > $WORK/zdb.out 2>&1 || return 1
+	zdb -bcc $POOL > $WORK/zdb.raw 2>&1
+	zdb_rc=$?
+	tr '\r' '\n' < $WORK/zdb.raw > $WORK/zdb.out
+	(( zdb_rc == 0 )) || return 1
 	grep -q "No leaks (block sum matches space maps exactly)" $WORK/zdb.out
+}
+
+# keep zdb's output past cleanup
+zdb_report() {
+	typeset keep=/var/tmp/ddtprune-repro.$1.zdb.out
+	cp $WORK/zdb.out $keep
+	(( zdb_rc > 128 )) && log "   zdb died on signal $(( zdb_rc % 128 )) (exit $zdb_rc)"
+	grep -v -E "^(loading|Traversing|$)" $keep | tail -12 | sed 's/^/     /'
+	log "   full zdb output: $keep"
 }
 
 dbgmsg() { print ::zfs_dbgmsg | mdb -k 2>/dev/null; }
@@ -158,26 +171,35 @@ t_claim() {
 	# Stall the first prune between "if (spa_active_ddt_prune)" and
 	# "spa_active_ddt_prune = B_TRUE" (ddt_total_entries() ->
 	# ddt_get_dedup_object_stats() sits in that window), and start the
-	# second one while it is stalled.  chill() is capped at 500ms/s, so
-	# only the first caller is stalled.
+	# second one while it is stalled.  ddt_get_dedup_object_stats() is also
+	# called from spa_config_generate() when zpool opens the pool, so only
+	# stall it when called from ddt_prune_unique_entries().
 	#
 	dtrace -q -w -n '
+	    fbt::ddt_prune_unique_entries:entry { self->in = 1; }
+	    fbt::ddt_prune_unique_entries:return { self->in = 0; }
 	    fbt::ddt_get_dedup_object_stats:entry
-	    /execname == "zpool" && !fired/
-	    { fired = 1; chill(400000000); }' 2>/dev/null &
+	    /self->in && !fired/
+	    { fired = 1; printf("stalled\n"); chill(400000000); }' \
+	    -o $WORK/dt.out 2>/dev/null &
 	typeset dt=$!
 	sleep 3				# let dtrace enable its probes
 	zpool ddtprune -p 100 $POOL > $WORK/a.out 2>&1 &
 	typeset a=$!
 	sleep 0.1
-	zpool ddtprune -p 100 $POOL > $WORK/b.out 2>&1
+	( ulimit -c 0; zpool ddtprune -p 100 $POOL ) > $WORK/b.out 2>&1
 	typeset -i rb=$?
 	wait $a; typeset -i ra=$?
+	# EALREADY isn't mapped in zpool_standard_error_fmt(): EZFS_UNKNOWN ->
+	# "internal error" + abort().  ksh93 reports death by signal as 256+sig.
+	(( rb > 128 )) && bad "zpool aborted on EALREADY (libzfs has no EALREADY case)"
 	kill $dt 2>/dev/null; wait $dt 2>/dev/null
 	sed 's/^/   A: /' $WORK/a.out; sed 's/^/   B: /' $WORK/b.out
 	log "   rc A=$ra B=$rb"
 	if (( ra == 0 && rb == 0 )); then
 		bad "both prunes ran; the first to finish clears the mark under the other"
+	elif ! grep -q stalled $WORK/dt.out 2>/dev/null; then
+		skip "dtrace stall never fired; race not exercised"
 	else
 		pass "second prune refused while the first held the mark"
 	fi
@@ -216,7 +238,7 @@ t_leak() {
 	if zdb_clean; then
 		pass "zdb -bcc: no leaks"
 	else
-		bad "zdb -bcc after prune + free:"; tail -8 $WORK/zdb.out | sed 's/^/   /'
+		bad "zdb -bcc after prune + free:"; zdb_report leak
 	fi
 }
 
@@ -295,7 +317,7 @@ t_logflush() {
 		log "   zdb -bcc clean after freeing f2 (unexpected)"
 	else
 		log "   zdb -bcc after freeing f2 (f1 now points at free space):"
-		grep -v "^Traversing\|^loading\|^$" $WORK/zdb.out | tail -8 | sed 's/^/     /'
+		zdb_report logflush
 	fi
 }
 
