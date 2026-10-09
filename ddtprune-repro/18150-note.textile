@@ -1,64 +1,53 @@
 Status as of "change 4810":https://code.illumos.org/c/illumos-gate/+/4810 patchset 40. Replaces the cut-off list above.
 
-h3. Fast Dedup series
-
-* "PR 15887":https://github.com/openzfs/zfs/pull/15887 - DDT refactoring for FDT
-* "PR 15893":https://github.com/openzfs/zfs/pull/15893 - flat phys entries
-* "PR 15894":https://github.com/openzfs/zfs/pull/15894 - storage class override
-* "PR 15892":https://github.com/openzfs/zfs/pull/15892 - FDT feature and on-disk format
-* "PR 15895":https://github.com/openzfs/zfs/pull/15895 - dedup log
-* "PR 15888":https://github.com/openzfs/zfs/pull/15888 - ZAP shrinking (illumos #13916)
-* "PR 16204":https://github.com/openzfs/zfs/pull/16204 - ZAP leaf reuse after shrink
-* "PR 15889":https://github.com/openzfs/zfs/pull/15889 - dedup table quota
-* "PR 15890":https://github.com/openzfs/zfs/pull/15890 - DDT prefetch
-* "PR 16277":https://github.com/openzfs/zfs/pull/16277 - zpool ddtprune
-
-h3. Follow-up fixes
-
-* "PR 16722":https://github.com/openzfs/zfs/pull/16722 - defer IO-inducing frees to the deadlist
-* "PR 17038":https://github.com/openzfs/zfs/pull/17038 - dedup log sync pacing
-* "PR 17049":https://github.com/openzfs/zfs/pull/17049 - more DDT tests
-* "PR 17120":https://github.com/openzfs/zfs/pull/17120 - dedup of overridden blocks
-* "PR 17123":https://github.com/openzfs/zfs/pull/17123 - gang blocks, copies and FDT
-* "PR 17205":https://github.com/openzfs/zfs/pull/17205 - FDT rollback fields
-* "PR 17699":https://github.com/openzfs/zfs/pull/17699 - dedup_table_size for legacy dedup
-* "PR 17730":https://github.com/openzfs/zfs/pull/17730 - log entry leak on load
-* "PR 17793":https://github.com/openzfs/zfs/pull/17793 - prune SCL_ZIO deadlock
-* "PR 17983":https://github.com/openzfs/zfs/pull/17983 - prune space leak
-* "PR 18044":https://github.com/openzfs/zfs/pull/18044 - log searches outside the lock
-* "PR 18047":https://github.com/openzfs/zfs/pull/18047 - ZAP by-dnode interfaces
-* "PR 18048":https://github.com/openzfs/zfs/pull/18048 - zap_lookup_length_uint64_by_dnode
-* "PR 18115":https://github.com/openzfs/zfs/pull/18115 - locking for table ZAP destruction
-* "PR 18720":https://github.com/openzfs/zfs/pull/18720 - locking in dedup verify
-* "PR 18819":https://github.com/openzfs/zfs/pull/18819 - gang blocks on the DDT free path
-* "PR 18820":https://github.com/openzfs/zfs/pull/18820 - zdb leak check with pending log frees
-* "PR 18838":https://github.com/openzfs/zfs/pull/18838 - several prune bugs
-* "PR 18886":https://github.com/openzfs/zfs/pull/18886 - prune time overflows
-* "PR 18536":https://github.com/openzfs/zfs/pull/18536, "PR 18706":https://github.com/openzfs/zfs/pull/18706 - log refcount tags
-
-h3. Prune fixes
-
-* "PR 19223":https://github.com/openzfs/zfs/pull/19223 - prune only unchanged entries (upstream: open)
-* "PR 19263":https://github.com/openzfs/zfs/pull/19263 - prune argument checks, atomic claim (upstream: draft)
-* "PR 19264":https://github.com/openzfs/zfs/pull/19264 - zero prune target
-
-h3. illumos only
-
-* libzfs: report EALREADY from zpool ddtprune instead of aborting
-* ztest: ztest_ddt_repair removed; FDT log tunables varied
-* ZTS: dedup_ddt_stray_class, dedup_prune_all, dedup_prune_deadlock, dedup_prune_race, dedup_prune_args, dedup_prune_concurrent, dedup_prune_percentage, dedup_prune_log_flush
-
-h3. Not included
-
-* "PR 14654":https://github.com/openzfs/zfs/pull/14654 - 32K DDT ZAP blocks (tuning)
-* "PR 17875":https://github.com/openzfs/zfs/pull/17875 - uncached I/O (no DMU_UNCACHEDIO)
-* "PR 18055":https://github.com/openzfs/zfs/pull/18055 - ABD compression fix (not applicable)
-* "PR 18888":https://github.com/openzfs/zfs/pull/18888 - walk cursor by dnode (optimization)
-* "PR 19029":https://github.com/openzfs/zfs/pull/19029 - prune entry free size (not applicable)
-* "PR 17926":https://github.com/openzfs/zfs/pull/17926, "PR 18245":https://github.com/openzfs/zfs/pull/18245 - separate features
-* zap_trunc() from PR 15888 - ZAP block ids are never reused here
-
-h3. Testing
-
-* SmartOS with PS40: zfstest -T dedup 21/21 PASS
-* prune tests repeated 6x: 18/18 PASS
+* Fast Dedup series
+** "PR 15887":https://github.com/openzfs/zfs/pull/15887 - DDT refactoring for FDT
+** "PR 15893":https://github.com/openzfs/zfs/pull/15893 - flat phys entries
+** "PR 15894":https://github.com/openzfs/zfs/pull/15894 - storage class override
+** "PR 15892":https://github.com/openzfs/zfs/pull/15892 - FDT feature and on-disk format
+** "PR 15895":https://github.com/openzfs/zfs/pull/15895 - dedup log
+** "PR 15888":https://github.com/openzfs/zfs/pull/15888 - ZAP shrinking (illumos #13916)
+** "PR 16204":https://github.com/openzfs/zfs/pull/16204 - ZAP leaf reuse after shrink
+** "PR 15889":https://github.com/openzfs/zfs/pull/15889 - dedup table quota
+** "PR 15890":https://github.com/openzfs/zfs/pull/15890 - DDT prefetch
+** "PR 16277":https://github.com/openzfs/zfs/pull/16277 - zpool ddtprune
+* Follow-up fixes
+** "PR 16722":https://github.com/openzfs/zfs/pull/16722 - defer IO-inducing frees to the deadlist
+** "PR 17038":https://github.com/openzfs/zfs/pull/17038 - dedup log sync pacing
+** "PR 17049":https://github.com/openzfs/zfs/pull/17049 - more DDT tests
+** "PR 17120":https://github.com/openzfs/zfs/pull/17120 - dedup of overridden blocks
+** "PR 17123":https://github.com/openzfs/zfs/pull/17123 - gang blocks, copies and FDT
+** "PR 17205":https://github.com/openzfs/zfs/pull/17205 - FDT rollback fields
+** "PR 17699":https://github.com/openzfs/zfs/pull/17699 - dedup_table_size for legacy dedup
+** "PR 17730":https://github.com/openzfs/zfs/pull/17730 - log entry leak on load
+** "PR 17793":https://github.com/openzfs/zfs/pull/17793 - prune SCL_ZIO deadlock
+** "PR 17983":https://github.com/openzfs/zfs/pull/17983 - prune space leak
+** "PR 18044":https://github.com/openzfs/zfs/pull/18044 - log searches outside the lock
+** "PR 18047":https://github.com/openzfs/zfs/pull/18047 - ZAP by-dnode interfaces
+** "PR 18048":https://github.com/openzfs/zfs/pull/18048 - zap_lookup_length_uint64_by_dnode
+** "PR 18115":https://github.com/openzfs/zfs/pull/18115 - locking for table ZAP destruction
+** "PR 18720":https://github.com/openzfs/zfs/pull/18720 - locking in dedup verify
+** "PR 18819":https://github.com/openzfs/zfs/pull/18819 - gang blocks on the DDT free path
+** "PR 18820":https://github.com/openzfs/zfs/pull/18820 - zdb leak check with pending log frees
+** "PR 18838":https://github.com/openzfs/zfs/pull/18838 - several prune bugs
+** "PR 18886":https://github.com/openzfs/zfs/pull/18886 - prune time overflows
+** "PR 18536":https://github.com/openzfs/zfs/pull/18536, "PR 18706":https://github.com/openzfs/zfs/pull/18706 - log refcount tags
+* Prune fixes
+** "PR 19223":https://github.com/openzfs/zfs/pull/19223 - prune only unchanged entries (upstream: open)
+** "PR 19263":https://github.com/openzfs/zfs/pull/19263 - prune argument checks, atomic claim (upstream: draft)
+** "PR 19264":https://github.com/openzfs/zfs/pull/19264 - zero prune target
+* illumos only
+** libzfs: report EALREADY from zpool ddtprune instead of aborting
+** ztest: ztest_ddt_repair removed; FDT log tunables varied
+** ZTS: dedup_ddt_stray_class, dedup_prune_all, dedup_prune_deadlock, dedup_prune_race, dedup_prune_args, dedup_prune_concurrent, dedup_prune_percentage, dedup_prune_log_flush
+* Not included
+** "PR 14654":https://github.com/openzfs/zfs/pull/14654 - 32K DDT ZAP blocks (tuning)
+** "PR 17875":https://github.com/openzfs/zfs/pull/17875 - uncached I/O (no DMU_UNCACHEDIO)
+** "PR 18055":https://github.com/openzfs/zfs/pull/18055 - ABD compression fix (not applicable)
+** "PR 18888":https://github.com/openzfs/zfs/pull/18888 - walk cursor by dnode (optimization)
+** "PR 19029":https://github.com/openzfs/zfs/pull/19029 - prune entry free size (not applicable)
+** "PR 17926":https://github.com/openzfs/zfs/pull/17926, "PR 18245":https://github.com/openzfs/zfs/pull/18245 - separate features
+** zap_trunc() from PR 15888 - ZAP block ids are never reused here
+* Testing
+** SmartOS with PS40: zfstest -T dedup 21/21 PASS
+** prune tests repeated 6x: 18/18 PASS
