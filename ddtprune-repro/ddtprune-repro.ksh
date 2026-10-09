@@ -61,9 +61,8 @@ mkpool() {			# [recordsize]
 		rm -f $vdev
 		mkfile 512m $vdev || exit 99
 	fi
-	zpool create -f $POOL $vdev || { log "cannot create pool"; exit 99; }
-	zpool get -H -o value feature@fast_dedup $POOL | grep -q -E "enabled|active" ||
-	    { log "pool has no feature@fast_dedup"; exit 99; }
+	zpool create -f -o feature@fast_dedup=enabled $POOL $vdev ||
+	    { log "cannot create pool"; exit 99; }
 	zfs create -o dedup=on -o compression=off \
 	    -o recordsize=${1:-128k} $POOL/fs || exit 99
 }
@@ -80,6 +79,18 @@ drain() {
 	tset zfs_dedup_log_flush_entries_min 1000000
 	typeset -i i=0
 	while (( i < 6 )); do zpool sync $POOL; i=i+1; done
+	assert_fdt
+}
+
+# fast_dedup goes enabled -> active only when an FDT (flat + log) DDT is
+# created (ddt_create_dir).  If the table came out legacy, ddt_prune_walk()
+# skips it and every prune test would pass vacuously.
+assert_fdt() {
+	(( $(ddt_entries) == 0 )) && return
+	[[ $(zpool get -H -o value feature@fast_dedup $POOL) == active ]] || {
+		log "DDT is not FDT (feature@fast_dedup not active); aborting"
+		exit 99
+	}
 }
 
 zdb_clean() {
