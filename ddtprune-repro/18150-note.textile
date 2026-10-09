@@ -1,8 +1,4 @@
-The recent explosion in memory prices made me consider to start working on this. The goal should be, in the words of Matthew Ahrens: "Dedup doesn't need to suck".
-
-This ports OpenZFS "Fast Dedup" (feature@fast_dedup, com.klarasystems:fast_dedup) and the upstream fixes to it: "illumos-gate change 4810":https://code.illumos.org/c/illumos-gate/+/4810.
-
-That said, this cannot be a one-man show; I definitely need reviewers and brave companions willing to test stuff.
+Complete status as of "illumos-gate change 4810":https://code.illumos.org/c/illumos-gate/+/4810 patchset 40. This replaces the cut-off list in the note above; that note can be removed.
 
 h2. New on-disk feature, subcommands and properties
 
