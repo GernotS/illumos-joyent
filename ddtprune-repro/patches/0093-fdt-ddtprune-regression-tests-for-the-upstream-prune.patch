@@ -1,7 +1,8 @@
-From 88ecbbf4f1206bbe1c77e6f7c54bd7eb66a43616 Mon Sep 17 00:00:00 2001
+From 7740f49942882144b8809bd6f2dca79897d546e5 Mon Sep 17 00:00:00 2001
 From: Gernot Strasser <gernot1.strasser@gmail.com>
 Date: Fri, 9 Oct 2026 07:47:43 +0000
-Subject: [PATCH] 18150 ZFS fast deduplication: ddtprune regression tests
+Subject: [PATCH 93/93] fdt: ddtprune: regression tests for the upstream prune
+ fixes
 
 dedup_prune_percentage   -p target rounding to zero entries (openzfs#19264)
 dedup_prune_args         bad ages rejected, prune mark released (openzfs#19263)
@@ -9,7 +10,6 @@ dedup_prune_concurrent   concurrent prunes, EALREADY reporting (openzfs#19263)
 dedup_prune_log_flush    prune vs. dedup log flush race (openzfs#19223)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01R8Y8sNA5RZNiFdPTAv5VJR
 ---
  usr/src/pkg/manifests/system-test-zfstest.p5m |   4 +
  usr/src/test/zfs-tests/runfiles/common.run    |   5 +-

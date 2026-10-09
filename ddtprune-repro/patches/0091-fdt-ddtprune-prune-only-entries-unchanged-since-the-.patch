@@ -1,0 +1,123 @@
+From 47a8f6b8c66270a699381a8aa20e4e6dd3c44e98 Mon Sep 17 00:00:00 2001
+From: Kamil Monicz <kamil@monicz.dev>
+Date: Fri, 9 Oct 2026 08:02:54 +0000
+Subject: [PATCH 91/93] fdt: ddtprune: prune only entries unchanged since the
+ prune walk
+
+The prune walk reads candidates from the stored unique class, which
+lags the dedup log.  The prune's sync task then skips a candidate only
+if it is live or was loaded from the log.  If the log is flushed between
+the walk and the sync task, a candidate that has gained a reference is
+found in the stored duplicate class and cleared anyway.  Freeing either
+reference afterwards frees the block while the other still uses it
+(zio_ddt_free() takes its direct-free fallback), and the space can be
+reallocated under it.
+
+Prune a candidate only if its reloaded entry still matches what the
+walk read.
+
+Make zfs_ddt_prunes_per_txg non-static so tests can force small batches
+with mdb.  Correct the comments in ddt_prune_walk(), dedup_prune.ksh and
+dedup_prune_leak.ksh that said the walk skips entries still on the log;
+it does not, the recheck in prune_candidates_sync() does.
+
+Ported from openzfs/zfs#19223 (74388c5, not yet merged upstream).  The
+upstream libzpool test program is replaced by dedup_prune_log_flush,
+which uses DTrace to order the walk, the log flush and the sync task.
+
+Signed-off-by: Kamil Monicz <kamil@monicz.dev>
+---
+ .../tests/functional/dedup/dedup_prune.ksh    |  6 +++---
+ .../functional/dedup/dedup_prune_leak.ksh     |  4 ++--
+ usr/src/uts/common/fs/zfs/ddt.c               | 20 +++++++++++++++----
+ 3 files changed, 21 insertions(+), 9 deletions(-)
+
+diff --git a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune.ksh b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune.ksh
+index 69d646eb..bfec3a4b 100644
+--- a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune.ksh
++++ b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune.ksh
+@@ -57,9 +57,9 @@ log_assert "Verify DDT pruning correctly removes non-duplicate entries"
+ # zfs_dedup_log_flush_entries_min raises the per-txg flush floor:
+ # ddt_sync_flush_log() computes flush_min from it and then flush_max as
+ # flush_min * 5 / 4, so with the default 200 only a couple of hundred
+-# entries leave the log per txg.  ddt_prune_walk() skips any entry still
+-# on the log (the stored copy is stale), so an undrained log makes prune
+-# look like it did nothing.
++# entries leave the log per txg.  A prune never removes an entry that is
++# still on the log (prune_candidates_sync() skips logged entries), so an
++# undrained log makes prune look like it did nothing.
+ typeset orig_txg_max=$(get_tunable zfs_dedup_log_txg_max)
+ typeset orig_flush_min=$(get_tunable zfs_dedup_log_flush_entries_min)
+ log_must set_tunable32 zfs_dedup_log_txg_max 1
+diff --git a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_leak.ksh b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_leak.ksh
+index 26046c09..99c9e967 100644
+--- a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_leak.ksh
++++ b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_leak.ksh
+@@ -45,7 +45,7 @@
+ #	- get/set_tunable (not save/restore_tunable).
+ #	- zfs_dedup_log_txg_max and zfs_dedup_log_flush_entries_min are both
+ #	  set, as in dedup_prune.ksh: the log must be fully drained before
+-#	  pruning, because ddt_prune_walk() skips entries still on it.
++#	  pruning, because a prune never removes entries still on it.
+ #	- no events_common.kshlib include (unused upstream).
+ 
+ . $STF_SUITE/include/libtest.shlib
+@@ -56,7 +56,7 @@ log_assert "DDT pruning followed by free does not leak space"
+ 
+ # Flush the dedup log every txg, and lift the per-txg flush floor so a
+ # flush pass drains the whole tree rather than the default ~200 entries.
+-# ddt_prune_walk() skips any entry still on the log, so an undrained log
++# A prune never removes an entry still on the log, so an undrained log
+ # silently makes the prune a no-op.
+ typeset orig_txg_max=$(get_tunable zfs_dedup_log_txg_max)
+ typeset orig_flush_min=$(get_tunable zfs_dedup_log_flush_entries_min)
+diff --git a/usr/src/uts/common/fs/zfs/ddt.c b/usr/src/uts/common/fs/zfs/ddt.c
+index 12840a34..3a50215c 100644
+--- a/usr/src/uts/common/fs/zfs/ddt.c
++++ b/usr/src/uts/common/fs/zfs/ddt.c
+@@ -92,8 +92,9 @@ int zfs_dedup_prefetch = 1;
+  * How many DDT prune entries to add to the DDT sync AVL tree per txg when
+  * processing a "zpool ddtprune".  Caps the per-txg work so pruning a large
+  * table doesn't stall sync.  Ported from OpenZFS PR #16277.
++ * Global (not static) so tests can set it with mdb.
+  */
+-static uint32_t zfs_ddt_prunes_per_txg = 50000;
++uint32_t zfs_ddt_prunes_per_txg = 50000;
+ 
+ /*
+  * Whether "zpool ddtprune" prefetches the unique-class DDT store objects
+@@ -2644,8 +2645,17 @@ prune_candidates_sync(void *arg, dmu_tx_t *tx)
+ 		ddt_bp_create(ddt->ddt_checksum, &dpe->dpe_key,
+ 		    dpe->dpe_phys, DDT_PHYS_FLAT, &blk);
+ 
++		/*
++		 * The walk read this candidate from the unique-class store
++		 * object, which lags the log.  If a log flush has since
++		 * rewritten the stored entry, it may have more references
++		 * (and now live in the duplicate class), so prune it only if
++		 * it is unchanged since the walk read it.
++		 */
+ 		ddt_entry_t *dde = ddt_lookup_unique(ddt, &blk);
+-		if (dde != NULL && !dde->dde_logged) {
++		if (dde != NULL && !dde->dde_logged &&
++		    memcmp(&dde->dde_phys->ddp_flat, &dpe->dpe_phys->ddp_flat,
++		    DDT_FLAT_PHYS_SIZE) == 0) {
+ 			ASSERT(dde->dde_loaded);
+ 			/*
+ 			 * Zero the physical, so we don't try to free DVAs
+@@ -2690,8 +2700,10 @@ ddt_prune_entry(list_t *list, ddt_t *ddt, const ddt_key_t *ddk,
+  *  (b) prune entries whose class_start is older than cutoff (cutoff != 0).
+  *
+  * Starting the bookmark at DDT_CLASS_UNIQUE restricts ddt_walk() to the
+- * unique class.  Entries also present in the log are skipped (the on-disk
+- * copy is stale).  Also called by zdb(8) to dump the age histogram.
++ * unique class.  The walk reads the stored entries only, which lag the
++ * log; prune_candidates_sync() rechecks each candidate against the live,
++ * logged and reloaded entry before pruning it.  Also called by zdb(8) to
++ * dump the age histogram.
+  */
+ void
+ ddt_prune_walk(spa_t *spa, uint64_t cutoff, ddt_age_histo_t *histogram)
+-- 
+2.43.0
+
