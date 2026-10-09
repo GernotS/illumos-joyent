@@ -28,6 +28,7 @@ Fast Dedup series
 - #15895  ddt: dedup log; lookup and log stats; block scan until the log
           is flushed
 - #15888  ZAP shrinking
+- #16157  zap: reuse zap_leaf_t on dbuf reuse after shrink (34906f8bb)
 - #15889  ddt: dedup table quota enforcement
 - #15890  ddt: prefetching tables into the ARC (zpool prefetch -t ddt)
 - #16277  zpool ddtprune; zdb accounting for log, quota and prune
@@ -77,16 +78,6 @@ illumos-specific changes (not upstream)
   dedup_prune_race, dedup_prune_args, dedup_prune_concurrent,
   dedup_prune_log_flush (DTrace in place of upstream's libzpool test
   program for #19223), dedup_prune_percentage.
-
-
-Upstream fix missing (to be ported)
-===================================
-- 34906f8bb "zap: reuse zap_leaf_t on dbuf reuse after shrink" (closes
-  #16157; see also #16204).  This port has ZAP shrinking (#15888), but
-  zap_create_leaf() still does
-  VERIFY3P(NULL, ==, dmu_buf_set_user(...)).  If a shrink has freed a
-  leaf whose dbuf is still cached when the block is reallocated, the old
-  zap_leaf_t is still attached and the VERIFY panics.
 
 
 Upstream changes not included

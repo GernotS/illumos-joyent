@@ -1,0 +1,72 @@
+From: Backport <noreply@example.invalid>
+Subject: zap: reuse zap_leaf_t on dbuf reuse after shrink
+
+If a shrink or truncate had recently freed a portion of the ZAP, the
+dbuf could still be sitting on the dbuf cache waiting for eviction.  If
+it is then allocated for a new leaf before it can be evicted, the
+zap_leaf_t is still attached as userdata, and the
+VERIFY3P(NULL, ==, dmu_buf_set_user(...)) in zap_create_leaf() panics.
+
+Instead, check for the userdata, and if it is there, reuse it.
+
+This tree has ZAP shrinking (upstream #15888) but was missing this
+follow-up.  Ported from upstream OpenZFS 34906f8bb (closes #16157, see
+also #16204).  illumos adaptations: dmu_buf_hold() by object, as this
+zap.c has no zap_dnode; illumos rw_init() arguments.
+
+Applies on top of 4810 patchset 40.
+
+    patch -p1 --fuzz=0 < 0090-zap-reuse-leaf-after-shrink.patch
+---
+diff --git a/usr/src/uts/common/fs/zfs/zap.c b/usr/src/uts/common/fs/zfs/zap.c
+--- a/usr/src/uts/common/fs/zfs/zap.c
++++ b/usr/src/uts/common/fs/zfs/zap.c
+@@ -435,20 +435,36 @@
+ static zap_leaf_t *
+ zap_create_leaf(zap_t *zap, dmu_tx_t *tx)
+ {
+-	zap_leaf_t *l = kmem_zalloc(sizeof (zap_leaf_t), KM_SLEEP);
+-
+ 	ASSERT(RW_WRITE_HELD(&zap->zap_rwlock));
+ 
+-	rw_init(&l->l_rwlock, 0, 0, 0);
+-	rw_enter(&l->l_rwlock, RW_WRITER);
+-	l->l_blkid = zap_allocate_blocks(zap, 1);
+-	l->l_dbuf = NULL;
++	uint64_t blkid = zap_allocate_blocks(zap, 1);
++	dmu_buf_t *db = NULL;
+ 
+ 	VERIFY0(dmu_buf_hold(zap->zap_objset, zap->zap_object,
+-	    l->l_blkid << FZAP_BLOCK_SHIFT(zap), NULL, &l->l_dbuf,
++	    blkid << FZAP_BLOCK_SHIFT(zap), NULL, &db,
+ 	    DMU_READ_NO_PREFETCH));
+-	dmu_buf_init_user(&l->l_dbu, zap_leaf_evict_sync, NULL, &l->l_dbuf);
+-	VERIFY3P(NULL, ==, dmu_buf_set_user(l->l_dbuf, &l->l_dbu));
++
++	/*
++	 * Create the leaf structure and stash it on the dbuf. If zap was
++	 * recent shrunk or truncated, the dbuf might have been sitting in the
++	 * cache waiting to be evicted, and so still have the old leaf attached
++	 * to it. If so, just reuse it.
++	 */
++	zap_leaf_t *l = dmu_buf_get_user(db);
++	if (l == NULL) {
++		l = kmem_zalloc(sizeof (zap_leaf_t), KM_SLEEP);
++		l->l_blkid = blkid;
++		l->l_dbuf = db;
++		rw_init(&l->l_rwlock, 0, 0, 0);
++		dmu_buf_init_user(&l->l_dbu, zap_leaf_evict_sync, NULL,
++		    &l->l_dbuf);
++		dmu_buf_set_user(l->l_dbuf, &l->l_dbu);
++	} else {
++		ASSERT3U(l->l_blkid, ==, blkid);
++		ASSERT3P(l->l_dbuf, ==, db);
++	}
++
++	rw_enter(&l->l_rwlock, RW_WRITER);
+ 	dmu_buf_will_dirty(l->l_dbuf, tx);
+ 
+ 	zap_leaf_init(l, zap->zap_normflags != 0);
+--
+2.40.0
+
