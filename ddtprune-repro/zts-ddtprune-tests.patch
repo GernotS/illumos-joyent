@@ -1,0 +1,673 @@
+From 88ecbbf4f1206bbe1c77e6f7c54bd7eb66a43616 Mon Sep 17 00:00:00 2001
+From: Gernot Strasser <gernot1.strasser@gmail.com>
+Date: Fri, 9 Oct 2026 07:47:43 +0000
+Subject: [PATCH] 18150 ZFS fast deduplication: ddtprune regression tests
+
+dedup_prune_percentage   -p target rounding to zero entries (openzfs#19264)
+dedup_prune_args         bad ages rejected, prune mark released (openzfs#19263)
+dedup_prune_concurrent   concurrent prunes, EALREADY reporting (openzfs#19263)
+dedup_prune_log_flush    prune vs. dedup log flush race (openzfs#19223)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01R8Y8sNA5RZNiFdPTAv5VJR
+---
+ usr/src/pkg/manifests/system-test-zfstest.p5m |   4 +
+ usr/src/test/zfs-tests/runfiles/common.run    |   5 +-
+ .../functional/dedup/dedup_prune_args.ksh     | 140 +++++++++++++
+ .../dedup/dedup_prune_concurrent.ksh          | 149 ++++++++++++++
+ .../dedup/dedup_prune_log_flush.ksh           | 189 ++++++++++++++++++
+ .../dedup/dedup_prune_percentage.ksh          | 110 ++++++++++
+ 6 files changed, 595 insertions(+), 2 deletions(-)
+ create mode 100644 usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_args.ksh
+ create mode 100644 usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_concurrent.ksh
+ create mode 100644 usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_log_flush.ksh
+ create mode 100644 usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_percentage.ksh
+
+diff --git a/usr/src/pkg/manifests/system-test-zfstest.p5m b/usr/src/pkg/manifests/system-test-zfstest.p5m
+index 8769931e..9173741f 100644
+--- a/usr/src/pkg/manifests/system-test-zfstest.p5m
++++ b/usr/src/pkg/manifests/system-test-zfstest.p5m
+@@ -2399,8 +2399,12 @@ file path=opt/zfs-tests/tests/functional/dedup/dedup_legacy_import mode=0555
+ file path=opt/zfs-tests/tests/functional/dedup/dedup_log_zdb_leak mode=0555
+ file path=opt/zfs-tests/tests/functional/dedup/dedup_prune mode=0555
+ file path=opt/zfs-tests/tests/functional/dedup/dedup_prune_all mode=0555
++file path=opt/zfs-tests/tests/functional/dedup/dedup_prune_args mode=0555
++file path=opt/zfs-tests/tests/functional/dedup/dedup_prune_concurrent mode=0555
+ file path=opt/zfs-tests/tests/functional/dedup/dedup_prune_deadlock mode=0555
+ file path=opt/zfs-tests/tests/functional/dedup/dedup_prune_leak mode=0555
++file path=opt/zfs-tests/tests/functional/dedup/dedup_prune_log_flush mode=0555
++file path=opt/zfs-tests/tests/functional/dedup/dedup_prune_percentage mode=0555
+ file path=opt/zfs-tests/tests/functional/dedup/dedup_prune_race mode=0555
+ file path=opt/zfs-tests/tests/functional/dedup/dedup_quota mode=0555
+ file path=opt/zfs-tests/tests/functional/dedup/dedup_zap_shrink mode=0555
+diff --git a/usr/src/test/zfs-tests/runfiles/common.run b/usr/src/test/zfs-tests/runfiles/common.run
+index cf6afbc6..671b318f 100644
+--- a/usr/src/test/zfs-tests/runfiles/common.run
++++ b/usr/src/test/zfs-tests/runfiles/common.run
+@@ -543,8 +543,9 @@ tests = ['dedup_ddt_stray_class', 'dedup_fdt_create', 'dedup_fdt_import',
+     'dedup_fdt_pacing', 'dedup_gang_copies',
+     'dedup_legacy_create', 'dedup_legacy_import',
+     'dedup_legacy_fdt_upgrade', 'dedup_legacy_fdt_mixed', 'dedup_log_zdb_leak',
+-    'dedup_prune', 'dedup_prune_all',
+-    'dedup_prune_deadlock', 'dedup_prune_leak', 'dedup_prune_race',
++    'dedup_prune', 'dedup_prune_all', 'dedup_prune_args',
++    'dedup_prune_concurrent', 'dedup_prune_deadlock', 'dedup_prune_leak',
++    'dedup_prune_log_flush', 'dedup_prune_percentage', 'dedup_prune_race',
+     'dedup_quota', 'dedup_zap_shrink']
+ pre =
+ post =
+diff --git a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_args.ksh b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_args.ksh
+new file mode 100644
+index 00000000..9b3e7861
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_args.ksh
+@@ -0,0 +1,140 @@
++#!/bin/ksh -p
++# CDDL HEADER START
++#
++# The contents of this file are subject to the terms of the
++# Common Development and Distribution License (the "License").
++# You may not use this file except in compliance with the License.
++#
++# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
++# or https://opensource.org/licenses/CDDL-1.0.
++# See the License for the specific language governing permissions
++# and limitations under the License.
++#
++# When distributing Covered Code, include this CDDL HEADER in each
++# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
++# If applicable, add the following below this CDDL HEADER, with the
++# fields enclosed by brackets "[]" replaced with your own identifying
++# information: Portions Copyright [yyyy] [name of copyright owner]
++#
++# CDDL HEADER END
++#
++
++#
++# Copyright (c) 2026, Gernot Strasser
++#
++
++# DESCRIPTION:
++#	Verify ddtprune argument validation and that a rejected or empty
++#	prune does not leave the pool's active-prune mark set.  Covers the
++#	argument and mark-release parts of upstream #19263:
++#	  - an age reaching before the epoch is rejected by the kernel
++#	    (EINVAL) and the next prune is still accepted;
++#	  - a day count whose conversion to seconds overflows is rejected
++#	    by zpool rather than wrapped to a small age, which would prune
++#	    recent entries;
++#	  - pruning an empty table leaves no mark behind.
++#
++# STRATEGY:
++#	1. Create a pool with dedup=on.  Write unique blocks with
++#	   ddt_prune_artificial_age set, so their class_start is spread over
++#	   the past ~24 days, and drain the dedup log.
++#	2. `ddtprune -d 30000` (before the epoch) must fail; the next
++#	   prune must not report "already in progress".
++#	3. `ddtprune -d 213503982334602` must fail: 213503982334602 * 86400
++#	   wraps to 61184 seconds, which would prune every entry older
++#	   than ~17 hours.  No entry may be removed.
++#	4. Prune everything, then prune the empty table twice; neither
++#	   may report "already in progress".
++#
++# illumos adaptations vs upstream:
++#	- get_tunable + set_tunable32 (not save/restore_tunable).
++#	- ddt_prune_artificial_age stands in for waiting out real ages.
++
++. $STF_SUITE/include/libtest.shlib
++
++verify_runnable "both"
++
++log_assert "ddtprune rejects bad ages and never leaves the prune mark set"
++
++typeset orig_txg_max=$(get_tunable zfs_dedup_log_txg_max)
++typeset orig_flush_min=$(get_tunable zfs_dedup_log_flush_entries_min)
++typeset orig_art_age=$(get_tunable ddt_prune_artificial_age)
++log_must set_tunable32 zfs_dedup_log_txg_max 1
++log_must set_tunable32 zfs_dedup_log_flush_entries_min 1000000
++
++function cleanup
++{
++	if poolexists $TESTPOOL ; then
++		destroy_pool $TESTPOOL
++	fi
++	log_must set_tunable32 zfs_dedup_log_txg_max $orig_txg_max
++	log_must set_tunable32 zfs_dedup_log_flush_entries_min $orig_flush_min
++	log_must set_tunable32 ddt_prune_artificial_age $orig_art_age
++}
++
++function drain_dedup_log
++{
++	typeset -i i=0
++	while (( i < 5 )); do
++		sync_pool $TESTPOOL
++		(( i += 1 ))
++	done
++}
++
++function ddt_entries
++{
++	typeset -i entries=$(zpool status -D $TESTPOOL | \
++		grep "dedup: DDT entries" | awk '{print $4}')
++	echo ${entries}
++}
++
++# Run a prune that must be accepted; fail if the mark was left set.
++function prune_not_stuck
++{
++	typeset out
++	out=$(zpool ddtprune "$@" $TESTPOOL 2>&1)
++	if (( $? != 0 )); then
++		log_note "$out"
++		echo "$out" | grep -q "already in progress" && \
++			log_fail "prune mark left set by an earlier prune"
++		log_fail "zpool ddtprune $* failed"
++	fi
++}
++
++log_onexit cleanup
++
++log_must zpool create -f $TESTPOOL $DISKS
++log_must zfs create -o recordsize=128k -o compression=off -o dedup=on \
++    $TESTPOOL/$TESTFS
++typeset mountpoint=$(get_prop mountpoint $TESTPOOL/$TESTFS)
++
++log_must set_tunable32 ddt_prune_artificial_age 1
++log_must dd if=/dev/urandom of=$mountpoint/f1 bs=128k count=1000
++log_must set_tunable32 ddt_prune_artificial_age 0
++drain_dedup_log
++
++typeset -i entries=$(ddt_entries)
++(( entries > 0 )) || log_fail "no DDT entries after write"
++
++# An age before the epoch is rejected in the kernel, mark released.
++log_mustnot zpool ddtprune -d 30000 $TESTPOOL
++(( $(ddt_entries) == entries )) || log_fail "rejected prune removed entries"
++
++# Overflowing day count must be rejected, not wrapped.
++log_mustnot zpool ddtprune -d 213503982334602 $TESTPOOL
++drain_dedup_log
++typeset -i after=$(ddt_entries)
++(( after == entries )) || \
++	log_fail "overflowing -d pruned $(( entries - after )) entries"
++
++# The rejected prunes must not have left the mark set.
++sleep 2
++prune_not_stuck -p 100
++drain_dedup_log
++(( $(ddt_entries) == 0 )) || log_fail "ddtprune -p 100 left entries"
++
++# Empty-table path, twice.
++prune_not_stuck -p 100
++prune_not_stuck -p 100
++
++log_pass "ddtprune rejects bad ages and never leaves the prune mark set"
+diff --git a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_concurrent.ksh b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_concurrent.ksh
+new file mode 100644
+index 00000000..6943b7df
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_concurrent.ksh
+@@ -0,0 +1,149 @@
++#!/bin/ksh -p
++# CDDL HEADER START
++#
++# The contents of this file are subject to the terms of the
++# Common Development and Distribution License (the "License").
++# You may not use this file except in compliance with the License.
++#
++# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
++# or https://opensource.org/licenses/CDDL-1.0.
++# See the License for the specific language governing permissions
++# and limitations under the License.
++#
++# When distributing Covered Code, include this CDDL HEADER in each
++# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
++# If applicable, add the following below this CDDL HEADER, with the
++# fields enclosed by brackets "[]" replaced with your own identifying
++# information: Portions Copyright [yyyy] [name of copyright owner]
++#
++# CDDL HEADER END
++#
++
++#
++# Copyright (c) 2026, Gernot Strasser
++#
++
++# DESCRIPTION:
++#	Verify that two concurrent prunes of one pool cannot both claim the
++#	active-prune mark, and that the refused one reports an error rather
++#	than crashing zpool.  Covers the claim part of upstream #19263:
++#	ddt_prune_unique_entries() tested spa_active_ddt_prune on entry but
++#	set it only after reading the DDT statistics, so two prunes could
++#	both pass the test.  The first to finish then cleared the mark while
++#	the second was still pruning, dropping its SCL_ZIO priority against
++#	a waiting config writer.  The refused prune gets EALREADY, which
++#	zpool_standard_error() did not map, so zpool printed "internal
++#	error" and aborted.
++#
++# STRATEGY:
++#	1. Create a pool with dedup=on, write unique blocks and drain the
++#	   dedup log.
++#	2. With DTrace, stall the first prune inside the claim window
++#	   (ddt_get_dedup_object_stats() called from
++#	   ddt_prune_unique_entries()), then start a second prune.
++#	3. The first prune must succeed.  The second must fail with
++#	   "already in progress", without dying on a signal.
++#
++# Not upstream.  DTrace stands in for the in-process debugger hold used
++# to check this upstream.  ddt_get_dedup_object_stats() is also called
++# from spa_config_generate() when zpool opens the pool, so the stall is
++# scoped to ddt_prune_unique_entries().
++
++. $STF_SUITE/include/libtest.shlib
++
++verify_runnable "global"
++
++log_assert "Concurrent ddtprunes cannot both claim the prune mark"
++
++typeset orig_txg_max=$(get_tunable zfs_dedup_log_txg_max)
++typeset orig_flush_min=$(get_tunable zfs_dedup_log_flush_entries_min)
++log_must set_tunable32 zfs_dedup_log_txg_max 1
++log_must set_tunable32 zfs_dedup_log_flush_entries_min 1000000
++
++typeset workdir=/var/tmp/dedup_prune_concurrent.$$
++typeset dtrace_pid=""
++
++function cleanup
++{
++	[[ -n $dtrace_pid ]] && kill $dtrace_pid 2>/dev/null
++	wait
++	if poolexists $TESTPOOL ; then
++		destroy_pool $TESTPOOL
++	fi
++	rm -rf $workdir
++	log_must set_tunable32 zfs_dedup_log_txg_max $orig_txg_max
++	log_must set_tunable32 zfs_dedup_log_flush_entries_min $orig_flush_min
++}
++
++function drain_dedup_log
++{
++	typeset -i i=0
++	while (( i < 5 )); do
++		sync_pool $TESTPOOL
++		(( i += 1 ))
++	done
++}
++
++log_onexit cleanup
++
++log_must mkdir -p $workdir
++
++log_must zpool create -f $TESTPOOL $DISKS
++log_must zfs create -o recordsize=512 -o dedup=on $TESTPOOL/$TESTFS
++typeset mountpoint=$(get_prop mountpoint $TESTPOOL/$TESTFS)
++
++log_must dd if=/dev/urandom of=$mountpoint/f1 bs=1024k count=8
++drain_dedup_log
++sleep 2
++
++#
++# chill() is capped at 500ms per second, so stall only the first prune.
++#
++dtrace -qw -o $workdir/dtrace.out -n '
++    BEGIN { printf("ready\n"); }
++    fbt::ddt_prune_unique_entries:entry { self->in = 1; }
++    fbt::ddt_prune_unique_entries:return { self->in = 0; }
++    fbt::ddt_get_dedup_object_stats:entry
++    /self->in && !fired/
++    { fired = 1; printf("stalled\n"); chill(400000000); }' \
++    2>$workdir/dtrace.err &
++dtrace_pid=$!
++
++typeset -i i=0
++while ! grep -q ready $workdir/dtrace.out 2>/dev/null; do
++	(( i += 1 ))
++	(( i > 30 )) && log_unsupported "DTrace probes could not be enabled"
++	sleep 1
++done
++
++zpool ddtprune -p 100 $TESTPOOL > $workdir/first.out 2>&1 &
++typeset first=$!
++sleep 0.1
++zpool ddtprune -p 100 $TESTPOOL > $workdir/second.out 2>&1
++typeset -i second_rc=$?
++wait $first
++typeset -i first_rc=$?
++
++kill $dtrace_pid 2>/dev/null
++wait $dtrace_pid 2>/dev/null
++dtrace_pid=""
++
++log_note "first prune (rc $first_rc): $(cat $workdir/first.out)"
++log_note "second prune (rc $second_rc): $(cat $workdir/second.out)"
++
++grep -q stalled $workdir/dtrace.out || \
++	log_unsupported "DTrace stall never fired; race not exercised"
++
++(( first_rc == 0 )) || log_fail "first prune failed"
++
++# ksh93 reports death by signal as 256 + signo.
++(( second_rc > 256 )) && \
++	log_fail "second prune died on signal $(( second_rc - 256 ))"
++grep -q "internal error" $workdir/second.out && \
++	log_fail "second prune hit an unmapped error"
++(( second_rc != 0 )) || \
++	log_fail "both prunes claimed the prune mark"
++grep -q "already in progress" $workdir/second.out || \
++	log_fail "second prune failed for the wrong reason"
++
++log_pass "Concurrent ddtprunes cannot both claim the prune mark"
+diff --git a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_log_flush.ksh b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_log_flush.ksh
+new file mode 100644
+index 00000000..aa62548d
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_log_flush.ksh
+@@ -0,0 +1,189 @@
++#!/bin/ksh -p
++# CDDL HEADER START
++#
++# The contents of this file are subject to the terms of the
++# Common Development and Distribution License (the "License").
++# You may not use this file except in compliance with the License.
++#
++# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
++# or https://opensource.org/licenses/CDDL-1.0.
++# See the License for the specific language governing permissions
++# and limitations under the License.
++#
++# When distributing Covered Code, include this CDDL HEADER in each
++# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
++# If applicable, add the following below this CDDL HEADER, with the
++# fields enclosed by brackets "[]" replaced with your own identifying
++# information: Portions Copyright [yyyy] [name of copyright owner]
++#
++# CDDL HEADER END
++#
++
++#
++# Copyright (c) 2026, Gernot Strasser
++#
++
++# DESCRIPTION:
++#	Verify that ddtprune does not remove an entry that gained a second
++#	reference while the prune was running.  Regression test for
++#	upstream #19223: ddt_prune_walk() reads candidates from the on-disk
++#	unique-class ZAP, which lags the dedup log.  If an entry's second
++#	reference is still on the log when the walk reads it, and the log
++#	flushes (moving the entry to the duplicate class) before
++#	prune_candidates_sync() runs, the recheck there found it neither
++#	live nor logged and cleared it.  Freeing either reference then
++#	freed a block the other still points to.
++#
++# STRATEGY:
++#	1. Create a pool with dedup=on, write unique data and drain the
++#	   dedup log, so every entry is in the unique-class ZAP.
++#	2. Hold the log (zfs_dedup_log_txg_max very large, so the active
++#	   log is never swapped) and copy the file.  Every entry now has
++#	   refcnt 2 on the log but is still unique in the ZAP.
++#	3. Prune in small batches (zfs_ddt_prunes_per_txg).  DTrace stalls
++#	   each batch just before its sync task.  Once the walk is under
++#	   way, release the log and keep syncing, so the log flushes
++#	   between the walk reading a candidate and the recheck.
++#	4. No entry may be removed.  Free one copy and verify with
++#	   `zdb -bcc` that nothing the other copy references was freed.
++#
++# illumos adaptations vs upstream:
++#	- upstream builds the interleaving in a libzpool test program; here
++#	  DTrace chill() and the log tunables do it against the kernel.
++#	- get_tunable + set_tunable32 (not save/restore_tunable).
++
++. $STF_SUITE/include/libtest.shlib
++
++verify_runnable "global"
++
++log_assert "ddtprune keeps entries that gain a reference via log flush"
++
++typeset orig_txg_max=$(get_tunable zfs_dedup_log_txg_max)
++typeset orig_flush_min=$(get_tunable zfs_dedup_log_flush_entries_min)
++typeset orig_per_txg=$(get_tunable zfs_ddt_prunes_per_txg)
++log_must set_tunable32 zfs_dedup_log_txg_max 1
++log_must set_tunable32 zfs_dedup_log_flush_entries_min 1000000
++
++typeset workdir=/var/tmp/dedup_prune_log_flush.$$
++typeset stopfile=$workdir/keep_syncing
++typeset dtrace_pid=""
++
++function cleanup
++{
++	rm -f $stopfile
++	[[ -n $dtrace_pid ]] && kill $dtrace_pid 2>/dev/null
++	wait
++	if poolexists $TESTPOOL ; then
++		destroy_pool $TESTPOOL
++	fi
++	rm -rf $workdir
++	log_must set_tunable32 zfs_dedup_log_txg_max $orig_txg_max
++	log_must set_tunable32 zfs_dedup_log_flush_entries_min $orig_flush_min
++	log_must set_tunable32 zfs_ddt_prunes_per_txg $orig_per_txg
++}
++
++function drain_dedup_log
++{
++	typeset -i i=0
++	while (( i < 5 )); do
++		sync_pool $TESTPOOL
++		(( i += 1 ))
++	done
++}
++
++function ddt_entries
++{
++	typeset -i entries=$(zpool status -D $TESTPOOL | \
++		grep "dedup: DDT entries" | awk '{print $4}')
++	echo ${entries}
++}
++
++log_onexit cleanup
++
++log_must mkdir -p $workdir
++
++log_must zpool create -f $TESTPOOL $DISKS
++log_must zfs create -o recordsize=512 -o dedup=on $TESTPOOL/$TESTFS
++typeset mountpoint=$(get_prop mountpoint $TESTPOOL/$TESTFS)
++
++# 8192 unique entries, all in the unique-class ZAP.
++log_must dd if=/dev/urandom of=$mountpoint/f1 bs=1024k count=4
++drain_dedup_log
++typeset -i entries=$(ddt_entries)
++(( entries > 0 )) || log_fail "no DDT entries after write"
++sleep 2
++
++# Hold the log, then give every entry a second reference on it.
++log_must set_tunable32 zfs_dedup_log_txg_max 1000000
++log_must cp $mountpoint/f1 $mountpoint/f2
++sync_pool $TESTPOOL
++sync_pool $TESTPOOL
++
++log_must set_tunable32 zfs_ddt_prunes_per_txg $(( entries / 32 ))
++
++#
++# Stall each prune batch just before its sync task, so the log flush
++# lands between the walk and prune_candidates_sync().  The stall is
++# scoped to the pruning walk (cutoff != 0), not the histogram walk.
++#
++dtrace -qw -o $workdir/dtrace.out -n '
++    BEGIN { printf("ready\n"); }
++    fbt::ddt_prune_walk:entry /arg1 != 0/ { self->p = 1; }
++    fbt::ddt_prune_walk:return /self->p/ { self->p = 0; }
++    fbt::dsl_sync_task:entry /self->p/ { chill(300000000); }' \
++    2>$workdir/dtrace.err &
++dtrace_pid=$!
++
++typeset -i i=0
++while ! grep -q ready $workdir/dtrace.out 2>/dev/null; do
++	(( i += 1 ))
++	(( i > 30 )) && log_unsupported "DTrace probes could not be enabled"
++	sleep 1
++done
++
++log_must touch $stopfile
++while [[ -e $stopfile ]]; do
++	zpool sync $TESTPOOL >/dev/null 2>&1
++done &
++
++zpool ddtprune -p 100 $TESTPOOL &
++typeset prune_pid=$!
++# Release the log once the walk is under way.
++sleep 0.5
++log_must set_tunable32 zfs_dedup_log_txg_max 1
++wait $prune_pid
++typeset -i prune_rc=$?
++
++log_must rm $stopfile
++kill $dtrace_pid 2>/dev/null
++wait
++dtrace_pid=""
++
++(( prune_rc == 0 )) || log_fail "zpool ddtprune failed"
++
++log_must set_tunable32 zfs_ddt_prunes_per_txg $orig_per_txg
++drain_dedup_log
++
++typeset -i after=$(ddt_entries)
++(( after == entries )) || \
++	log_fail "ddtprune removed $(( entries - after )) refcnt-2 entries"
++
++# Free one copy; the other must still own every block.
++log_must rm $mountpoint/f2
++drain_dedup_log
++
++typeset zdb_out
++typeset -i zdb_rc
++zdb_out=$(zdb -bcc $TESTPOOL 2>&1)
++zdb_rc=$?
++log_note "$zdb_out"
++if (( zdb_rc != 0 )); then
++	log_fail "zdb -bcc failed (exit $zdb_rc)"
++fi
++if ! echo "$zdb_out" | \
++    grep -q "No leaks (block sum matches space maps exactly)"; then
++	log_fail "space accounting is wrong after freeing one copy"
++fi
++log_must check_pool_status $TESTPOOL "errors" "No known data errors"
++
++log_pass "ddtprune keeps entries that gain a reference via log flush"
+diff --git a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_percentage.ksh b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_percentage.ksh
+new file mode 100644
+index 00000000..c4a62ac6
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_percentage.ksh
+@@ -0,0 +1,110 @@
++#!/bin/ksh -p
++# CDDL HEADER START
++#
++# The contents of this file are subject to the terms of the
++# Common Development and Distribution License (the "License").
++# You may not use this file except in compliance with the License.
++#
++# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
++# or https://opensource.org/licenses/CDDL-1.0.
++# See the License for the specific language governing permissions
++# and limitations under the License.
++#
++# When distributing Covered Code, include this CDDL HEADER in each
++# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
++# If applicable, add the following below this CDDL HEADER, with the
++# fields enclosed by brackets "[]" replaced with your own identifying
++# information: Portions Copyright [yyyy] [name of copyright owner]
++#
++# CDDL HEADER END
++#
++
++#
++# Copyright (c) 2026, Gernot Strasser
++#
++
++# DESCRIPTION:
++#	Verify that `zpool ddtprune -p N` is a no-op when N percent of the
++#	unique entries rounds down to zero entries.  Regression test for
++#	upstream #19264: ddt_prune_unique_entries() computed
++#	target = entries * N / 100; with target == 0 the histogram bin
++#	search never ran, the cutoff stayed at "now", and the walk pruned
++#	every unique entry older than the current second.
++#
++# STRATEGY:
++#	1. Create a pool with dedup=on and write three unique blocks.
++#	2. Drain the dedup log so the entries reach the unique-class ZAP.
++#	3. `zpool ddtprune -p 1`: target = 3 * 1 / 100 = 0, so all three
++#	   entries must survive.
++#	4. `zpool ddtprune -p 100` must then remove all three.
++#
++# illumos adaptations vs upstream:
++#	- get_tunable + set_tunable32 (not save/restore_tunable).
++#	- the dedup log is drained explicitly, as in dedup_prune.ksh:
++#	  ddt_prune_walk() only sees entries in the unique-class ZAP.
++
++. $STF_SUITE/include/libtest.shlib
++
++verify_runnable "both"
++
++log_assert "ddtprune -p with a zero-entry target prunes nothing"
++
++typeset orig_txg_max=$(get_tunable zfs_dedup_log_txg_max)
++typeset orig_flush_min=$(get_tunable zfs_dedup_log_flush_entries_min)
++log_must set_tunable32 zfs_dedup_log_txg_max 1
++log_must set_tunable32 zfs_dedup_log_flush_entries_min 1000000
++
++function cleanup
++{
++	if poolexists $TESTPOOL ; then
++		destroy_pool $TESTPOOL
++	fi
++	log_must set_tunable32 zfs_dedup_log_txg_max $orig_txg_max
++	log_must set_tunable32 zfs_dedup_log_flush_entries_min $orig_flush_min
++}
++
++function drain_dedup_log
++{
++	typeset -i i=0
++	while (( i < 5 )); do
++		sync_pool $TESTPOOL
++		(( i += 1 ))
++	done
++}
++
++function ddt_entries
++{
++	typeset -i entries=$(zpool status -D $TESTPOOL | \
++		grep "dedup: DDT entries" | awk '{print $4}')
++	echo ${entries}
++}
++
++log_onexit cleanup
++
++log_must zpool create -f $TESTPOOL $DISKS
++log_must zfs create -o recordsize=128k -o compression=off -o dedup=on \
++    $TESTPOOL/$TESTFS
++typeset mountpoint=$(get_prop mountpoint $TESTPOOL/$TESTFS)
++
++log_must dd if=/dev/urandom of=$mountpoint/f1 bs=128k count=3
++drain_dedup_log
++
++typeset -i entries=$(ddt_entries)
++(( entries == 3 )) || log_fail "expected 3 DDT entries, found $entries"
++
++# Entries must be strictly older than the prune cutoff second.
++sleep 2
++
++log_must zpool ddtprune -p 1 $TESTPOOL
++drain_dedup_log
++entries=$(ddt_entries)
++(( entries == 3 )) || \
++	log_fail "ddtprune -p 1 pruned $(( 3 - entries )) of 3 entries"
++
++log_must zpool ddtprune -p 100 $TESTPOOL
++drain_dedup_log
++entries=$(ddt_entries)
++(( entries == 0 )) || \
++	log_fail "ddtprune -p 100 left $entries of 3 entries"
++
++log_pass "ddtprune -p with a zero-entry target prunes nothing"
+-- 
+2.43.0
+
