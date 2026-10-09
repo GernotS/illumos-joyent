@@ -9,8 +9,10 @@ VERIFY3P(NULL, ==, dmu_buf_set_user(...)) in zap_create_leaf() panics.
 
 Instead, check for the userdata, and if it is there, reuse it.
 
-This tree has ZAP shrinking (upstream #15888) but was missing this
-follow-up.  Ported from upstream OpenZFS 34906f8bb (closes #16157, see
+This tree has ZAP shrinking (upstream #15888) but not its zap_trunc(),
+so zap_freeblk never decreases and leaf block ids are never reused:
+the VERIFY cannot fire today.  Ported as hardening, so that a later
+port of zap_trunc() does not reintroduce the panic.  Ported from upstream OpenZFS 34906f8bb (closes #16157, see
 also #16204).  illumos adaptations: dmu_buf_hold() by object, as this
 zap.c has no zap_dnode; illumos rw_init() arguments.
 

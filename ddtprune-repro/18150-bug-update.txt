@@ -28,7 +28,8 @@ Fast Dedup series
 - #15895  ddt: dedup log; lookup and log stats; block scan until the log
           is flushed
 - #15888  ZAP shrinking
-- #16157  zap: reuse zap_leaf_t on dbuf reuse after shrink (34906f8bb)
+- #16157  zap: reuse zap_leaf_t on dbuf reuse after shrink (34906f8bb);
+          hardening only here, see zap_trunc() below
 - #15889  ddt: dedup table quota enforcement
 - #15890  ddt: prefetching tables into the ARC (zpool prefetch -t ddt)
 - #16277  zpool ddtprune; zdb accounting for log, quota and prune
@@ -82,6 +83,11 @@ illumos-specific changes (not upstream)
 
 Upstream changes not included
 =============================
+- zap_trunc() from #15888: upstream lowers zap_freeblk when the
+          trailing leaves are freed by a shrink.  This port frees the
+          sibling leaf's blocks but never lowers zap_freeblk, so ZAP
+          block ids are not reused (the #16157 fix cannot trigger, but
+          is included for when zap_trunc() is ported).
 - #14654  larger (32K) DDT ZAP blocks: tuning only; this port keeps 4K.
 - #17875  uncached DDT log/BRT I/O: illumos has no DMU_UNCACHEDIO.
 - #18055  compressed entry buffer size: fixes upstream's ABD-based
