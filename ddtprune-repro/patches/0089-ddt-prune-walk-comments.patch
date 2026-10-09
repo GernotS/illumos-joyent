@@ -1,0 +1,70 @@
+From: Backport <noreply@example.invalid>
+Subject: ddt: correct comments claiming the prune walk skips logged entries
+
+ddt_prune_walk()'s header comment, dedup_prune.ksh and
+dedup_prune_leak.ksh say the walk skips entries that are still on the
+dedup log.  It does not: ddt_walk() reads the stored unique class only,
+and it is the recheck in prune_candidates_sync() that skips live and
+logged entries (and, since 0085, entries changed since the walk).
+Comment-only.
+
+Applies on top of 0088.
+
+    patch -p1 --fuzz=0 < 0089-ddt-prune-walk-comments.patch
+---
+diff --git a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune.ksh b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune.ksh
+--- a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune.ksh
++++ b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune.ksh
+@@ -57,9 +57,9 @@
+ # zfs_dedup_log_flush_entries_min raises the per-txg flush floor:
+ # ddt_sync_flush_log() computes flush_min from it and then flush_max as
+ # flush_min * 5 / 4, so with the default 200 only a couple of hundred
+-# entries leave the log per txg.  ddt_prune_walk() skips any entry still
+-# on the log (the stored copy is stale), so an undrained log makes prune
+-# look like it did nothing.
++# entries leave the log per txg.  A prune never removes an entry that is
++# still on the log (prune_candidates_sync() skips logged entries), so an
++# undrained log makes prune look like it did nothing.
+ typeset orig_txg_max=$(get_tunable zfs_dedup_log_txg_max)
+ typeset orig_flush_min=$(get_tunable zfs_dedup_log_flush_entries_min)
+ log_must set_tunable32 zfs_dedup_log_txg_max 1
+diff --git a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_leak.ksh b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_leak.ksh
+--- a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_leak.ksh
++++ b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_leak.ksh
+@@ -45,7 +45,7 @@
+ #	- get/set_tunable (not save/restore_tunable).
+ #	- zfs_dedup_log_txg_max and zfs_dedup_log_flush_entries_min are both
+ #	  set, as in dedup_prune.ksh: the log must be fully drained before
+-#	  pruning, because ddt_prune_walk() skips entries still on it.
++#	  pruning, because a prune never removes entries still on it.
+ #	- no events_common.kshlib include (unused upstream).
+ 
+ . $STF_SUITE/include/libtest.shlib
+@@ -56,7 +56,7 @@
+ 
+ # Flush the dedup log every txg, and lift the per-txg flush floor so a
+ # flush pass drains the whole tree rather than the default ~200 entries.
+-# ddt_prune_walk() skips any entry still on the log, so an undrained log
++# A prune never removes an entry still on the log, so an undrained log
+ # silently makes the prune a no-op.
+ typeset orig_txg_max=$(get_tunable zfs_dedup_log_txg_max)
+ typeset orig_flush_min=$(get_tunable zfs_dedup_log_flush_entries_min)
+diff --git a/usr/src/uts/common/fs/zfs/ddt.c b/usr/src/uts/common/fs/zfs/ddt.c
+--- a/usr/src/uts/common/fs/zfs/ddt.c
++++ b/usr/src/uts/common/fs/zfs/ddt.c
+@@ -2702,8 +2702,10 @@
+  *  (b) prune entries whose class_start is older than cutoff (cutoff != 0).
+  *
+  * Starting the bookmark at DDT_CLASS_UNIQUE restricts ddt_walk() to the
+- * unique class.  Entries also present in the log are skipped (the on-disk
+- * copy is stale).  Also called by zdb(8) to dump the age histogram.
++ * unique class.  The walk reads the stored entries only, which lag the
++ * log; prune_candidates_sync() rechecks each candidate against the live,
++ * logged and reloaded entry before pruning it.  Also called by zdb(8) to
++ * dump the age histogram.
+  */
+ void
+ ddt_prune_walk(spa_t *spa, uint64_t cutoff, ddt_age_histo_t *histogram)
+--
+2.40.0
+
