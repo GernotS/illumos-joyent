@@ -191,13 +191,18 @@ t_claim() {
 	typeset -i rb=$?
 	wait $a; typeset -i ra=$?
 	# EALREADY isn't mapped in zpool_standard_error_fmt(): EZFS_UNKNOWN ->
-	# "internal error" + abort().  ksh93 reports death by signal as 256+sig.
-	(( rb > 128 )) && bad "zpool aborted on EALREADY (libzfs has no EALREADY case)"
+	# "internal error" + abort().  zpool exits 0 or 1 on its own; anything
+	# else is a signal (262 from ksh93, truncated to 6 through the subshell).
+	if (( rb > 1 )) || grep -q "internal error" $WORK/b.out; then
+		bad "zpool aborted on EALREADY (libzfs has no EALREADY case)"
+	fi
 	kill $dt 2>/dev/null; wait $dt 2>/dev/null
 	sed 's/^/   A: /' $WORK/a.out; sed 's/^/   B: /' $WORK/b.out
 	log "   rc A=$ra B=$rb"
 	if (( ra == 0 && rb == 0 )); then
 		bad "both prunes ran; the first to finish clears the mark under the other"
+	elif (( rb > 1 )); then
+		:	# refused, but via abort(); already reported above
 	elif ! grep -q stalled $WORK/dt.out 2>/dev/null; then
 		skip "dtrace stall never fired; race not exercised"
 	else
