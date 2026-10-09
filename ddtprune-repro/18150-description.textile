@@ -60,7 +60,7 @@ h2. illumos-specific changes (not upstream)
 
 * libzfs: @zpool ddtprune@ reports EALREADY ("a prune operation is already in progress") instead of @zpool_standard_error()@ turning it into EZFS_UNKNOWN and @abort()@.
 * ztest: @ztest_ddt_repair@ removed (it relied on dedup-ditto repair, which flat entries drop); ztest now also varies the FDT log tunables to exercise log rotation and flushing.
-* ZTS: @dedup_ddt_stray_class@ (hardening against upstream issue "issue 17528":https://github.com/openzfs/zfs/issues/17528, still open), @dedup_prune_all@, @dedup_prune_deadlock@, @dedup_prune_race@, @dedup_prune_args@, @dedup_prune_concurrent@, @dedup_prune_percentage@ and @dedup_prune_log_flush@ (DTrace in place of upstream's libzpool test program for "PR 19223":https://github.com/openzfs/zfs/pull/19223).
+* ZTS: @dedup_ddt_stray_class@ (hardening against upstream "issue 17528":https://github.com/openzfs/zfs/issues/17528, still open), @dedup_prune_all@, @dedup_prune_deadlock@, @dedup_prune_race@, @dedup_prune_args@, @dedup_prune_concurrent@, @dedup_prune_percentage@ and @dedup_prune_log_flush@ (DTrace in place of upstream's libzpool test program for "PR 19223":https://github.com/openzfs/zfs/pull/19223).
 
 h2. Upstream changes not included
 
