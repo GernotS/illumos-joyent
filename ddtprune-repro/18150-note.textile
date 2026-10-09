@@ -1,4 +1,4 @@
-Status as of "change 4810":https://code.illumos.org/c/illumos-gate/+/4810 patchset 40. Replaces the cut-off list above.
+Status as of "change 4810":https://code.illumos.org/c/illumos-gate/+/4810 patchset 41. Replaces the cut-off list above.
 
 * Fast Dedup series
 ** "PR 15887":https://github.com/openzfs/zfs/pull/15887 - DDT refactoring for FDT
@@ -49,5 +49,5 @@ Status as of "change 4810":https://code.illumos.org/c/illumos-gate/+/4810 patchs
 ** "PR 17926":https://github.com/openzfs/zfs/pull/17926, "PR 18245":https://github.com/openzfs/zfs/pull/18245 - separate features
 ** zap_trunc() from PR 15888 - ZAP block ids are never reused here
 * Testing
-** SmartOS with PS40: zfstest -T dedup 21/21 PASS
+** SmartOS with PS40 (PS41 adds only the ZAP leaf reuse fix): zfstest -T dedup 21/21 PASS
 ** prune tests repeated 6x: 18/18 PASS
