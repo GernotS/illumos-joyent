@@ -34,9 +34,9 @@ Fast Dedup series
 - https://github.com/openzfs/zfs/pull/15888
   ZAP shrinking
 - https://github.com/openzfs/zfs/pull/16204
-  zap: reuse zap_leaf_t on dbuf reuse after shrink (34906f8bb,
-  fixes issue https://github.com/openzfs/zfs/issues/16157); hardening only here, see
-  zap_trunc() below
+  zap: reuse zap_leaf_t on dbuf reuse after shrink (34906f8bb);
+  hardening only here, see zap_trunc() below
+  (fixes issue https://github.com/openzfs/zfs/issues/16157)
 - https://github.com/openzfs/zfs/pull/15889
   ddt: dedup table quota enforcement
 - https://github.com/openzfs/zfs/pull/15890
@@ -114,7 +114,8 @@ illumos-specific changes (not upstream)
   in progress") instead of zpool_standard_error() turning it into
   EZFS_UNKNOWN and abort().
 - ZTS: dedup_ddt_stray_class (hardening against upstream issue
-  https://github.com/openzfs/zfs/issues/17528, still open upstream), dedup_prune_all,
+  https://github.com/openzfs/zfs/issues/17528,
+  still open upstream), dedup_prune_all,
   dedup_prune_deadlock, dedup_prune_race, dedup_prune_args,
   dedup_prune_concurrent, dedup_prune_percentage and
   dedup_prune_log_flush (DTrace in place of upstream's libzpool test
@@ -126,9 +127,9 @@ Upstream changes not included
 - zap_trunc() from https://github.com/openzfs/zfs/pull/15888
   Upstream lowers zap_freeblk when the trailing leaves are freed by a
   shrink.  This port frees the sibling leaf's blocks but never lowers
-  zap_freeblk, so ZAP block ids are not reused and the
-  https://github.com/openzfs/zfs/pull/16204 fix cannot trigger; it is included for when
-  zap_trunc() is ported.
+  zap_freeblk, so ZAP block ids are not reused and the fix from
+  https://github.com/openzfs/zfs/pull/16204
+  cannot trigger; it is included for when zap_trunc() is ported.
 - https://github.com/openzfs/zfs/pull/14654
   larger (32K) DDT ZAP blocks: tuning only; this port keeps 4K.
 - https://github.com/openzfs/zfs/pull/17875
