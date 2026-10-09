@@ -19,54 +19,93 @@ Upstream OpenZFS pull requests included
 =======================================
 
 Fast Dedup series
-- #15887  ddt: refactoring in preparation for FDT (internal header,
-          key/value ops interface, stats in ddt_stats.c, entry load)
-- #15893  ddt: "flat phys" format, lightweight entries, slimmer
-          ddt_entry_t
-- #15892  ddt: FDT feature, legacy and new on-disk formats; zdb DDT block
-          count/leak check; ZTS dedup legacy/FDT tests
-- #15895  ddt: dedup log; lookup and log stats; block scan until the log
-          is flushed
-- #15888  ZAP shrinking
-- #16157  zap: reuse zap_leaf_t on dbuf reuse after shrink (34906f8bb);
-          hardening only here, see zap_trunc() below
-- #15889  ddt: dedup table quota enforcement
-- #15890  ddt: prefetching tables into the ARC (zpool prefetch -t ddt)
-- #16277  zpool ddtprune; zdb accounting for log, quota and prune
+- https://github.com/openzfs/zfs/pull/15887
+  ddt: refactoring in preparation for FDT (internal header,
+  key/value ops interface, stats in ddt_stats.c, entry load)
+- https://github.com/openzfs/zfs/pull/15893
+  ddt: "flat phys" format, lightweight entries, slimmer
+  ddt_entry_t
+- https://github.com/openzfs/zfs/pull/15892
+  ddt: FDT feature, legacy and new on-disk formats; zdb DDT block
+  count/leak check; ZTS dedup legacy/FDT tests
+- https://github.com/openzfs/zfs/pull/15895
+  ddt: dedup log; lookup and log stats; block scan until the log
+  is flushed
+- https://github.com/openzfs/zfs/pull/15888
+  ZAP shrinking
+- https://github.com/openzfs/zfs/pull/16204
+  zap: reuse zap_leaf_t on dbuf reuse after shrink (34906f8bb,
+  fixes issue https://github.com/openzfs/zfs/issues/16157); hardening only here, see
+  zap_trunc() below
+- https://github.com/openzfs/zfs/pull/15889
+  ddt: dedup table quota enforcement
+- https://github.com/openzfs/zfs/pull/15890
+  ddt: prefetching tables into the ARC (zpool prefetch -t ddt)
+- https://github.com/openzfs/zfs/pull/16277
+  zpool ddtprune; zdb accounting for log, quota and prune
 
 Follow-up fixes
-- #16722  dsl_dataset: put IO-inducing frees on the pool deadlist
-          (also closes #16697, #16708, #6783)
-- #17038  FDT dedup log sync: remove incremental flushing
-- #17049  more DDT tests
-- #17120  fix deduplication of overridden blocks
-- #17123  gang blocks, copies and FDT (fixes issue #17070)
-- #17205  FDT rollback must not overwrite unnecessary fields
-- #17699  wrong dedup_table_size for legacy dedup
-- #17730  ddle memory leak in ddt_log_load
-- #17793  ddt prune: SCL_ZIO deadlock workaround
-- #17983  ddtprune causing space leak (issue #17982)
-- #18044  DDT: move log searches out of the lock
-- #18047  DDT: use ZAP _by_dnode() interfaces
-- #18048  DDT: zap_lookup_length_uint64_by_dnode()
-- #18115  DDT: locking for table ZAP destruction
-- #18720  insufficient locking in dedup verify
-- #18819  ddt: select traditional phys by block identity; don't strip
-          gang stages from the DDT free pipeline
-- #18820  zdb: account pending DDT-log frees in leak detection
-- #18838  DDT: several bugs in pruning
-- #18886  negative time overflows in DDT pruning
-- #18536, #18706  ddt_log refcount tags between begin and commit
-          (done with dedicated tags rather than the dlu pointer)
+- https://github.com/openzfs/zfs/pull/16722
+  dsl_dataset: put IO-inducing frees on the pool deadlist
+  also closes issues:
+    https://github.com/openzfs/zfs/issues/16697
+    https://github.com/openzfs/zfs/issues/16708
+    https://github.com/openzfs/zfs/issues/6783
+- https://github.com/openzfs/zfs/pull/17038
+  FDT dedup log sync: remove incremental flushing
+- https://github.com/openzfs/zfs/pull/17049
+  more DDT tests
+- https://github.com/openzfs/zfs/pull/17120
+  fix deduplication of overridden blocks
+- https://github.com/openzfs/zfs/pull/17123
+  gang blocks, copies and FDT
+  (fixes issue https://github.com/openzfs/zfs/issues/17070)
+- https://github.com/openzfs/zfs/pull/17205
+  FDT rollback must not overwrite unnecessary fields
+- https://github.com/openzfs/zfs/pull/17699
+  wrong dedup_table_size for legacy dedup
+- https://github.com/openzfs/zfs/pull/17730
+  ddle memory leak in ddt_log_load
+- https://github.com/openzfs/zfs/pull/17793
+  ddt prune: SCL_ZIO deadlock workaround
+- https://github.com/openzfs/zfs/pull/17983
+  ddtprune causing space leak
+  (fixes issue https://github.com/openzfs/zfs/issues/17982)
+- https://github.com/openzfs/zfs/pull/18044
+  DDT: move log searches out of the lock
+- https://github.com/openzfs/zfs/pull/18047
+  DDT: use ZAP _by_dnode() interfaces
+- https://github.com/openzfs/zfs/pull/18048
+  DDT: zap_lookup_length_uint64_by_dnode()
+- https://github.com/openzfs/zfs/pull/18115
+  DDT: locking for table ZAP destruction
+- https://github.com/openzfs/zfs/pull/18720
+  insufficient locking in dedup verify
+- https://github.com/openzfs/zfs/pull/18819
+  ddt: select traditional phys by block identity; don't strip
+  gang stages from the DDT free pipeline
+- https://github.com/openzfs/zfs/pull/18820
+  zdb: account pending DDT-log frees in leak detection
+- https://github.com/openzfs/zfs/pull/18838
+  DDT: several bugs in pruning
+- https://github.com/openzfs/zfs/pull/18886
+  negative time overflows in DDT pruning
+- https://github.com/openzfs/zfs/pull/18536
+  https://github.com/openzfs/zfs/pull/18706
+  ddt_log refcount tags between begin and commit
+  (done with dedicated tags rather than the dlu pointer)
 
 Prune fixes (2026-10)
-- #19223  ddt: prune only entries unchanged since the prune walk
-          (upstream: open, not yet merged)
-- #19263  ddt: validate prune arguments before claiming; claim the prune
-          atomically; reject zpool ddtprune -d overflow
-          (upstream: draft, not yet merged)
-- #19264  ddt: don't prune every unique entry for a target below one
-          entry
+- https://github.com/openzfs/zfs/pull/19223
+  ddt: prune only entries unchanged since the prune walk
+  (upstream: open, not yet merged)
+- https://github.com/openzfs/zfs/pull/19263
+  ddt: validate prune arguments before claiming; claim the prune
+  atomically; reject zpool ddtprune -d overflow
+  (upstream: draft, not yet merged)
+- https://github.com/openzfs/zfs/pull/19264
+  ddt: don't prune every unique entry for a target below one
+  entry
 
 
 illumos-specific changes (not upstream)
@@ -74,30 +113,39 @@ illumos-specific changes (not upstream)
 - libzfs: zpool ddtprune reports EALREADY ("a prune operation is already
   in progress") instead of zpool_standard_error() turning it into
   EZFS_UNKNOWN and abort().
-- ZTS: dedup_ddt_stray_class (hardening against openzfs/zfs#17528, which
-  is still open upstream), dedup_prune_all, dedup_prune_deadlock,
-  dedup_prune_race, dedup_prune_args, dedup_prune_concurrent,
+- ZTS: dedup_ddt_stray_class (hardening against upstream issue
+  https://github.com/openzfs/zfs/issues/17528, still open upstream), dedup_prune_all,
+  dedup_prune_deadlock, dedup_prune_race, dedup_prune_args,
+  dedup_prune_concurrent, dedup_prune_percentage and
   dedup_prune_log_flush (DTrace in place of upstream's libzpool test
-  program for #19223), dedup_prune_percentage.
+  program for https://github.com/openzfs/zfs/pull/19223).
 
 
 Upstream changes not included
 =============================
-- zap_trunc() from #15888: upstream lowers zap_freeblk when the
-          trailing leaves are freed by a shrink.  This port frees the
-          sibling leaf's blocks but never lowers zap_freeblk, so ZAP
-          block ids are not reused (the #16157 fix cannot trigger, but
-          is included for when zap_trunc() is ported).
-- #14654  larger (32K) DDT ZAP blocks: tuning only; this port keeps 4K.
-- #17875  uncached DDT log/BRT I/O: illumos has no DMU_UNCACHEDIO.
-- #18055  compressed entry buffer size: fixes upstream's ABD-based
-          ddt_zap compression, which this port does not use.
-- #18888  ddt_zap_walk() cursor _by_dnode: saves a dnode hold per entry;
-          no functional change.
-- #19029  kmem_free size of ddt_prune_entry_t: allocation and free sizes
-          already match in this port.
-- #17926, #18245  zpool status -D -p and dedupused/dedupsaved
-          properties: separate features, not part of fast dedup.
+- zap_trunc() from https://github.com/openzfs/zfs/pull/15888
+  Upstream lowers zap_freeblk when the trailing leaves are freed by a
+  shrink.  This port frees the sibling leaf's blocks but never lowers
+  zap_freeblk, so ZAP block ids are not reused and the
+  https://github.com/openzfs/zfs/pull/16204 fix cannot trigger; it is included for when
+  zap_trunc() is ported.
+- https://github.com/openzfs/zfs/pull/14654
+  larger (32K) DDT ZAP blocks: tuning only; this port keeps 4K.
+- https://github.com/openzfs/zfs/pull/17875
+  uncached DDT log/BRT I/O: illumos has no DMU_UNCACHEDIO.
+- https://github.com/openzfs/zfs/pull/18055
+  compressed entry buffer size: fixes upstream's ABD-based
+  ddt_zap compression, which this port does not use.
+- https://github.com/openzfs/zfs/pull/18888
+  ddt_zap_walk() cursor _by_dnode: saves a dnode hold per entry;
+  no functional change.
+- https://github.com/openzfs/zfs/pull/19029
+  kmem_free size of ddt_prune_entry_t: allocation and free sizes
+  already match in this port.
+- https://github.com/openzfs/zfs/pull/17926
+  https://github.com/openzfs/zfs/pull/18245
+  zpool status -D -p and dedupused/dedupsaved
+  properties: separate features, not part of fast dedup.
 
 
 Testing
