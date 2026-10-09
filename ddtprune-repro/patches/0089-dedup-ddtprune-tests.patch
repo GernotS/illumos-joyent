@@ -1,33 +1,42 @@
-From 7740f49942882144b8809bd6f2dca79897d546e5 Mon Sep 17 00:00:00 2001
-From: Gernot Strasser <gernot1.strasser@gmail.com>
-Date: Fri, 9 Oct 2026 07:47:43 +0000
-Subject: [PATCH 93/93] fdt: ddtprune: regression tests for the upstream prune
- fixes
+From: Backport <noreply@example.invalid>
+Subject: dedup tests: ddtprune regression tests; correct stale comments
 
-dedup_prune_percentage   -p target rounding to zero entries (openzfs#19264)
-dedup_prune_args         bad ages rejected, prune mark released (openzfs#19263)
-dedup_prune_concurrent   concurrent prunes, EALREADY reporting (openzfs#19263)
-dedup_prune_log_flush    prune vs. dedup log flush race (openzfs#19223)
+Four ZTS tests for the prune fixes in 0085, 0086 and 0088:
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+  dedup_prune_percentage  -p 1 on three unique entries keeps all of them,
+                          -p 100 then removes them (upstream #19264).
+  dedup_prune_args        -d before the epoch is rejected and the next
+                          prune still runs; -d 213503982334602 (wraps to
+                          61184 s) is rejected and removes nothing; an
+                          empty table can be pruned twice (#19263).
+  dedup_prune_concurrent  DTrace stalls the first prune inside the claim
+                          window; the second must fail with "already in
+                          progress", not succeed and not abort (#19263,
+                          0088).
+  dedup_prune_log_flush   every unique entry gets a second reference held
+                          on the dedup log; the log is released mid-walk
+                          and DTrace stalls each batch before its sync
+                          task.  No entry may be pruned, and zdb -bcc
+                          must find no leak after freeing one copy
+                          (#19223).  Replaces upstream's libzpool test
+                          program; zfs_ddt_prunes_per_txg stays static
+                          and is set through mdb.
+
+The DTrace tests run in the global zone only and report UNSUPPORTED
+if the probes cannot be enabled or the stall never fires.
+
+Also correct comments in ddt_prune_walk(), dedup_prune.ksh and
+dedup_prune_leak.ksh that said the walk skips entries still on the
+log.  It does not; the recheck in prune_candidates_sync() does.
+
+Applies on top of 0088.
+
+    patch -p1 --fuzz=0 < 0089-dedup-ddtprune-tests.patch
 ---
- usr/src/pkg/manifests/system-test-zfstest.p5m |   4 +
- usr/src/test/zfs-tests/runfiles/common.run    |   5 +-
- .../functional/dedup/dedup_prune_args.ksh     | 140 +++++++++++++
- .../dedup/dedup_prune_concurrent.ksh          | 149 ++++++++++++++
- .../dedup/dedup_prune_log_flush.ksh           | 189 ++++++++++++++++++
- .../dedup/dedup_prune_percentage.ksh          | 110 ++++++++++
- 6 files changed, 595 insertions(+), 2 deletions(-)
- create mode 100644 usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_args.ksh
- create mode 100644 usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_concurrent.ksh
- create mode 100644 usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_log_flush.ksh
- create mode 100644 usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_percentage.ksh
-
 diff --git a/usr/src/pkg/manifests/system-test-zfstest.p5m b/usr/src/pkg/manifests/system-test-zfstest.p5m
-index 8769931e..9173741f 100644
 --- a/usr/src/pkg/manifests/system-test-zfstest.p5m
 +++ b/usr/src/pkg/manifests/system-test-zfstest.p5m
-@@ -2399,8 +2399,12 @@ file path=opt/zfs-tests/tests/functional/dedup/dedup_legacy_import mode=0555
+@@ -2399,8 +2399,12 @@
  file path=opt/zfs-tests/tests/functional/dedup/dedup_log_zdb_leak mode=0555
  file path=opt/zfs-tests/tests/functional/dedup/dedup_prune mode=0555
  file path=opt/zfs-tests/tests/functional/dedup/dedup_prune_all mode=0555
@@ -41,10 +50,9 @@ index 8769931e..9173741f 100644
  file path=opt/zfs-tests/tests/functional/dedup/dedup_quota mode=0555
  file path=opt/zfs-tests/tests/functional/dedup/dedup_zap_shrink mode=0555
 diff --git a/usr/src/test/zfs-tests/runfiles/common.run b/usr/src/test/zfs-tests/runfiles/common.run
-index cf6afbc6..671b318f 100644
 --- a/usr/src/test/zfs-tests/runfiles/common.run
 +++ b/usr/src/test/zfs-tests/runfiles/common.run
-@@ -543,8 +543,9 @@ tests = ['dedup_ddt_stray_class', 'dedup_fdt_create', 'dedup_fdt_import',
+@@ -543,8 +543,9 @@
      'dedup_fdt_pacing', 'dedup_gang_copies',
      'dedup_legacy_create', 'dedup_legacy_import',
      'dedup_legacy_fdt_upgrade', 'dedup_legacy_fdt_mixed', 'dedup_log_zdb_leak',
@@ -56,9 +64,24 @@ index cf6afbc6..671b318f 100644
      'dedup_quota', 'dedup_zap_shrink']
  pre =
  post =
+diff --git a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune.ksh b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune.ksh
+--- a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune.ksh
++++ b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune.ksh
+@@ -57,9 +57,9 @@
+ # zfs_dedup_log_flush_entries_min raises the per-txg flush floor:
+ # ddt_sync_flush_log() computes flush_min from it and then flush_max as
+ # flush_min * 5 / 4, so with the default 200 only a couple of hundred
+-# entries leave the log per txg.  ddt_prune_walk() skips any entry still
+-# on the log (the stored copy is stale), so an undrained log makes prune
+-# look like it did nothing.
++# entries leave the log per txg.  A prune never removes an entry that is
++# still on the log (prune_candidates_sync() skips logged entries), so an
++# undrained log makes prune look like it did nothing.
+ typeset orig_txg_max=$(get_tunable zfs_dedup_log_txg_max)
+ typeset orig_flush_min=$(get_tunable zfs_dedup_log_flush_entries_min)
+ log_must set_tunable32 zfs_dedup_log_txg_max 1
 diff --git a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_args.ksh b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_args.ksh
 new file mode 100644
-index 00000000..9b3e7861
 --- /dev/null
 +++ b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_args.ksh
 @@ -0,0 +1,140 @@
@@ -204,7 +227,6 @@ index 00000000..9b3e7861
 +log_pass "ddtprune rejects bad ages and never leaves the prune mark set"
 diff --git a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_concurrent.ksh b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_concurrent.ksh
 new file mode 100644
-index 00000000..6943b7df
 --- /dev/null
 +++ b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_concurrent.ksh
 @@ -0,0 +1,149 @@
@@ -357,9 +379,29 @@ index 00000000..6943b7df
 +	log_fail "second prune failed for the wrong reason"
 +
 +log_pass "Concurrent ddtprunes cannot both claim the prune mark"
+diff --git a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_leak.ksh b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_leak.ksh
+--- a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_leak.ksh
++++ b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_leak.ksh
+@@ -45,7 +45,7 @@
+ #	- get/set_tunable (not save/restore_tunable).
+ #	- zfs_dedup_log_txg_max and zfs_dedup_log_flush_entries_min are both
+ #	  set, as in dedup_prune.ksh: the log must be fully drained before
+-#	  pruning, because ddt_prune_walk() skips entries still on it.
++#	  pruning, because a prune never removes entries still on it.
+ #	- no events_common.kshlib include (unused upstream).
+ 
+ . $STF_SUITE/include/libtest.shlib
+@@ -56,7 +56,7 @@
+ 
+ # Flush the dedup log every txg, and lift the per-txg flush floor so a
+ # flush pass drains the whole tree rather than the default ~200 entries.
+-# ddt_prune_walk() skips any entry still on the log, so an undrained log
++# A prune never removes an entry still on the log, so an undrained log
+ # silently makes the prune a no-op.
+ typeset orig_txg_max=$(get_tunable zfs_dedup_log_txg_max)
+ typeset orig_flush_min=$(get_tunable zfs_dedup_log_flush_entries_min)
 diff --git a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_log_flush.ksh b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_log_flush.ksh
 new file mode 100644
-index 00000000..aa62548d
 --- /dev/null
 +++ b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_log_flush.ksh
 @@ -0,0 +1,189 @@
@@ -554,7 +596,6 @@ index 00000000..aa62548d
 +log_pass "ddtprune keeps entries that gain a reference via log flush"
 diff --git a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_percentage.ksh b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_percentage.ksh
 new file mode 100644
-index 00000000..c4a62ac6
 --- /dev/null
 +++ b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_percentage.ksh
 @@ -0,0 +1,110 @@
@@ -668,6 +709,22 @@ index 00000000..c4a62ac6
 +	log_fail "ddtprune -p 100 left $entries of 3 entries"
 +
 +log_pass "ddtprune -p with a zero-entry target prunes nothing"
--- 
-2.43.0
+diff --git a/usr/src/uts/common/fs/zfs/ddt.c b/usr/src/uts/common/fs/zfs/ddt.c
+--- a/usr/src/uts/common/fs/zfs/ddt.c
++++ b/usr/src/uts/common/fs/zfs/ddt.c
+@@ -2702,8 +2702,10 @@
+  *  (b) prune entries whose class_start is older than cutoff (cutoff != 0).
+  *
+  * Starting the bookmark at DDT_CLASS_UNIQUE restricts ddt_walk() to the
+- * unique class.  Entries also present in the log are skipped (the on-disk
+- * copy is stale).  Also called by zdb(8) to dump the age histogram.
++ * unique class.  The walk reads the stored entries only, which lag the
++ * log; prune_candidates_sync() rechecks each candidate against the live,
++ * logged and reloaded entry before pruning it.  Also called by zdb(8) to
++ * dump the age histogram.
+  */
+ void
+ ddt_prune_walk(spa_t *spa, uint64_t cutoff, ddt_age_histo_t *histogram)
+--
+2.40.0
 

@@ -1,27 +1,26 @@
-From 2460e27dad9a072e824e12b8cf4d7b7b9c93cd66 Mon Sep 17 00:00:00 2001
-From: Gernot Strasser <gernot1.strasser@gmail.com>
-Date: Fri, 9 Oct 2026 08:02:56 +0000
-Subject: [PATCH 92/93] fdt: libzfs: report EALREADY from zpool ddtprune
- instead of aborting
+From: Backport <noreply@example.invalid>
+Subject: libzfs: report EALREADY from zpool ddtprune instead of aborting
 
 ddt_prune_unique_entries() returns EALREADY when another prune of the
-pool is running.  zpool_standard_error() has no case for it, so it is
-reported as EZFS_UNKNOWN, which prints "internal error" and calls
-abort(): a second `zpool ddtprune` dumps core.
+pool holds the mark (0086).  zpool_standard_error() has no case for it,
+so it is reported as EZFS_UNKNOWN, which prints "internal error" and
+calls abort(): a second concurrent `zpool ddtprune` dumps core.
 
 Map it in zpool_ddt_prune() to EZFS_BUSY with "a prune operation is
-already in progress".
+already in progress".  Done locally rather than in
+zpool_standard_error_fmt(), so other pool operations are unaffected
+and no EZFS_* value is added.
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Not upstream.
+
+Applies on top of 0086.
+
+    patch -p1 --fuzz=0 < 0088-libzfs-ddtprune-ealready.patch
 ---
- usr/src/lib/libzfs/common/libzfs_pool.c | 9 +++++++++
- 1 file changed, 9 insertions(+)
-
 diff --git a/usr/src/lib/libzfs/common/libzfs_pool.c b/usr/src/lib/libzfs/common/libzfs_pool.c
-index a37d3b57..896aaf3a 100644
 --- a/usr/src/lib/libzfs/common/libzfs_pool.c
 +++ b/usr/src/lib/libzfs/common/libzfs_pool.c
-@@ -2231,6 +2231,15 @@ zpool_ddt_prune(zpool_handle_t *zhp, zpool_ddt_prune_unit_t unit,
+@@ -2231,6 +2231,15 @@
  	if (ret != 0) {
  		(void) snprintf(msg, sizeof (msg), dgettext(TEXT_DOMAIN,
  		    "cannot prune DDT on '%s'"), zhp->zpool_name);
@@ -37,6 +36,6 @@ index a37d3b57..896aaf3a 100644
  		(void) zpool_standard_error(hdl, errno, msg);
  		return (-1);
  	}
--- 
-2.43.0
+--
+2.40.0
 
