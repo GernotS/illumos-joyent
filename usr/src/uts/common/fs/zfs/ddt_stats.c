@@ -296,10 +296,22 @@ ddt_get_ddt_dsize(spa_t *spa)
 		}
 		rw_exit(&ddt->ddt_objects_lock);
 
-		/* Same for the log objects (dedup log). */
+		/*
+		 * Same for the two log objects.  Sample them directly rather
+		 * than through ddt_log_update_stats(), which rewrites
+		 * ddt_log_stats and reads the log trees that sync context
+		 * changes, without any lock.  Their object numbers don't
+		 * change while the log exists, and swapping only exchanges
+		 * which one is active.
+		 */
 		if (ddt->ddt_flags & DDT_FLAG_LOG) {
-			ddt_log_update_stats(ddt);
-			dsize += ddt->ddt_log_stats.ddo_dspace;
+			for (int n = 0; n < 2; n++) {
+				uint64_t obj = ddt->ddt_log[n].ddl_object;
+				if (obj == 0 || dmu_object_info(ddt->ddt_os,
+				    obj, &doi) != 0)
+					continue;
+				dsize += doi.doi_physical_blocks_512 << 9;
+			}
 		}
 	}
 

@@ -313,6 +313,37 @@ dnodesize_changed_cb(void *arg, uint64_t newval)
 	}
 }
 
+/*
+ * Return B_TRUE if special_small_blocks is set on this dataset itself,
+ * either locally or by a receive, rather than inherited.
+ */
+static boolean_t
+smallblk_is_explicit(objset_t *os)
+{
+	dsl_dataset_t *ds = os->os_dsl_dataset;
+	char *setpoint, *dsname;
+	uint64_t val;
+	boolean_t explicit = B_FALSE;
+
+	if (ds == NULL)
+		return (B_FALSE);
+
+	setpoint = kmem_alloc(ZFS_MAX_DATASET_NAME_LEN, KM_SLEEP);
+	dsname = kmem_alloc(ZFS_MAX_DATASET_NAME_LEN, KM_SLEEP);
+
+	if (dsl_prop_get_ds(ds,
+	    zfs_prop_to_name(ZFS_PROP_SPECIAL_SMALL_BLOCKS),
+	    sizeof (val), 1, &val, setpoint) == 0) {
+		dsl_dir_name(ds->ds_dir, dsname);
+		explicit = (strcmp(setpoint, ZPROP_SOURCE_VAL_RECVD) == 0 ||
+		    strcmp(setpoint, dsname) == 0);
+	}
+
+	kmem_free(dsname, ZFS_MAX_DATASET_NAME_LEN);
+	kmem_free(setpoint, ZFS_MAX_DATASET_NAME_LEN);
+	return (explicit);
+}
+
 static void
 smallblk_changed_cb(void *arg, uint64_t newval)
 {
@@ -323,6 +354,17 @@ smallblk_changed_cb(void *arg, uint64_t newval)
 	 */
 	ASSERT(newval <= SPA_OLD_MAXBLOCKSIZE);
 	ASSERT(ISP2(newval));
+
+	/*
+	 * Volumes only place blocks in the special class when
+	 * special_small_blocks is set on the volume itself.  A value
+	 * inherited from a parent file system is ignored, so that existing
+	 * volumes below a file system with special_small_blocks set keep
+	 * storing their blocks in the normal class.
+	 */
+	if (newval != 0 && os->os_phys->os_type == DMU_OST_ZVOL &&
+	    !smallblk_is_explicit(os))
+		newval = 0;
 
 	os->os_zpl_special_smallblock = newval;
 }

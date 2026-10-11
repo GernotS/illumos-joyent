@@ -197,13 +197,12 @@ tpm_crb_thread(void *const arg)
 	pthread_mutex_lock(&crb->mutex);
 	for (;;) {
 		/*
-		 * We're releasing the lock after wake up. Therefore, we have to
-		 * check the closing condition before and after going to sleep.
+		 * Wait for the guest to start a command.  The predicate has to
+		 * be rechecked after every wakeup: pthread_cond_wait() may
+		 * return spuriously, and a command must not run twice.
 		 */
-		if (crb->closing)
-			break;
-
-		pthread_cond_wait(&crb->cond, &crb->mutex);
+		while (!crb->closing && !crb->regs.ctrl_start.start)
+			pthread_cond_wait(&crb->cond, &crb->mutex);
 
 		if (crb->closing)
 			break;
@@ -220,7 +219,7 @@ tpm_crb_thread(void *const arg)
 		     TPM_CRB_DATA_BUFFER_ADDRESS + TPM_CRB_DATA_BUFFER_SIZE)) {
 			warnx("%s: invalid cmd [%16lx/%8x] outside of TPM "
 			    "buffer", __func__, cmd_addr, cmd_size);
-			break;
+			goto reject;
 		}
 
 		if ((rsp_addr < TPM_CRB_DATA_BUFFER_ADDRESS) ||
@@ -230,7 +229,7 @@ tpm_crb_thread(void *const arg)
 		     TPM_CRB_DATA_BUFFER_ADDRESS + TPM_CRB_DATA_BUFFER_SIZE)) {
 			warnx("%s: invalid rsp [%16lx/%8x] outside of TPM "
 			    "buffer", __func__, rsp_addr, rsp_size);
-			break;
+			goto reject;
 		}
 
 		const uint64_t cmd_off = cmd_addr - TPM_CRB_DATA_BUFFER_ADDRESS;
@@ -244,7 +243,7 @@ tpm_crb_thread(void *const arg)
 			    "%s: invalid cmd [%16lx, %16lx] --> [%16lx, %16lx]\n\r",
 			    __func__, cmd_addr, cmd_addr + cmd_size, rsp_addr,
 			    rsp_addr + rsp_size);
-			break;
+			goto reject;
 		}
 
 		uint8_t cmd[TPM_CRB_DATA_BUFFER_SIZE];
@@ -258,7 +257,7 @@ tpm_crb_thread(void *const arg)
 		if (be32toh(req->len) < sizeof (struct tpm_cmd_hdr) ||
 		    be32toh(req->len) > cmd_size) {
 			warnx("%s: invalid TPM request header", __func__);
-			break;
+			goto reject;
 		}
 
 		/*
@@ -288,6 +287,15 @@ tpm_crb_thread(void *const arg)
 		memset(crb->regs.data_buffer, 0, TPM_CRB_DATA_BUFFER_SIZE);
 		memcpy(&crb->regs.data_buffer[rsp_off], &rsp[rsp_off], rsp_size);
 
+		crb->regs.ctrl_start.start = false;
+		continue;
+
+reject:
+		/*
+		 * Complete an invalid request without executing it.  Leaving
+		 * the loop would stop the thread and hang every later TPM
+		 * command of the guest.
+		 */
 		crb->regs.ctrl_start.start = false;
 	}
 	pthread_mutex_unlock(&crb->mutex);
@@ -324,7 +332,7 @@ tpm_crb_mem_handler(struct vcpu *vcpu __unused, const int dir,
 	crb = arg1;
 
 	off = addr - TPM_CRB_ADDRESS;
-	if (off > TPM_CRB_REGS_SIZE || off + size >= TPM_CRB_REGS_SIZE) {
+	if (off > TPM_CRB_REGS_SIZE || off + size > TPM_CRB_REGS_SIZE) {
 		return (EINVAL);
 	}
 
@@ -374,11 +382,18 @@ tpm_crb_mem_handler(struct vcpu *vcpu __unused, const int dir,
 			break;
 		}
 		case offsetof(struct tpm_crb_regs, ctrl_cancel): {
-			/* TODO: cancel the tpm command */
-			warnx(
-			    "%s: cancelling a TPM command is not implemented yet",
-			    __func__);
+			union tpm_crb_reg_ctrl_cancel cancel;
 
+			if ((size_t)size > sizeof(cancel))
+				goto err_out;
+
+			tpm_crb_mmiocpy(&cancel, val, size);
+			if (cancel.cancel != 0) {
+				/* TODO: cancel the tpm command */
+				warnx(
+		    "%s: cancelling a TPM command is not implemented yet",
+				    __func__);
+			}
 			break;
 		}
 		case offsetof(struct tpm_crb_regs, int_enable):
@@ -417,7 +432,7 @@ tpm_crb_mem_handler(struct vcpu *vcpu __unused, const int dir,
 		    4:
 		case offsetof(struct tpm_crb_regs,
 		    data_buffer) ... offsetof(struct tpm_crb_regs, data_buffer) +
-		    TPM_CRB_DATA_BUFFER_SIZE / 4:
+		    sizeof(((struct tpm_crb_regs *)NULL)->data_buffer) - 1:
 			/*
 			 * Those fields are used to execute a TPM command. The
 			 * crb_thread will access them. For that reason, we have

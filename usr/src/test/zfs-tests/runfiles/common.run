@@ -549,7 +549,8 @@ tests = ['dedup_concurrent_copies', 'dedup_ddt_stray_class',
     'dedup_prune', 'dedup_prune_all', 'dedup_prune_args',
     'dedup_prune_concurrent', 'dedup_prune_deadlock', 'dedup_prune_leak',
     'dedup_prune_log_flush', 'dedup_prune_percentage', 'dedup_prune_race',
-    'dedup_quota', 'dedup_sync_copies', 'dedup_zap_shrink']
+    'dedup_prune_scrub', 'dedup_quota', 'dedup_sync_copies',
+    'dedup_zap_shrink']
 pre =
 post =
 tags = ['functional', 'dedup']

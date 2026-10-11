@@ -622,12 +622,13 @@ pci_nvme_init_ctrldata(struct pci_nvme_softc *sc)
 	 * FLUSH when it needs durability and that reaches the backing store as
 	 * fsync(), which specfs turns into DKIOCFLUSHWRITECACHE.
 	 *
-	 * A flush covers the whole backing store, so it applies to all
-	 * namespaces.
+	 * A flush covers the whole backing store, so a FLUSH for any one
+	 * namespace covers all of them.  FLUSH with the broadcast NSID is not
+	 * advertised: the submission queue handler rejects NSID 0xFFFFFFFF.
 	 */
 	if (sc->nvstore.wce) {
 		cd->vwc = NVMEF(NVME_CTRLR_DATA_VWC_PRESENT, 1) |
-		    NVMEF(NVME_CTRLR_DATA_VWC_ALL, NVME_CTRLR_DATA_VWC_ALL_YES);
+		    NVMEF(NVME_CTRLR_DATA_VWC_ALL, NVME_CTRLR_DATA_VWC_ALL_NO);
 	} else {
 		cd->vwc = NVMEF(NVME_CTRLR_DATA_VWC_ALL,
 		    NVME_CTRLR_DATA_VWC_ALL_NO);
@@ -1783,6 +1784,17 @@ nvme_feature_volatile_wc(struct pci_nvme_softc *sc,
 
 	if (sc->nvstore.type != NVME_STOR_BLOCKIF) {
 		pci_nvme_status_genc(&compl->status, NVME_SC_INVALID_FIELD);
+		return;
+	}
+
+	/*
+	 * Data the guest wrote while the cache was enabled must not stay
+	 * volatile once it has been told the cache is off.
+	 */
+	if (enable == 0 && feat->cdw11 != 0 &&
+	    blockif_flush_sync(sc->nvstore.ctx) != 0) {
+		pci_nvme_status_genc(&compl->status,
+		    NVME_SC_INTERNAL_DEVICE_ERROR);
 		return;
 	}
 

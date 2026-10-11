@@ -607,6 +607,8 @@ dsl_scan_init(dsl_pool_t *dp, uint64_t txg)
 		zap_cursor_fini(&zc);
 	}
 
+	ddt_walk_init(spa, scn->scn_phys.scn_max_txg);
+
 	spa_scan_stat_init(spa);
 	return (0);
 }
@@ -806,6 +808,8 @@ dsl_scan_setup_sync(void *arg, dmu_tx_t *tx)
 	    ot ? ot : DMU_OT_SCAN_QUEUE, DMU_OT_NONE, 0, tx);
 
 	bcopy(&scn->scn_phys, &scn->scn_phys_cached, sizeof (scn->scn_phys));
+
+	ddt_walk_init(spa, scn->scn_phys.scn_max_txg);
 
 	dsl_scan_sync_state(scn, tx, SYNC_MANDATORY);
 
@@ -1337,7 +1341,8 @@ dsl_scan_check_suspend(dsl_scan_t *scn, const zbookmark_phys_t *zb)
 	    txg_sync_waiting(scn->scn_dp) ||
 	    NSEC2SEC(sync_time_ns) >= zfs_txg_timeout)) ||
 	    spa_shutting_down(scn->scn_dp->dp_spa) ||
-	    (zfs_scan_strict_mem_lim && dsl_scan_should_clear(scn))) {
+	    (zfs_scan_strict_mem_lim && dsl_scan_should_clear(scn)) ||
+	    !ddt_walk_ready(scn->scn_dp->dp_spa)) {
 		if (zb) {
 			dprintf_zfs("suspending at bookmark "
 			    "%llx/%llx/%llx/%llx\n",
@@ -2587,9 +2592,22 @@ dsl_scan_ddt(dsl_scan_t *scn, dmu_tx_t *tx)
 			break;
 	}
 
-	zfs_dbgmsg("scanned %llu ddt entries with class_max = %u; "
-	    "suspending=%u", (longlong_t)n,
-	    (int)scn->scn_phys.scn_ddt_class_max, (int)scn->scn_suspending);
+	if (error == EAGAIN) {
+		/* Forced log flush still running; see ddt_walk_init(). */
+		(void) dsl_scan_check_suspend(scn, NULL);
+		error = 0;
+
+		zfs_dbgmsg("waiting for ddt to become ready for scan "
+		    "on %s with class_max = %u; suspending=%u",
+		    scn->scn_dp->dp_spa->spa_name,
+		    (int)scn->scn_phys.scn_ddt_class_max,
+		    (int)scn->scn_suspending);
+	} else {
+		zfs_dbgmsg("scanned %llu ddt entries with class_max = %u; "
+		    "suspending=%u", (longlong_t)n,
+		    (int)scn->scn_phys.scn_ddt_class_max,
+		    (int)scn->scn_suspending);
+	}
 
 	ASSERT(error == 0 || error == ENOENT);
 	ASSERT(error != ENOENT ||

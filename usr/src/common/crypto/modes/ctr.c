@@ -37,7 +37,8 @@
 
 #include <sys/debug.h>
 #include <sys/types.h>
-#define	INLINE_CRYPTO_GET_PTRS
+#include <sys/strsun.h>
+#include <sys/sysmacros.h>
 #include <modes/modes.h>
 #include <sys/crypto/common.h>
 #include <sys/crypto/impl.h>
@@ -168,34 +169,78 @@ ctr_xor(ctr_ctx_t *ctx, const uint8_t *in, uint8_t *out, size_t outlen,
 }
 
 /*
- * Determine whether the bulk CTR helper (cipher_ctr) may be used for a
- * request of `nblocks' blocks.  cipher_ctr advances the counter with
- * plain 64-bit arithmetic on the lower counter word, which matches the
- * generic masked counter semantics (ctr_lower_mask/ctr_upper_mask, i.e.
- * a counter of ulCounterBits < 128 that must wrap within its field
- * without disturbing the nonce bits) only as long as no wrap of the
- * masked counter field can occur.  Allow the fastpath only when this
- * request cannot wrap; otherwise the generic per-block path performs
- * the proper masked counter stepping.
+ * Of a request of `nblocks' blocks, return how many leading blocks the
+ * bulk CTR helper (cipher_ctr) may process.  cipher_ctr advances the
+ * counter with plain 64-bit arithmetic on the lower counter word, which
+ * matches the generic masked counter semantics (ctr_lower_mask/
+ * ctr_upper_mask, i.e. a counter of ulCounterBits < 128 that must wrap
+ * within its field without disturbing the nonce bits) only as long as
+ * no wrap of the masked counter field can occur.
+ *
+ * The bulk helper may therefore be used up to, but not across, the
+ * block at which the counter would wrap.  Rather than rejecting the
+ * whole request when a wrap falls inside it, return the number of
+ * blocks before the wrap so the caller can run the bulk helper over
+ * those and leave the remainder to the generic per-block path, which
+ * does the proper masked counter stepping.  The return value is bounded
+ * by `nblocks', so it cannot overflow size_t.
  */
-static boolean_t
-ctr_fastpath_counter_ok(const ctr_ctx_t *ctx, size_t nblocks)
+static size_t
+ctr_fastpath_blocks(const ctr_ctx_t *ctx, size_t nblocks)
 {
 	uint64_t cur = ntohll(ctx->ctr_cb[1]);
+	uint64_t headroom;
 
 	if (ctx->ctr_upper_mask == 0) {
 		uint64_t mask = ntohll(ctx->ctr_lower_mask);
 
-		return (nblocks <= mask - (cur & mask));
+		headroom = mask - (cur & mask);
+	} else {
+		/*
+		 * Counter wider than 64 bits: cipher_ctr implementations
+		 * only propagate the lower-word carry into the upper word
+		 * on some code paths, so require that the lower 64-bit
+		 * word cannot wrap during the bulk portion either.
+		 */
+		headroom = UINT64_MAX - cur;
 	}
 
-	/*
-	 * Counter wider than 64 bits: cipher_ctr implementations only
-	 * propagate the lower-word carry into the upper word on some
-	 * code paths, so require that the lower 64-bit word cannot wrap
-	 * during this request.
-	 */
-	return (nblocks <= UINT64_MAX - cur);
+	if (headroom < (uint64_t)nblocks) {
+		return ((size_t)headroom);
+	}
+
+	return (nblocks);
+}
+
+/*
+ * Return the number of bytes `out' can take from its current cd_offset
+ * to the end of the underlying buffer: the raw buffer, all iovecs of the
+ * uio, or all mblks of the b_cont chain.
+ */
+static size_t
+ctr_out_space(crypto_data_t *out)
+{
+	size_t total = 0;
+
+	switch (out->cd_format) {
+	case CRYPTO_DATA_RAW:
+		total = out->cd_raw.iov_len;
+		break;
+	case CRYPTO_DATA_UIO:
+		for (int i = 0; i < out->cd_uio->uio_iovcnt; i++)
+			total += out->cd_uio->uio_iov[i].iov_len;
+		break;
+	case CRYPTO_DATA_MBLK:
+		for (mblk_t *mp = out->cd_mp; mp != NULL; mp = mp->b_cont)
+			total += MBLKL(mp);
+		break;
+	default:
+		return (0);
+	}
+
+	if ((size_t)out->cd_offset >= total)
+		return (0);
+	return (total - (size_t)out->cd_offset);
 }
 
 /*
@@ -210,11 +255,11 @@ ctr_mode_contiguous_blocks(ctr_ctx_t *ctx, char *in, size_t in_length,
     uint64_t len, uint64_t counter[2]))
 {
 	size_t in_remainder = in_length;
+	size_t fastpath_len = 0;
+	uint8_t *outp;
+	size_t outlen;
 	uint8_t *inp = (uint8_t *)in;
-	void *iov_or_mp;
-	offset_t offset;
 	uint8_t *out_data;
-	uint8_t *out_data_remainder;
 	size_t out_data_len;
 
 	if (block_size > sizeof (ctx->ctr_keystream))
@@ -230,10 +275,18 @@ ctr_mode_contiguous_blocks(ctr_ctx_t *ctx, char *in, size_t in_length,
 		return (CRYPTO_ENCRYPTED_DATA_LEN_RANGE);
 
 	/*
-	 * This check guarantees 'out' contains sufficient space for
-	 * the resulting output.
+	 * This check guarantees 'out' contains sufficient space for the
+	 * resulting output, so that the loop at the end always finds a
+	 * segment to write to.  It is made against the size of the
+	 * underlying buffer rather than cd_length: cd_offset is absolute,
+	 * but cd_length counts from the offset the caller started at,
+	 * which is no longer known here once earlier calls of the same
+	 * operation have advanced cd_offset.  Comparing the two rejected
+	 * every update whose output did not start at offset 0.  Whether
+	 * the output fits the caller's cd_length is checked by the
+	 * provider before it gets here (e.g. aes_encrypt_update()).
 	 */
-	if (out->cd_offset + in_length > out->cd_length)
+	if (in_length > ctr_out_space(out))
 		return (CRYPTO_BUFFER_TOO_SMALL);
 
 	if (ctr_fastpath_enabled && cipher_ctr != NULL &&
@@ -285,84 +338,86 @@ ctr_mode_contiguous_blocks(ctr_ctx_t *ctx, char *in, size_t in_length,
 
 	/*
 	 * CTR fastpath: block-aligned input written in bulk by cipher_ctr
-	 * into a single contiguous output buffer.
+	 * into the output segment at the current output position, which
+	 * must be able to take the whole write (crypto_data_contig()).
 	 *
 	 * ctr_offset must be 0, i.e. no bytes of the keystream block for
 	 * the current counter value in ctr_cb may have been handed out
 	 * yet, because the fastpath consumes that counter value for its
-	 * first block.  ctr_fastpath_counter_ok() ensures the masked
-	 * counter field cannot wrap within this request, making
-	 * cipher_ctr's plain 64-bit counter arithmetic equivalent to the
-	 * generic masked stepping in ctr_new_keyblock().
+	 * first block.  ctr_fastpath_blocks() limits the bulk portion to
+	 * the blocks before the masked counter field would wrap, over
+	 * which cipher_ctr's plain 64-bit counter arithmetic is
+	 * equivalent to the generic masked stepping in
+	 * ctr_new_keyblock(); any blocks from the wrap onwards fall
+	 * through to the generic loop below.
 	 */
 	if (ctr_fastpath_enabled && cipher_ctr != NULL && in_length > 0 &&
 	    ctx->ctr_remainder_len == 0 && ctx->ctr_offset == 0 &&
 	    (in_length & (block_size - 1)) == 0 &&
-	    CRYPTO_DATA_IS_CONTIGUOUS(out, in_length) &&
-	    ctr_fastpath_counter_ok(ctx, in_length / block_size)) {
-		uint64_t counter[2];
-		uint8_t *outp = CRYPTO_DATA_FIRST_BLOCK(out);
+	    (outp = crypto_data_contig(out, &outlen)) != NULL &&
+	    outlen >= in_length) {
+		size_t nblocks = ctr_fastpath_blocks(ctx,
+		    in_length / block_size);
 
-		counter[0] = ctx->ctr_cb[0];
-		counter[1] = ctx->ctr_cb[1];
-		cipher_ctr(ctx->ctr_keysched, (uint8_t *)in, outp, in_length,
-		    counter);
-		ctx->ctr_cb[0] = counter[0];
-		ctx->ctr_cb[1] = counter[1];
+		if (nblocks > 0) {
+			uint64_t counter[2];
 
-		/*
-		 * Restore the invariant that ctr_keystream holds the
-		 * (unconsumed, ctr_offset == 0) keystream block for the
-		 * counter value in ctr_cb, so that a subsequent slow-path
-		 * call continues the keystream correctly instead of
-		 * reusing the stale block generated for a counter value
-		 * the bulk operation above has already consumed.
-		 */
-		cipher(ctx->ctr_keysched, (uint8_t *)ctx->ctr_cb,
-		    (uint8_t *)ctx->ctr_keystream);
-		ctx->ctr_offset = 0;
+			fastpath_len = nblocks * block_size;
 
-		out->cd_offset += in_length;
-		return (CRYPTO_SUCCESS);
+			counter[0] = ctx->ctr_cb[0];
+			counter[1] = ctx->ctr_cb[1];
+			cipher_ctr(ctx->ctr_keysched, (uint8_t *)in, outp,
+			    fastpath_len, counter);
+			ctx->ctr_cb[0] = counter[0];
+			ctx->ctr_cb[1] = counter[1];
+
+			/*
+			 * Restore the invariant that ctr_keystream holds
+			 * the (unconsumed, ctr_offset == 0) keystream
+			 * block for the counter value in ctr_cb, so that
+			 * a subsequent slow-path call continues the
+			 * keystream correctly instead of reusing the
+			 * stale block generated for a counter value the
+			 * bulk operation above has already consumed.
+			 */
+			cipher(ctx->ctr_keysched, (uint8_t *)ctx->ctr_cb,
+			    (uint8_t *)ctx->ctr_keystream);
+			ctx->ctr_offset = 0;
+
+			/*
+			 * Advance cd_offset over the bulk output now, so
+			 * that the loop below resumes writing where the
+			 * bulk output ended.
+			 */
+			out->cd_offset += fastpath_len;
+
+			if (fastpath_len == in_length) {
+				return (CRYPTO_SUCCESS);
+			}
+
+			inp += fastpath_len;
+			in_remainder -= fastpath_len;
+		}
 	}
 
-	crypto_init_ptrs(out, &iov_or_mp, &offset);
-
-	/* Now XOR the output with the keystream */
+	/*
+	 * Now XOR the output with the keystream, one output segment at a
+	 * time.  The output position is resolved afresh from cd_offset
+	 * for every segment, so a request whose output spans several
+	 * iovecs or mblks (including empty ones) is written contiguously.
+	 * The space check above guarantees that a segment is always found.
+	 */
 	while (in_remainder > 0) {
-		/*
-		 * If out is a uio_t or an mblk_t, in_remainder might be
-		 * larger than an individual iovec_t or mblk_t in out.
-		 * crypto_get_ptrs uses the value of offset to set the
-		 * the value of out_data to the correct address for writing
-		 * and sets out_data_len to reflect the largest amount of data
-		 * (up to in_remainder) that can be written to out_data. It
-		 * also increments offset by out_data_len. out_data_remainder
-		 * is set to the start of the next segment for writing, however
-		 * it is not used here since the updated value of offset
-		 * will be used in the next loop iteration to locate the
-		 * next mblk_t/iovec_t. Since the sum of the size of all data
-		 * buffers in 'out' (out->cd_length) was checked immediately
-		 * prior to starting the loop, we should always terminate
-		 * the loop.
-		 */
-		crypto_get_ptrs(out, &iov_or_mp, &offset, &out_data,
-		    &out_data_len, &out_data_remainder, in_remainder);
-
-		/*
-		 * crypto_get_ptrs() should guarantee these, but act as a
-		 * safeguard in case the behavior ever changes.
-		 */
-		ASSERT3U(out_data_len, <=, in_remainder);
-		ASSERT3U(out_data_len, >, 0);
+		out_data = crypto_data_contig(out, &out_data_len);
+		VERIFY3P(out_data, !=, NULL);
+		out_data_len = MIN(out_data_len, in_remainder);
 
 		ctr_xor(ctx, inp, out_data, out_data_len, block_size, cipher);
 
+		out->cd_offset += out_data_len;
 		inp += out_data_len;
 		in_remainder -= out_data_len;
 	}
-
-	out->cd_offset += in_length;
 
 	return (CRYPTO_SUCCESS);
 }

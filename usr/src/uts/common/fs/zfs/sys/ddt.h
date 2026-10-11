@@ -286,10 +286,11 @@ struct ddt_entry {
 	ddt_class_t	dde_class;
 	uint8_t		dde_loading;
 	uint8_t		dde_loaded;
-	uint8_t		dde_overquota;	/* unusable: DDT over quota */
+	uint8_t		dde_overquota;	/* unusable: over quota/load error */
 	uint8_t		dde_logged;	/* loaded from the DDT log */
 	uint8_t		dde_from_flushing; /* rehydrated from flushing log */
 	uint64_t	dde_waiters;	/* count of waiters on dde_cv */
+	int		dde_load_error;	/* why unusable: 0 = over quota */
 	kcondvar_t	dde_cv;
 	ddt_entry_io_t	*dde_io;	/* lazy I/O state; protects dde_phys */
 	/*
@@ -468,6 +469,8 @@ extern void ddt_enter(ddt_t *ddt);
 extern void ddt_exit(ddt_t *ddt);
 extern ddt_entry_t *ddt_lookup(ddt_t *ddt, const blkptr_t *bp,
     boolean_t verify);
+extern ddt_entry_t *ddt_lookup_error(ddt_t *ddt, const blkptr_t *bp,
+    boolean_t verify, int *errorp);
 extern void ddt_prefetch(spa_t *spa, const blkptr_t *bp);
 extern void ddt_prefetch_all(spa_t *spa);
 extern void ddt_remove(ddt_t *ddt, ddt_entry_t *dde);
@@ -487,6 +490,8 @@ extern void ddt_create(spa_t *spa);
 extern int ddt_load(spa_t *spa);
 extern void ddt_unload(spa_t *spa);
 extern void ddt_sync(spa_t *spa, uint64_t txg);
+extern void ddt_walk_init(spa_t *spa, uint64_t txg);
+extern boolean_t ddt_walk_ready(spa_t *spa);
 extern int ddt_walk(spa_t *spa, ddt_bookmark_t *ddb, ddt_entry_t *dde);
 
 

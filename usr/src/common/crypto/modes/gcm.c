@@ -69,7 +69,6 @@
 #include <sys/cmn_err.h>
 #include <sys/types.h>
 #include <sys/kmem.h>
-#define	INLINE_CRYPTO_GET_PTRS
 #include <modes/modes.h>
 #include <sys/crypto/common.h>
 #include <sys/crypto/impl.h>
@@ -124,19 +123,19 @@ static int intel_pclmulqdq_instruction_present(void);
 #define	GCM_ACCEL_SAVESTATE \
 	uint8_t savestate[16*16+8] __attribute__((aligned(16)))
 #define	GCM_ACCEL_ENTER \
-    do { \
-	    if (intel_pclmulqdq_instruction_present()) { \
-		    kpreempt_disable(); \
-		    gcm_accel_save(savestate); \
-	    } \
-    } while (0)
+	do { \
+		if (intel_pclmulqdq_instruction_present()) { \
+			kpreempt_disable(); \
+			gcm_accel_save(savestate); \
+		} \
+	} while (0)
 #define	GCM_ACCEL_EXIT \
-    do { \
-	    if (intel_pclmulqdq_instruction_present()) { \
-		    gcm_accel_restore(savestate); \
-		    kpreempt_enable(); \
-	    } \
-    } while (0)
+	do { \
+		if (intel_pclmulqdq_instruction_present()) { \
+			gcm_accel_restore(savestate); \
+			kpreempt_enable(); \
+		} \
+	} while (0)
 #else	/* !_KERNEL */
 #define	GCM_ACCEL_SAVESTATE
 #define	GCM_ACCEL_ENTER
@@ -204,6 +203,45 @@ gcm_mul(uint64_t *x_in, uint64_t *y, uint64_t *res)
 }
 
 
+/*
+ * GHASH a single block `d' into the accumulator, leaving the product in
+ * `t'.
+ *
+ * On x86-64 with PCLMULQDQ, prefer gcm_ghash_clmul() with the
+ * precomputed key table in gcm_H_table over gcm_mul() against the raw
+ * subkey gcm_H.  gcm_ghash_clmul() called with a length of one block is
+ * exactly one GHASH step, so the two are equivalent; the table form is
+ * cheaper because it skips rebuilding the multiplier.  The table is
+ * built in gcm_init_ctx() under the same predicate and before any
+ * GHASH() call.
+ *
+ * This substitution is only valid when the product lands back in
+ * gcm_ghash, since gcm_ghash_clmul() updates the accumulator in place.
+ * That holds at every call site except the J0 derivation in
+ * gcm_format_initial_blocks(), which multiplies the accumulator into
+ * gcm_J0; the (t) test below picks the generic form there.  It is a
+ * constant expression at every call site and so folds away.
+ *
+ * Callers must already be inside GCM_ACCEL_ENTER/EXIT.  This is not a
+ * new requirement: gcm_mul() dispatches to gcm_mul_pclmulqdq() and so
+ * uses XMM registers on exactly the same hardware.
+ */
+#ifdef	__amd64
+#define	GHASH(c, d, t) \
+	do { \
+		if ((void *)(t) == (void *)(c)->gcm_ghash && \
+		    intel_pclmulqdq_instruction_present()) { \
+			gcm_ghash_clmul((c)->gcm_ghash, (c)->gcm_H_table, \
+			    (const uint8_t *)(d), sizeof ((c)->gcm_ghash)); \
+		} else { \
+			xor_block((uint8_t *)(d), \
+			    (uint8_t *)(c)->gcm_ghash); \
+			gcm_mul((uint64_t *)(void *)(c)->gcm_ghash, \
+			    (c)->gcm_H, (uint64_t *)(void *)(t)); \
+		} \
+		_NOTE(CONSTCOND) \
+	} while (0)
+#else
 #define	GHASH(c, d, t) \
 	do { \
 		xor_block((uint8_t *)(d), (uint8_t *)(c)->gcm_ghash); \
@@ -211,6 +249,7 @@ gcm_mul(uint64_t *x_in, uint64_t *y, uint64_t *res)
 		    (uint64_t *)(void *)(t)); \
 		_NOTE(CONSTCOND) \
 	} while (0)
+#endif	/* __amd64 */
 
 boolean_t gcm_fastpath_enabled = B_TRUE;
 
@@ -366,6 +405,8 @@ gcm_process_contiguous_blocks(gcm_ctx_t *ctx, char *data, size_t length,
 	uint8_t *blockp;
 	void *iov_or_mp;
 	offset_t offset;
+	uint8_t *outp;
+	size_t outlen;
 	int rv = CRYPTO_SUCCESS;
 
 	if (length == 0)
@@ -374,20 +415,20 @@ gcm_process_contiguous_blocks(gcm_ctx_t *ctx, char *data, size_t length,
 	/*
 	 * GCM fastpath: when the input is block-aligned, nothing is
 	 * buffered from a previous call, the 32-bit counter won't
-	 * overflow and the output is a single contiguous buffer with
-	 * room for the entire contiguous write (CRYPTO_DATA_HAS_ROOM;
-	 * otherwise fall back to the generic path and its per-segment
-	 * handling), gcm_fastpath128() handles the whole request at once.
+	 * overflow and the output segment at the current output position
+	 * can take the entire contiguous write (crypto_data_contig()) with
+	 * room in the object as a whole (CRYPTO_DATA_HAS_ROOM; otherwise
+	 * fall back to the generic path and its per-segment handling),
+	 * gcm_fastpath128() handles the whole request at once.
 	 */
 	if (gcm_fastpath_enabled && block_size == 16 &&
 	    ctx->gcm_remainder_len == 0 && (length & (block_size - 1)) == 0 &&
 	    (ntohll(ctx->gcm_cb[1]) & COUNTER_MASK) <=
 	    COUNTER_MASK - length / block_size &&
-	    CRYPTO_DATA_IS_CONTIGUOUS(out, length) &&
-	    CRYPTO_DATA_HAS_ROOM(out, length)) {
-		gcm_fastpath128(ctx, (uint8_t *)data, length,
-		    CRYPTO_DATA_FIRST_BLOCK(out), encrypt, encrypt_block,
-		    xor_block, cipher_ctr);
+	    (outp = crypto_data_contig(out, &outlen)) != NULL &&
+	    outlen >= length && CRYPTO_DATA_HAS_ROOM(out, length)) {
+		gcm_fastpath128(ctx, (uint8_t *)data, length, outp, encrypt,
+		    encrypt_block, xor_block, cipher_ctr);
 		out->cd_offset += length;
 		goto out;
 	}
@@ -405,9 +446,8 @@ gcm_process_contiguous_blocks(gcm_ctx_t *ctx, char *data, size_t length,
 				goto out;
 			}
 
-			bcopy(datap,
-			    (uint8_t *)ctx->gcm_remainder + ctx->gcm_remainder_len,
-			    need);
+			bcopy(datap, (uint8_t *)ctx->gcm_remainder +
+			    ctx->gcm_remainder_len, need);
 			blockp = (uint8_t *)ctx->gcm_remainder;
 		} else {
 			blockp = datap;
@@ -473,6 +513,8 @@ gcm_mode_encrypt_contiguous_blocks(gcm_ctx_t *ctx, char *data, size_t length,
 	uint8_t *blockp;
 	void *iov_or_mp;
 	offset_t offset;
+	uint8_t *outp;
+	size_t outlen;
 	GCM_ACCEL_SAVESTATE;
 
 	if (length + ctx->gcm_remainder_len < block_size) {
@@ -491,10 +533,19 @@ gcm_mode_encrypt_contiguous_blocks(gcm_ctx_t *ctx, char *data, size_t length,
 	 * per-block path, run the block-aligned middle through the
 	 * fastpath and buffer the sub-block tail.  This is done before
 	 * GCM_ACCEL_ENTER so that the FPU state is never saved twice.
-	 * GMAC never takes the fastpath.
+	 *
+	 * GMAC takes the same split: the head completes the buffered AAD
+	 * block on the per-block path, the body goes to the bulk GHASH
+	 * fastpath below and the tail is buffered.  GMAC produces no
+	 * output (`out' may be absent, or only a small signature buffer),
+	 * so it does not depend on `out' at all.  This matters for SMB
+	 * signing, which feeds GMAC a 64-byte header followed by uio
+	 * segments of arbitrary length; without the split, everything
+	 * after the first unaligned segment would be hashed one block
+	 * at a time.
 	 */
-	if (gcm_fastpath_enabled && block_size == 16 && out != NULL &&
-	    (ctx->gcm_flags & GMAC_MODE) == 0 && length > block_size) {
+	if (gcm_fastpath_enabled && block_size == 16 && length > block_size &&
+	    (out != NULL || (ctx->gcm_flags & GMAC_MODE) != 0)) {
 		size_t head = (ctx->gcm_remainder_len == 0) ? 0 :
 		    block_size - ctx->gcm_remainder_len;
 		size_t body = (length - head) & ~(block_size - 1);
@@ -537,18 +588,18 @@ gcm_mode_encrypt_contiguous_blocks(gcm_ctx_t *ctx, char *data, size_t length,
 	    ctx->gcm_remainder_len == 0 && (length & (block_size - 1)) == 0 &&
 	    (ntohll(ctx->gcm_cb[1]) & COUNTER_MASK) <=
 	    COUNTER_MASK - length / block_size &&
-	    CRYPTO_DATA_IS_CONTIGUOUS(out, length) &&
-	    CRYPTO_DATA_HAS_ROOM(out, length)) {
-		gcm_fastpath128(ctx, (uint8_t *)data, length,
-		    CRYPTO_DATA_FIRST_BLOCK(out), B_TRUE, encrypt_block,
-		    xor_block, cipher_ctr);
+	    (outp = crypto_data_contig(out, &outlen)) != NULL &&
+	    outlen >= length && CRYPTO_DATA_HAS_ROOM(out, length)) {
+		gcm_fastpath128(ctx, (uint8_t *)data, length, outp, B_TRUE,
+		    encrypt_block, xor_block, cipher_ctr);
 		out->cd_offset += length;
 		goto out;
 	}
 
 	/*
 	 * GMAC fastpath: bulk PCLMULQDQ GHASH of AAD, no ciphertext produced.
-	 * Gets SMB signing GCM-tier throughput for block-aligned input.
+	 * Gets SMB signing GCM-tier throughput for block-aligned input;
+	 * unaligned input is split into head/body/tail above.
 	 */
 	if (gcm_fastpath_enabled && block_size == 16 &&
 	    (ctx->gcm_flags & GMAC_MODE) != 0 &&
@@ -1066,7 +1117,10 @@ gcm_decrypt_final(gcm_ctx_t *ctx, crypto_data_t *out, size_t block_size,
 				goto errout;
 
 			last_blk_len -= block_size;
-			/* gcm_process_contiguous_blocks already updated gcm_processed_data_len */
+			/*
+			 * gcm_process_contiguous_blocks() has already
+			 * updated gcm_processed_data_len.
+			 */
 			ctx->gcm_last_input_fill -= block_size;
 			bcopy(ctx->gcm_last_input + block_size,
 			    ctx->gcm_last_input, ctx->gcm_last_input_fill);
@@ -1123,8 +1177,13 @@ gcm_decrypt_final(gcm_ctx_t *ctx, crypto_data_t *out, size_t block_size,
 
 	GCM_ACCEL_EXIT;
 
-	/* compare the input authentication tag with what we calculated */
-	if (bcmp(&ctx->gcm_last_input, ctx->gcm_ghash,
+	/*
+	 * Compare the input authentication tag with what we calculated.
+	 * This must be constant time: the tag under comparison is
+	 * attacker-supplied, and a byte-at-a-time early exit would let a
+	 * forgery be built one byte at a time.
+	 */
+	if (crypto_memcmp(&ctx->gcm_last_input, ctx->gcm_ghash,
 	    ctx->gcm_tag_len) != 0)
 		return (CRYPTO_INVALID_MAC);
 

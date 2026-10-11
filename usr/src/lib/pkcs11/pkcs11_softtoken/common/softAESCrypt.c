@@ -999,24 +999,24 @@ soft_aes_decrypt_update(soft_session_t *session_p, CK_BYTE_PTR pEncryptedData,
 		break;
 	case CKM_AES_CBC_PAD:
 	/*
- 	* CKM_AES_CBC_PAD uses libsoftcrypto's CBC implementation.
-	* See libpkcs11(3LIB) for the general PKCS#7 padding contract.
- 	*
- 	* Buffering strategy for CBC_PAD decryption:
- 	*
- 	* We cannot strip padding until the final block is known, so we must
- 	* always hold back at least one full block.  For each C_DecryptUpdate:
- 	*
- 	*  - < AES_BLOCK_LEN+1 bytes available: buffer in ac_remainder.
- 	*  - >= AES_BLOCK_LEN+1, exact multiple of AES_BLOCK_LEN: decrypt all
- 	*    but the last block; save that block in ac_remainder.
- 	*  - >= AES_BLOCK_LEN+1, non-multiple: decrypt all full blocks;
- 	*    ac_remainder holds the sub-block tail (< AES_BLOCK_LEN bytes).
- 	*
- 	* ac_remainder never exceeds AES_BLOCK_LEN bytes.  If it is not
- 	* exactly AES_BLOCK_LEN bytes when C_DecryptFinal() is called,
- 	* the input is invalid and CKR_DATA_LEN_RANGE is returned.
- 	*/
+	 * CKM_AES_CBC_PAD uses libsoftcrypto's CBC implementation.
+	 * See libpkcs11(3LIB) for the general PKCS#7 padding contract.
+	 *
+	 * Buffering strategy for CBC_PAD decryption:
+	 *
+	 * We cannot strip padding until the final block is known, so we must
+	 * always hold back at least one full block.  For each C_DecryptUpdate:
+	 *
+	 *  - < AES_BLOCK_LEN+1 bytes available: buffer in ac_remainder.
+	 *  - >= AES_BLOCK_LEN+1, exact multiple of AES_BLOCK_LEN: decrypt all
+	 *    but the last block; save that block in ac_remainder.
+	 *  - >= AES_BLOCK_LEN+1, non-multiple: decrypt all full blocks;
+	 *    ac_remainder holds the sub-block tail (< AES_BLOCK_LEN bytes).
+	 *
+	 * ac_remainder never exceeds AES_BLOCK_LEN bytes.  If it is not
+	 * exactly AES_BLOCK_LEN bytes when C_DecryptFinal() is called,
+	 * the input is invalid and CKR_DATA_LEN_RANGE is returned.
+	 */
 		VERIFY3U(aes_ctx->ac_remainder_len, <=, AES_BLOCK_LEN);
 		if (in_len >= SIZE_MAX - AES_BLOCK_LEN)
 			return (CKR_ENCRYPTED_DATA_LEN_RANGE);

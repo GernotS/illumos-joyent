@@ -4017,27 +4017,6 @@ zfs_ioc_destroy(zfs_cmd_t *zc)
 	return (err);
 }
 
-/*
- * innvl: {
- *     "initialize_command" -> POOL_INITIALIZE_{CANCEL|START|SUSPEND} (uint64)
- *     "initialize_vdevs": { -> guids to initialize (nvlist)
- *         "vdev_path_1": vdev_guid_1, (uint64),
- *         "vdev_path_2": vdev_guid_2, (uint64),
- *         ...
- *     },
- * }
- *
- * outnvl: {
- *     "initialize_vdevs": { -> initialization errors (nvlist)
- *         "vdev_path_1": errno, see function body for possible errnos (uint64)
- *         "vdev_path_2": errno, ... (uint64)
- *         ...
- *     }
- * }
- *
- * EINVAL is returned for an unknown command or if any of the provided vdev
- * guids have be specified with a type other than uint64.
- */
 static int
 zfs_ioc_pool_prefetch(const char *poolname, nvlist_t *innvl, nvlist_t *outnvl)
 {
@@ -4095,17 +4074,17 @@ zfs_ioc_ddt_prune(const char *poolname, nvlist_t *innvl, nvlist_t *outnvl)
 	    nvlist_lookup_uint64(innvl, ZPOOL_DDT_PRUNE_AMOUNT, &amount) != 0)
 		return (SET_ERROR(EINVAL));
 
-	if (unit != ZPOOL_DDT_PRUNE_AGE && unit != ZPOOL_DDT_PRUNE_PERCENTAGE)
-		return (SET_ERROR(EINVAL));
-
-	if (unit == ZPOOL_DDT_PRUNE_PERCENTAGE &&
-	    (amount == 0 || amount > 100))
-		return (SET_ERROR(EINVAL));
-
 	error = spa_open(poolname, &spa, FTAG);
 	if (error != 0)
 		return (error);
 
+	/* Only fast dedup tables can be pruned, as upstream OpenZFS. */
+	if (!spa_feature_is_enabled(spa, SPA_FEATURE_FAST_DEDUP)) {
+		spa_close(spa, FTAG);
+		return (SET_ERROR(ENOTSUP));
+	}
+
+	/* ddt_prune_unique_entries() validates unit and amount. */
 	error = ddt_prune_unique_entries(spa,
 	    (zpool_ddt_prune_unit_t)unit, amount);
 
@@ -4118,6 +4097,27 @@ static const zfs_ioc_key_t zfs_keys_ddt_prune[] = {
 	{ZPOOL_DDT_PRUNE_AMOUNT,	DATA_TYPE_UINT64,	0},
 };
 
+/*
+ * innvl: {
+ *     "initialize_command" -> POOL_INITIALIZE_{CANCEL|START|SUSPEND} (uint64)
+ *     "initialize_vdevs": { -> guids to initialize (nvlist)
+ *         "vdev_path_1": vdev_guid_1, (uint64),
+ *         "vdev_path_2": vdev_guid_2, (uint64),
+ *         ...
+ *     },
+ * }
+ *
+ * outnvl: {
+ *     "initialize_vdevs": { -> initialization errors (nvlist)
+ *         "vdev_path_1": errno, see function body for possible errnos (uint64)
+ *         "vdev_path_2": errno, ... (uint64)
+ *         ...
+ *     }
+ * }
+ *
+ * EINVAL is returned for an unknown command or if any of the provided vdev
+ * guids have be specified with a type other than uint64.
+ */
 static const zfs_ioc_key_t zfs_keys_pool_initialize[] = {
 	{ZPOOL_INITIALIZE_COMMAND,	DATA_TYPE_UINT64,	0},
 	{ZPOOL_INITIALIZE_VDEVS,	DATA_TYPE_NVLIST,	0}

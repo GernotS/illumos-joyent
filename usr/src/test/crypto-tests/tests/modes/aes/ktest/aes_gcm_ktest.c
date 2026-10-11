@@ -55,8 +55,9 @@
 #define	GCM_TAG_LEN	16
 #define	GCM_TAG_BITS	(GCM_TAG_LEN * 8)
 
-/* Forward declaration for CTR suite registration (aes_ctr_ktest.c). */
+/* Forward declarations for suite registration in the other files. */
 extern int aes_ctr_ktest_register(ktest_module_hdl_t *);
+extern int aes_modes_ktest_register(ktest_module_hdl_t *);
 
 static const uint8_t g_key[AES_KEY_LEN] = {
 	0xfe, 0xff, 0xe9, 0x92, 0x86, 0x65, 0x73, 0x1c,
@@ -194,29 +195,29 @@ run_scatter(ktest_ctx_hdl_t *ctx,
 		size_t slen = (i == nseg - 1) ? last_seg_len : seg_len;
 		segs[i] = kmem_zalloc(slen, KM_SLEEP);
 		iovs[i].iov_base = (caddr_t)segs[i];
-		iovs[i].iov_len  = slen;
+		iovs[i].iov_len = slen;
 	}
 
 	bzero(&uio, sizeof (uio));
-	uio.uio_iov    = iovs;
+	uio.uio_iov = iovs;
 	uio.uio_iovcnt = (int)nseg;
 	uio.uio_segflg = UIO_SYSSPACE;
-	uio.uio_resid  = (ssize_t)pt_len;
+	uio.uio_resid = (ssize_t)pt_len;
 
 	bzero(&out, sizeof (out));
-	out.cd_format  = CRYPTO_DATA_UIO;
-	out.cd_offset  = 0;
-	out.cd_length  = pt_len;
-	out.cd_uio     = &uio;
+	out.cd_format = CRYPTO_DATA_UIO;
+	out.cd_offset = 0;
+	out.cd_length = pt_len;
+	out.cd_uio = &uio;
 
 	if (gcm_mech_init(&mech, &gcmp) != 0) {
 		KT_ERROR(ctx, "CKM_AES_GCM not available");
 		goto cleanup;
 	}
 
-	key.ck_format  = CRYPTO_KEY_RAW;
-	key.ck_data    = (void *)(uintptr_t)g_key;
-	key.ck_length  = AES_KEY_LEN * 8;
+	key.ck_format = CRYPTO_KEY_RAW;
+	key.ck_data = (void *)(uintptr_t)g_key;
+	key.ck_length = AES_KEY_LEN * 8;
 
 	rv = crypto_decrypt_init(&mech, &key, NULL, &cctx, NULL);
 	if (rv != CRYPTO_SUCCESS) {
@@ -238,7 +239,8 @@ run_scatter(ktest_ctx_hdl_t *ctx,
 
 		/*
 		 * crypto_decrypt_update() writes starting at out.cd_offset and,
-		 * on return, sets out.cd_length to the number of plaintext bytes
+		 * on return, sets out.cd_length to the number of
+		 * plaintext bytes
 		 * produced by this call while restoring out.cd_offset to its
 		 * pre-call value.  The caller must advance the output position
 		 * itself, so reset offset/length to the remaining region before
@@ -398,7 +400,7 @@ scatter_4seg_4chunks_test(ktest_ctx_hdl_t *ctx)
 void
 scatter_3seg_byte_by_byte_test(ktest_ctx_hdl_t *ctx)
 {
-	const size_t pt_len = 64;	/* 4 AES blocks, manageable chunk count */
+	const size_t pt_len = 64;	/* 4 AES blocks */
 	size_t ct_len;
 
 	uint8_t *ct = gcm_encrypt_raw(pt_len, &ct_len, ctx);
@@ -450,7 +452,7 @@ scatter_nonaligned_3seg_test(ktest_ctx_hdl_t *ctx)
 }
 
 /*
- * ── Suite: gcm_update_uio ──────────────────────────────────────────────────
+ * -- Suite: gcm_update_uio --------------------
  *
  * Basic functional tests for CRYPTO_DATA_UIO output from multi-part GCM
  * decrypt.  These exercise the single-segment UIO path (one iovec) before
@@ -503,7 +505,7 @@ uio_single_seg_multi_chunk_test(ktest_ctx_hdl_t *ctx)
 	};
 
 	for (size_t ci = 0; ci < ARRAY_SIZE(cases); ci++) {
-		size_t pt_len  = cases[ci].pt_len;
+		size_t pt_len = cases[ci].pt_len;
 		size_t nchunks = cases[ci].nchunks;
 		size_t ct_len;
 
@@ -516,7 +518,8 @@ uio_single_seg_multi_chunk_test(ktest_ctx_hdl_t *ctx)
 		}
 
 		/* Build chunk sizes: equal splits, last absorbs remainder. */
-		size_t *chunks = kmem_alloc(nchunks * sizeof (size_t), KM_SLEEP);
+		size_t *chunks = kmem_alloc(nchunks * sizeof (size_t),
+		    KM_SLEEP);
 		size_t base = ct_len / nchunks;
 		for (size_t i = 0; i < nchunks - 1; i++)
 			chunks[i] = base;
@@ -536,7 +539,7 @@ uio_single_seg_multi_chunk_test(ktest_ctx_hdl_t *ctx)
 }
 
 /*
- * ── Suite: gcm_update_bufsize ─────────────────────────────────────────────
+ * -- Suite: gcm_update_bufsize --------------------
  *
  * gcm_update_bufsize_test
  *
@@ -545,7 +548,7 @@ uio_single_seg_multi_chunk_test(ktest_ctx_hdl_t *ctx)
  * of accumulated ciphertext so that the final GCM_TAG_LEN bytes fed via
  * update (the actual authentication tag) never appear as plaintext output.
  *
- * Feed schedule: 3 AES blocks of plaintext → 64-byte ciphertext (48 + tag),
+ * Feed schedule: 3 AES blocks of plaintext -> 64-byte ciphertext (48 + tag),
  * delivered in 4 chunks of 16 bytes each.
  *
  *   chunk 0 (ct[0:16]):   buffer fills,  0 bytes of pt out, cd_length stays 48
@@ -557,9 +560,9 @@ uio_single_seg_multi_chunk_test(ktest_ctx_hdl_t *ctx)
 void
 gcm_update_bufsize_test(ktest_ctx_hdl_t *ctx)
 {
-	const size_t	pt_len  = 3 * AES_BLOCK_LEN;		/* 48 bytes */
-	const size_t	ct_len  = pt_len + GCM_TAG_LEN;	/* 64 bytes */
-	const size_t	chunk   = GCM_TAG_LEN;			/* 16 bytes / chunk */
+	const size_t	pt_len = 3 * AES_BLOCK_LEN;		/* 48 bytes */
+	const size_t	ct_len = pt_len + GCM_TAG_LEN;	/* 64 bytes */
+	const size_t	chunk = GCM_TAG_LEN;	/* 16 bytes per chunk */
 	const size_t	nchunks = ct_len / chunk;		/* 4 */
 	const size_t	expected_out[] = { 0, AES_BLOCK_LEN, AES_BLOCK_LEN,
 	    AES_BLOCK_LEN };
@@ -592,19 +595,19 @@ gcm_update_bufsize_test(ktest_ctx_hdl_t *ctx)
 	buf = kmem_zalloc(pt_len, KM_SLEEP);
 
 	iov.iov_base = (caddr_t)buf;
-	iov.iov_len  = pt_len;
+	iov.iov_len = pt_len;
 
 	bzero(&uio, sizeof (uio));
-	uio.uio_iov    = &iov;
+	uio.uio_iov = &iov;
 	uio.uio_iovcnt = 1;
 	uio.uio_segflg = UIO_SYSSPACE;
-	uio.uio_resid  = (ssize_t)pt_len;
+	uio.uio_resid = (ssize_t)pt_len;
 
 	bzero(&out, sizeof (out));
 	out.cd_format = CRYPTO_DATA_UIO;
 	out.cd_offset = 0;
 	out.cd_length = pt_len;
-	out.cd_uio    = &uio;
+	out.cd_uio = &uio;
 
 	if (gcm_mech_init(&mech, &gcmp) != 0) {
 		KT_ERROR(ctx, "CKM_AES_GCM not available");
@@ -612,7 +615,7 @@ gcm_update_bufsize_test(ktest_ctx_hdl_t *ctx)
 	}
 
 	key.ck_format = CRYPTO_KEY_RAW;
-	key.ck_data   = (void *)(uintptr_t)g_key;
+	key.ck_data = (void *)(uintptr_t)g_key;
 	key.ck_length = AES_KEY_LEN * 8;
 
 	rv = crypto_decrypt_init(&mech, &key, NULL, &cctx, NULL);
@@ -627,11 +630,11 @@ gcm_update_bufsize_test(ktest_ctx_hdl_t *ctx)
 		size_t		written;
 
 		bzero(&in, sizeof (in));
-		in.cd_format       = CRYPTO_DATA_RAW;
-		in.cd_offset       = 0;
-		in.cd_length       = chunk;
+		in.cd_format = CRYPTO_DATA_RAW;
+		in.cd_offset = 0;
+		in.cd_length = chunk;
 		in.cd_raw.iov_base = (caddr_t)(ct + i * chunk);
-		in.cd_raw.iov_len  = chunk;
+		in.cd_raw.iov_len = chunk;
 
 		ktest_msg_prepend(ctx, "chunk %zu: ", i);
 
@@ -705,12 +708,12 @@ cleanup:
 }
 
 static struct modlmisc aes_ktest_modlmisc = {
-	.misc_modops   = &mod_miscops,
+	.misc_modops = &mod_miscops,
 	.misc_linkinfo = "aes ktest module"
 };
 
 static struct modlinkage aes_ktest_modlinkage = {
-	.ml_rev     = MODREV_1,
+	.ml_rev = MODREV_1,
 	.ml_linkage = { &aes_ktest_modlmisc, NULL }
 };
 
@@ -744,6 +747,11 @@ _init(void)
 	    gcm_update_bufsize_test, KTEST_FLAG_NONE));
 
 	if ((ret = aes_ctr_ktest_register(km)) != 0) {
+		ktest_free_module(km);
+		return (ret);
+	}
+
+	if ((ret = aes_modes_ktest_register(km)) != 0) {
 		ktest_free_module(km);
 		return (ret);
 	}

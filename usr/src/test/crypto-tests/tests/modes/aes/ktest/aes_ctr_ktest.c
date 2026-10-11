@@ -57,7 +57,7 @@ static const uint8_t ctr_key[CTR_KEY_LEN] = {
  * Build a CKM_AES_CTR crypto_mechanism_t with a 64-bit counter.
  *
  * Counter block layout (16 bytes, big-endian):
- *   cb[0..7]  = nonce (all zeros)
+ *   cb[0..7] = nonce (all zeros)
  *   cb[8..15] = counter_val (big-endian)
  *
  * ulCounterBits = 64 means only cb[8..15] is incremented; cb[0..7] is fixed.
@@ -74,16 +74,16 @@ ctr_mech_init(crypto_mechanism_t *mech, CK_AES_CTR_PARAMS *ctrp,
 	ctrp->ulCounterBits = 64;
 	/* nonce: cb[0..7] = 0x00 (already zeroed by bzero) */
 	/* counter: cb[8..15] = counter_val big-endian */
-	ctrp->cb[8]  = (uint8_t)(counter_val >> 56);
-	ctrp->cb[9]  = (uint8_t)(counter_val >> 48);
+	ctrp->cb[8] = (uint8_t)(counter_val >> 56);
+	ctrp->cb[9] = (uint8_t)(counter_val >> 48);
 	ctrp->cb[10] = (uint8_t)(counter_val >> 40);
 	ctrp->cb[11] = (uint8_t)(counter_val >> 32);
 	ctrp->cb[12] = (uint8_t)(counter_val >> 24);
 	ctrp->cb[13] = (uint8_t)(counter_val >> 16);
-	ctrp->cb[14] = (uint8_t)(counter_val >>  8);
-	ctrp->cb[15] = (uint8_t)(counter_val      );
+	ctrp->cb[14] = (uint8_t)(counter_val >> 8);
+	ctrp->cb[15] = (uint8_t)(counter_val);
 
-	mech->cm_param     = (caddr_t)ctrp;
+	mech->cm_param = (caddr_t)ctrp;
 	mech->cm_param_len = sizeof (*ctrp);
 	return (0);
 }
@@ -109,22 +109,22 @@ ctr_crypt(uint64_t counter_val, const uint8_t *in, uint8_t *out, size_t len,
 	}
 
 	key.ck_format = CRYPTO_KEY_RAW;
-	key.ck_data   = (void *)(uintptr_t)ctr_key;
+	key.ck_data = (void *)(uintptr_t)ctr_key;
 	key.ck_length = CTR_KEY_LEN * 8;
 
 	bzero(&din, sizeof (din));
-	din.cd_format       = CRYPTO_DATA_RAW;
-	din.cd_offset       = 0;
-	din.cd_length       = len;
+	din.cd_format = CRYPTO_DATA_RAW;
+	din.cd_offset = 0;
+	din.cd_length = len;
 	din.cd_raw.iov_base = (caddr_t)(uintptr_t)in;
-	din.cd_raw.iov_len  = len;
+	din.cd_raw.iov_len = len;
 
 	bzero(&dout, sizeof (dout));
-	dout.cd_format       = CRYPTO_DATA_RAW;
-	dout.cd_offset       = 0;
-	dout.cd_length       = len;
+	dout.cd_format = CRYPTO_DATA_RAW;
+	dout.cd_offset = 0;
+	dout.cd_length = len;
 	dout.cd_raw.iov_base = (caddr_t)out;
-	dout.cd_raw.iov_len  = len;
+	dout.cd_raw.iov_len = len;
 
 	if (encrypt)
 		rv = crypto_encrypt(&mech, &din, &key, NULL, &dout, NULL);

@@ -916,9 +916,15 @@ metaslab_group_activate(metaslab_group_t *mg)
 		mgnext->mg_prev = mg;
 	}
 
-	/* Create a kstat to monitor the loading and unloading of metaslabs. */
-	(void) snprintf(kstat_name, sizeof (kstat_name), "%llx",
-	    (unsigned long long) mg->mg_vd->vdev_guid);
+	/*
+	 * Create a kstat to monitor the loading and unloading of metaslabs.
+	 * A top-level vdev can have two groups: the normal one and the
+	 * embedded log class's (vdev_log_mg).  Give the log group its own
+	 * name, or its kstat_create() collides with the normal group's.
+	 */
+	(void) snprintf(kstat_name, sizeof (kstat_name), "%llx%s",
+	    (unsigned long long) mg->mg_vd->vdev_guid,
+	    mg == mg->mg_vd->vdev_log_mg ? "-log" : "");
 
 	mutex_init(&mg->mg_kstat_lock, NULL, MUTEX_DEFAULT, NULL);
 	if ((mg->mg_kstat = kstat_create("zfs_metaslab_group", 0,

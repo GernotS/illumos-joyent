@@ -435,17 +435,29 @@ ddt_object_prefetch(ddt_t *ddt, ddt_type_t type, ddt_class_t class,
 static void
 ddt_object_prefetch_all(ddt_t *ddt, ddt_type_t type, ddt_class_t class)
 {
+	dnode_t *dn = NULL;
+
 	/*
-	 * Called from open context, so protect against concurrent
-	 * object destruction by sync context.
+	 * Called from open context, so protect against concurrent object
+	 * destruction by sync context -- but only while taking our own hold
+	 * on the dnode.  Reading in the whole object can take minutes, and
+	 * holding ddt_objects_lock that long would stall a sync that needs
+	 * it to destroy an object.  The prefetch looks the object up again
+	 * by number; our hold keeps that number from being reused, so if
+	 * the object is destroyed meanwhile the lookup just fails and
+	 * nothing is read.  (Upstream OpenZFS holds the lock throughout.)
 	 */
 	rw_enter(&ddt->ddt_objects_lock, RW_READER);
-
-	if (ddt_object_exists(ddt, type, class))
-		ddt_ops[type]->ddt_op_prefetch_all(
-		    ddt->ddt_object_dnode[type][class]);
-
+	if (ddt_object_exists(ddt, type, class)) {
+		dn = ddt->ddt_object_dnode[type][class];
+		VERIFY(dnode_add_ref(dn, FTAG));
+	}
 	rw_exit(&ddt->ddt_objects_lock);
+
+	if (dn != NULL) {
+		ddt_ops[type]->ddt_op_prefetch_all(dn);
+		dnode_rele(dn, FTAG);
+	}
 }
 
 int
@@ -1265,12 +1277,15 @@ ddt_entry_lookup_is_valid(ddt_t *ddt, const blkptr_t *bp, ddt_entry_t *dde)
 }
 
 /*
- * Hide an entry that turned out not to be valid for the caller's BP:
- * eject it from the live tree unless someone else is waiting on it (the
- * last waiter ejects, mirroring the over-quota pattern).  Stored entries
- * had their histogram subtracted at load (ddt_stat_update(-1ULL)); undo
- * that on eject or the stats drift.  Log-sourced entries (dde_logged)
- * are accounted in ddt_log_histogram and need no undo.
+ * Drop an entry the loading thread found not to be valid for its BP.
+ *
+ * Only the thread that created and loaded the entry may do this, and only
+ * while no other thread is waiting on it: until then nobody else can have
+ * it.  Once a waiter has woken, or a later lookup has found it loaded,
+ * other threads may be using it, so a thread that merely waited must never
+ * remove it (see the waiter path in ddt_lookup_impl()).  The entry's
+ * counts have not been taken out of the histogram yet, so there is nothing
+ * to undo.
  */
 static void
 ddt_lookup_eject_invalid(ddt_t *ddt, ddt_entry_t *dde)
@@ -1278,14 +1293,18 @@ ddt_lookup_eject_invalid(ddt_t *ddt, ddt_entry_t *dde)
 	if (dde->dde_waiters != 0)
 		return;
 	avl_remove(&ddt->ddt_tree, dde);
-	if (dde->dde_type < DDT_TYPES && !dde->dde_logged)
-		ddt_stat_update(ddt, dde, 0);
 	ddt_free(ddt, dde);
 }
 
+/*
+ * Find or load the entry for bp.  Returns NULL when there is none the caller
+ * may use: the DDT is over quota, the entry isn't valid for bp (verify), or
+ * it couldn't be read.  For the last, *errorp (if not NULL) is set to the
+ * read error, and to 0 otherwise.
+ */
 static ddt_entry_t *
 ddt_lookup_impl(ddt_t *ddt, const blkptr_t *bp, ddt_class_t class_hint,
-    boolean_t verify)
+    boolean_t verify, int *errorp)
 {
 	spa_t *spa = ddt->ddt_spa;
 	ddt_entry_t *dde, dde_search;
@@ -1296,13 +1315,22 @@ ddt_lookup_impl(ddt_t *ddt, const blkptr_t *bp, ddt_class_t class_hint,
 
 	ASSERT(MUTEX_HELD(&ddt->ddt_lock));
 
+	if (errorp != NULL)
+		*errorp = 0;
+
 	ddt_key_fill(&dde_search.dde_key, bp);
 
 	dde = avl_find(&ddt->ddt_tree, &dde_search, &where);
 	if (dde != NULL) {
-		/* If we went over quota, act like we didn't find it. */
-		if (dde->dde_overquota)
+		/*
+		 * Over quota, or failed to load: act like we didn't find it,
+		 * and say why.
+		 */
+		if (dde->dde_overquota) {
+			if (errorp != NULL)
+				*errorp = dde->dde_load_error;
 			return (NULL);
+		}
 
 		/* If it's already loaded, we can just return it. */
 		if (dde->dde_loaded) {
@@ -1318,8 +1346,13 @@ ddt_lookup_impl(ddt_t *ddt, const blkptr_t *bp, ddt_class_t class_hint,
 			cv_wait(&dde->dde_cv, &ddt->ddt_lock);
 		dde->dde_waiters--;
 
-		/* Loaded but over quota; forget we were ever here. */
+		/*
+		 * Loaded but over quota, or the load failed; forget we were
+		 * ever here.
+		 */
 		if (dde->dde_overquota) {
+			if (errorp != NULL)
+				*errorp = dde->dde_load_error;
 			if (dde->dde_waiters == 0) {
 				avl_remove(&ddt->ddt_tree, dde);
 				ddt_free(ddt, dde);
@@ -1327,11 +1360,17 @@ ddt_lookup_impl(ddt_t *ddt, const blkptr_t *bp, ddt_class_t class_hint,
 			return (NULL);
 		}
 
-		/* Not valid for this BP; hide it (last waiter ejects). */
-		if (verify && !ddt_entry_lookup_is_valid(ddt, bp, dde)) {
-			ddt_lookup_eject_invalid(ddt, dde);
+		/*
+		 * Not valid for this BP: act like we didn't find it, but
+		 * leave the entry alone.  The thread that loaded it, or
+		 * another waiter whose BP is valid, may already have it and
+		 * be changing it; removing and freeing it here lost that
+		 * change and, for a writer, left it using freed memory.  An
+		 * unneeded entry is just synced back unchanged.  Matches
+		 * upstream OpenZFS.
+		 */
+		if (verify && !ddt_entry_lookup_is_valid(ddt, bp, dde))
 			return (NULL);
-		}
 
 		return (dde);
 	}
@@ -1429,7 +1468,6 @@ ddt_lookup_impl(ddt_t *ddt, const blkptr_t *bp, ddt_class_t class_hint,
 			error = ddt_object_lookup(ddt, type, class_hint, dde);
 			if (error != ENOENT) {
 				class = class_hint;
-				ASSERT0(error);
 				break;
 			}
 		}
@@ -1437,10 +1475,8 @@ ddt_lookup_impl(ddt_t *ddt, const blkptr_t *bp, ddt_class_t class_hint,
 			if (class == class_hint)
 				continue;	/* already tried above */
 			error = ddt_object_lookup(ddt, type, class, dde);
-			if (error != ENOENT) {
-				ASSERT0(error);
+			if (error != ENOENT)
 				break;
-			}
 		}
 		if (error != ENOENT)
 			break;
@@ -1454,7 +1490,38 @@ ddt_lookup_impl(ddt_t *ddt, const blkptr_t *bp, ddt_class_t class_hint,
 	dde->dde_type = type;	/* will be DDT_TYPES if no entry found */
 	dde->dde_class = class;	/* will be DDT_CLASSES if no entry found */
 
-	if (dde->dde_type == DDT_TYPES &&
+	boolean_t valid = B_TRUE;
+
+	if (error != 0 && error != ENOENT) {
+		/*
+		 * The entry couldn't be read (EIO, ECKSUM, ...), so we don't
+		 * know what is stored.  Nobody may use this one: a writer
+		 * would treat it as new and its sync would overwrite the
+		 * stored entry, losing the references to it, and a free
+		 * would free a block other files still use.  Make it
+		 * unusable, as over quota, and pass the error up.  Upstream
+		 * OpenZFS only has ASSERT0(error) here, so non-debug builds
+		 * carried on with the empty entry.
+		 */
+		if (errorp != NULL)
+			*errorp = error;
+		if (dde->dde_waiters == 0) {
+			avl_remove(&ddt->ddt_tree, dde);
+			dde->dde_loading = B_FALSE;
+			ddt_free(ddt, dde);
+			return (NULL);
+		}
+
+		/*
+		 * Flag cleanup required; last waiter frees it.  Until then,
+		 * make it look like an entry that was never stored, so that
+		 * even a sync of it couldn't touch the stored one.
+		 */
+		dde->dde_overquota = B_TRUE;
+		dde->dde_load_error = error;
+		dde->dde_type = DDT_TYPES;
+		dde->dde_class = DDT_CLASSES;
+	} else if (dde->dde_type == DDT_TYPES &&
 	    dde->dde_class == DDT_CLASSES &&
 	    ddt_over_quota(spa)) {
 		/* Over quota.  If no one is waiting, clean up right now. */
@@ -1467,8 +1534,28 @@ ddt_lookup_impl(ddt_t *ddt, const blkptr_t *bp, ddt_class_t class_hint,
 
 		/* Flag cleanup required; last waiter frees it. */
 		dde->dde_overquota = B_TRUE;
-	} else if (error == 0) {
-		ddt_stat_update(ddt, dde, -1ULL);
+	} else {
+		/*
+		 * Whatever we found -- or the fresh empty entry we just
+		 * created -- may not be valid for this BP.  For
+		 * zio_ddt_free() that is the pruned-entry case: returning
+		 * NULL routes the free to its direct (non-DDT) fallback.
+		 * Check before taking the entry's counts out of the
+		 * histogram, so dropping it needs no undo.  If nobody is
+		 * waiting we are its only user and can drop it now;
+		 * otherwise leave it for the waiters, who decide for
+		 * themselves.  Matches upstream OpenZFS.
+		 */
+		valid = !verify || ddt_entry_lookup_is_valid(ddt, bp, dde);
+		if (!valid && dde->dde_waiters == 0) {
+			avl_remove(&ddt->ddt_tree, dde);
+			dde->dde_loading = B_FALSE;
+			ddt_free(ddt, dde);
+			return (NULL);
+		}
+
+		if (error == 0)
+			ddt_stat_update(ddt, dde, -1ULL);
 	}
 
 	dde->dde_loaded = B_TRUE;
@@ -1476,20 +1563,8 @@ ddt_lookup_impl(ddt_t *ddt, const blkptr_t *bp, ddt_class_t class_hint,
 
 	cv_broadcast(&dde->dde_cv);
 
-	if (dde->dde_overquota)
+	if (dde->dde_overquota || !valid)
 		return (NULL);
-
-	/*
-	 * Whatever we found -- or the fresh empty entry we just created --
-	 * may not be valid for this BP; if so, hide it (and eject it if
-	 * nobody else is waiting on it).  For zio_ddt_free() this is the
-	 * pruned-entry case: returning NULL routes the free to its direct
-	 * (non-DDT) fallback.
-	 */
-	if (verify && !ddt_entry_lookup_is_valid(ddt, bp, dde)) {
-		ddt_lookup_eject_invalid(ddt, dde);
-		return (NULL);
-	}
 
 	return (dde);
 }
@@ -1497,7 +1572,18 @@ ddt_lookup_impl(ddt_t *ddt, const blkptr_t *bp, ddt_class_t class_hint,
 ddt_entry_t *
 ddt_lookup(ddt_t *ddt, const blkptr_t *bp, boolean_t verify)
 {
-	return (ddt_lookup_impl(ddt, bp, DDT_CLASSES, verify));
+	return (ddt_lookup_impl(ddt, bp, DDT_CLASSES, verify, NULL));
+}
+
+/*
+ * As ddt_lookup(), but tells a read error apart from "no usable entry":
+ * *errorp is the error when the entry couldn't be read, else 0.
+ */
+ddt_entry_t *
+ddt_lookup_error(ddt_t *ddt, const blkptr_t *bp, boolean_t verify,
+    int *errorp)
+{
+	return (ddt_lookup_impl(ddt, bp, DDT_CLASSES, verify, errorp));
 }
 
 /*
@@ -1511,7 +1597,7 @@ ddt_lookup(ddt_t *ddt, const blkptr_t *bp, boolean_t verify)
 static ddt_entry_t *
 ddt_lookup_unique(ddt_t *ddt, const blkptr_t *bp)
 {
-	return (ddt_lookup_impl(ddt, bp, DDT_CLASS_UNIQUE, B_TRUE));
+	return (ddt_lookup_impl(ddt, bp, DDT_CLASS_UNIQUE, B_TRUE, NULL));
 }
 
 void
@@ -1562,28 +1648,29 @@ ddt_prefetch_all(spa_t *spa)
 }
 
 /*
- * Opaque struct used for ddt_key comparison
+ * ddt_key_t comparison. Any struct wanting to make use of this function must
+ * have the key as the first element. Casts it to N uint64_ts, and checks until
+ * we find there's a difference. This is intended to match how ddt_zap.c drives
+ * the ZAPs (first uint64_t as the key prehash), which will minimise the number
+ * of ZAP blocks touched when flushing logged entries from an AVL walk.
+ *
+ * This order must match OpenZFS: the dedup log checkpoint stored on disk
+ * (ddt_log_load_entry()) is interpreted with it, so a pool exported in the
+ * middle of a log flush can only be imported elsewhere if both sides sort
+ * keys the same way.  From OpenZFS 592f38900.
  */
-#define	DDT_KEY_CMP_LEN	(sizeof (ddt_key_t) / sizeof (uint16_t))
-
-typedef struct ddt_key_cmp {
-	uint16_t	u16[DDT_KEY_CMP_LEN];
-} ddt_key_cmp_t;
-
 int
 ddt_key_compare(const void *x1, const void *x2)
 {
-	const ddt_key_cmp_t *k1 = (const ddt_key_cmp_t *)x1;
-	const ddt_key_cmp_t *k2 = (const ddt_key_cmp_t *)x2;
-	int32_t cmp = 0;
+	const uint64_t *k1 = (const uint64_t *)x1;
+	const uint64_t *k2 = (const uint64_t *)x2;
+	int cmp;
 
-	for (int i = 0; i < DDT_KEY_CMP_LEN; i++) {
-		cmp = (int32_t)k1->u16[i] - (int32_t)k2->u16[i];
-		if (likely(cmp))
-			break;
-	}
+	for (uint_t i = 0; i < DDT_KEY_WORDS; i++)
+		if (likely((cmp = TREE_CMP(k1[i], k2[i])) != 0))
+			return (cmp);
 
-	return (TREE_ISIGN(cmp));
+	return (0);
 }
 
 int
@@ -1754,17 +1841,32 @@ ddt_class_contains(spa_t *spa, ddt_class_t max_class, const blkptr_t *bp)
 	if (!BP_GET_DEDUP(bp))
 		return (B_FALSE);
 
-	if (max_class == DDT_CLASS_UNIQUE)
-		return (B_TRUE);
-
 	ddt = spa->spa_ddt[BP_GET_CHECKSUM(bp)];
 
 	ddt_key_fill(&dde->dde_key, bp);
 
-	for (ddt_type_t type = 0; type < DDT_TYPES; type++)
-		for (ddt_class_t class = 0; class <= max_class; class++)
+	/*
+	 * Only an entry that describes this very block counts, not merely
+	 * one with the same key.  After "zpool ddtprune" removed a block's
+	 * entry, writing the same data again creates a new entry, at other
+	 * DVAs, under the same key.  The DDT walk scrubs the new block only;
+	 * matching on the key alone made the scan skip the old one, which
+	 * is still referenced, so a scrub never repaired it and a resilver
+	 * never copied it.  Match the DVA and birth as zio_ddt_free() does.
+	 *
+	 * For the same reason there is no shortcut for DDT_CLASS_UNIQUE:
+	 * a pruned block is in no class at all, so the walk never saw it.
+	 *
+	 * A read error leaves the entry unknown; then scan the block, which
+	 * at worst reads it twice.  From OpenZFS PR #19403.
+	 */
+	for (ddt_type_t type = 0; type < DDT_TYPES; type++) {
+		for (ddt_class_t class = 0; class <= max_class; class++) {
 			if (ddt_object_lookup(ddt, type, class, dde) == 0)
-				return (B_TRUE);
+				return (ddt_phys_select(ddt, dde, bp) !=
+				    DDT_PHYS_NONE);
+		}
+	}
 
 	return (B_FALSE);
 }
@@ -2347,9 +2449,9 @@ housekeeping:
 	 * Update flush time rate.  This is an exponential weighted moving
 	 * average of the total time taken to flush over recent txgs.
 	 */
-	ddt->ddt_log_flush_time_rate = _ewma(ddt->ddt_log_flush_time_rate,
+	ddt->ddt_log_flush_time_rate = _ewma(
 	    (int32_t)NSEC2MSEC(gethrtime() - flush_start),
-	    zfs_dedup_log_flush_flow_rate_txgs);
+	    ddt->ddt_log_flush_time_rate, zfs_dedup_log_flush_flow_rate_txgs);
 }
 
 static void
@@ -2651,6 +2753,8 @@ ddt_prune_entry(list_t *list, ddt_t *ddt, const ddt_key_t *ddk,
  * logged and reloaded entry before pruning it.  Also called by zdb(8) to
  * dump the age histogram.
  */
+static int ddt_walk_impl(spa_t *, ddt_bookmark_t *, ddt_entry_t *, boolean_t);
+
 void
 ddt_prune_walk(spa_t *spa, uint64_t cutoff, ddt_age_histo_t *histogram)
 {
@@ -2703,7 +2807,7 @@ ddt_prune_walk(spa_t *spa, uint64_t cutoff, ddt_age_histo_t *histogram)
 		}
 	}
 
-	while ((error = ddt_walk(spa, &ddb, dde)) == 0) {
+	while ((error = ddt_walk_impl(spa, &ddb, dde, B_FALSE)) == 0) {
 		ddt_t *ddt = spa->spa_ddt[ddb.ddb_checksum];
 		VERIFY(ddt);
 
@@ -2721,13 +2825,29 @@ ddt_prune_walk(spa_t *spa, uint64_t cutoff, ddt_age_histo_t *histogram)
 		uint64_t class_start = dde->dde_phys->ddp_flat.ddp_class_start;
 
 		/*
+		 * A dedup write asking for more copies than its entry holds
+		 * extends the entry (see zio_ddt_write()), and the BPs written
+		 * before keep fewer DVAs.  Pruning clears the entry without
+		 * freeing anything, so if its last reference is one of those
+		 * BPs, the DVAs that BP lacks would be leaked: zio_ddt_free()
+		 * then frees only the DVAs in that BP.  An extended entry
+		 * cannot be told from one written with that many copies, so
+		 * leave every entry holding more than one DVA.  A gang entry
+		 * is never extended.
+		 */
+		const ddt_univ_phys_t *ddp = dde->dde_phys;
+		boolean_t prunable = ddt_phys_is_gang(ddp, DDT_PHYS_FLAT) ||
+		    ddt_phys_dva_count(ddp, DDT_PHYS_FLAT,
+		    DDK_GET_CRYPT(&dde->dde_key)) <= 1;
+
+		/*
 		 * Prune older entries.  A zero class_start means the entry
 		 * predates ddp_class_start tracking, so it has no recorded
 		 * age; treat it as infinitely old, matching upstream.  Any
 		 * cutoff is then above it, so "zpool ddtprune -p 100" clears
 		 * such entries instead of stranding them permanently.
 		 */
-		if (pruning && class_start < cutoff) {
+		if (pruning && prunable && class_start < cutoff) {
 			if (candidates++ >= zfs_ddt_prunes_per_txg) {
 				/* sync prune candidates in batches */
 				VERIFY0(dsl_sync_task(spa_name(spa),
@@ -2884,13 +3004,77 @@ ddt_prune_unique_entries(spa_t *spa, zpool_ddt_prune_unit_t unit,
 	return (0);
 }
 
-int
-ddt_walk(spa_t *spa, ddt_bookmark_t *ddb, ddt_entry_t *dde)
+/*
+ * A scan walks the store objects only.  The dedup log has no stable
+ * cursor, so a scan position in it can't be kept across a pool reload,
+ * and an entry that so far exists only in the log -- a new one, or one
+ * that gained DVAs -- would be missed: the walk wouldn't scrub or repair
+ * it, and dataset traversal then skips its blocks because
+ * ddt_class_contains() says the DDT covered them.  So before a scan's
+ * walk starts, the log is flushed hard up to the scan's max txg (see
+ * ddt_flush_force_update_txg() and ddt_log_swap()), and the walk waits
+ * for that: ddt_walk() returns EAGAIN, and dsl_scan_check_suspend()
+ * suspends the scan, until ddt_walk_ready().  Entries changed after that
+ * txg belong to blocks the scan doesn't cover.  Ported from upstream
+ * OpenZFS a1902f495 (#15895).
+ */
+void
+ddt_walk_init(spa_t *spa, uint64_t txg)
+{
+	if (txg == 0)
+		txg = spa_syncing_txg(spa);
+
+	for (enum zio_checksum c = 0; c < ZIO_CHECKSUM_FUNCTIONS; c++) {
+		ddt_t *ddt = spa->spa_ddt[c];
+		if (ddt == NULL || !(ddt->ddt_flags & DDT_FLAG_LOG))
+			continue;
+
+		/*
+		 * Changes made in the current txg are still on the live tree
+		 * and reach the log only when this txg's DDT syncs, so the
+		 * logs may look empty here although entries up to txg are
+		 * pending.  Force the flush then; it ends once they are out.
+		 */
+		ddt_enter(ddt);
+		if (!avl_is_empty(&ddt->ddt_tree))
+			ddt->ddt_flush_force_txg = txg;
+		else
+			ddt_flush_force_update_txg(ddt, txg);
+		ddt_exit(ddt);
+	}
+}
+
+boolean_t
+ddt_walk_ready(spa_t *spa)
+{
+	for (enum zio_checksum c = 0; c < ZIO_CHECKSUM_FUNCTIONS; c++) {
+		ddt_t *ddt = spa->spa_ddt[c];
+		if (ddt == NULL || !(ddt->ddt_flags & DDT_FLAG_LOG))
+			continue;
+
+		if (ddt->ddt_flush_force_txg > 0)
+			return (B_FALSE);
+	}
+
+	return (B_TRUE);
+}
+
+/*
+ * Walk the store objects.  With wait set, return EAGAIN while a forced log
+ * flush started by ddt_walk_init() is still running; the prune walk passes
+ * B_FALSE, as upstream does.
+ */
+static int
+ddt_walk_impl(spa_t *spa, ddt_bookmark_t *ddb, ddt_entry_t *dde,
+    boolean_t wait)
 {
 	do {
 		do {
 			do {
 				ddt_t *ddt = spa->spa_ddt[ddb->ddb_checksum];
+				if (wait && ddt->ddt_flush_force_txg > 0)
+					return (SET_ERROR(EAGAIN));
+
 				int error = ENOENT;
 				if (ddt_object_exists(ddt, ddb->ddb_type,
 				    ddb->ddb_class)) {
@@ -2912,6 +3096,12 @@ ddt_walk(spa_t *spa, ddt_bookmark_t *ddb, ddt_entry_t *dde)
 	} while (++ddb->ddb_class < DDT_CLASSES);
 
 	return (SET_ERROR(ENOENT));
+}
+
+int
+ddt_walk(spa_t *spa, ddt_bookmark_t *ddb, ddt_entry_t *dde)
+{
+	return (ddt_walk_impl(spa, ddb, dde, B_TRUE));
 }
 
 /*

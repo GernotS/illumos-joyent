@@ -36,11 +36,19 @@
 
 #include <sys/debug.h>
 #include <sys/types.h>
-#define INLINE_CRYPTO_GET_PTRS
 #include <modes/modes.h>
 #include <sys/crypto/common.h>
 #include <sys/crypto/impl.h>
 #include <aes/aes_impl.h>
+
+/*
+ * Size of the on-stack scratch buffer used by the CMAC bulk path in
+ * cbc_encrypt_contiguous_blocks().  It receives ciphertext that is
+ * discarded, so it only needs to be large enough to amortize the call
+ * into encrypt_cbc(): 16 AES blocks, two passes of the 8-block AES-NI
+ * routine.  Must be a multiple of every supported block size.
+ */
+#define	CMAC_SCRATCH_LEN	256
 
 /* These are the CMAC Rb constants from NIST SP 800-38B */
 #define	CONST_RB_128	0x87
@@ -97,15 +105,86 @@ cbc_encrypt_contiguous_blocks(cbc_ctx_t *ctx, char *data, size_t length,
 	uint8_t *lastp;
 	void *iov_or_mp;
 	offset_t offset;
+	uint8_t *outp;
+	size_t outlen;
 	uint8_t *out_data_1;
 	uint8_t *out_data_2;
 	size_t out_data_1_len;
 
 	/*
+	 * CMAC bulk path.  CMAC is CBC-MAC over all but the final block,
+	 * which is held back (max_remain == block_size + 1) until
+	 * cmac_mode_final() can apply the subkey to it.  Only the
+	 * chaining value is needed from the blocks before it, so run them
+	 * through encrypt_cbc() into a small scratch buffer, a chunk at a
+	 * time, keeping just the last ciphertext block of each chunk as
+	 * the chaining value for the next.  Nothing is written to `out'
+	 * (honoring the CMAC_MODE no-output contract) and the input is
+	 * not modified.  Any buffered partial block is completed and
+	 * processed first, and the final 1..block_size bytes are left in
+	 * cbc_remainder exactly as the per-block path below would leave
+	 * them, so the two paths may be freely interleaved.
+	 */
+	if (cbc_fastpath_enabled && encrypt_cbc != NULL &&
+	    (ctx->cbc_flags & CMAC_MODE) != 0 &&
+	    block_size <= sizeof (ctx->cbc_remainder) &&
+	    ctx->cbc_lastp == (uint8_t *)ctx->cbc_iv) {
+		uint8_t scratch[CMAC_SCRATCH_LEN];
+		size_t head = (ctx->cbc_remainder_len == 0) ? 0 :
+		    block_size - ctx->cbc_remainder_len;
+
+		/*
+		 * Worth it only if, after completing the buffered block,
+		 * at least one whole block remains besides the held-back
+		 * final block.
+		 */
+		if (length > head + block_size) {
+			uint8_t *p = datap;
+			size_t body, tail;
+
+			if (ctx->cbc_remainder_len != 0) {
+				bcopy(p, (uint8_t *)ctx->cbc_remainder +
+				    ctx->cbc_remainder_len, head);
+				xor_block((uint8_t *)ctx->cbc_remainder,
+				    (uint8_t *)ctx->cbc_iv);
+				encrypt(ctx->cbc_keysched,
+				    (uint8_t *)ctx->cbc_iv,
+				    (uint8_t *)ctx->cbc_iv);
+				ctx->cbc_remainder_len = 0;
+				p += head;
+			}
+
+			/* Hold back 1..block_size bytes as the final block. */
+			body = ((length - head - 1) / block_size) * block_size;
+			tail = length - head - body;
+			ASSERT3U(tail, >, 0);
+			ASSERT3U(tail, <=, block_size);
+
+			while (body != 0) {
+				size_t chunk = MIN(body, sizeof (scratch));
+
+				encrypt_cbc(ctx->cbc_keysched, p, scratch,
+				    (uint8_t *)ctx->cbc_iv, chunk);
+				bcopy(&scratch[chunk - block_size],
+				    ctx->cbc_iv, block_size);
+				p += chunk;
+				body -= chunk;
+			}
+
+			bcopy(p, ctx->cbc_remainder, tail);
+			ctx->cbc_remainder_len = tail;
+			ctx->cbc_copy_to = p;
+			ctx->cbc_lastp = (uint8_t *)ctx->cbc_iv;
+			bzero(scratch, sizeof (scratch));
+			return (CRYPTO_SUCCESS);
+		}
+	}
+
+	/*
 	 * Re-enter the fastpath for streams that are not block-aligned;
 	 * see cbc_decrypt_contiguous_blocks().  The per-block path below
 	 * leaves the chaining value in cbc_iv, which is where
-	 * encrypt_cbc() picks it up.  CMAC never takes the fastpath.
+	 * encrypt_cbc() picks it up.  CMAC is handled above.
 	 */
 	if (cbc_fastpath_enabled && encrypt_cbc != NULL && out != NULL &&
 	    (ctx->cbc_flags & CMAC_MODE) == 0 && length > block_size) {
@@ -143,24 +222,25 @@ cbc_encrypt_contiguous_blocks(cbc_ctx_t *ctx, char *data, size_t length,
 	 *   bulk encrypt_cbc() routine writes the full result to `out',
 	 *   which for a MAC update is only a single-block scratch buffer.
 	 * - input is block-aligned
-	 * - the whole result fits in the output's first segment
-	 *   (CRYPTO_DATA_IS_CONTIGUOUS) and within cd_length
-	 *   (CRYPTO_DATA_HAS_ROOM), so encrypt_cbc() can never store past
-	 *   the end of a short output buffer, or the user requested that
-	 *   we overwrite their input buffer (input/output aliasing allowed)
+	 * - the output segment at the current output position can take
+	 *   the whole result (crypto_data_contig()), or the user requested
+	 *   that we overwrite their input buffer (input/output aliasing
+	 *   allowed).  CRYPTO_DATA_HAS_ROOM() is required as well, to keep
+	 *   encrypt_cbc() from storing past the end of a short output
+	 *   buffer.  encrypt_cbc() is safe in place, so overlapping
+	 *   input and output are fine here.
 	 */
 	if (cbc_fastpath_enabled && encrypt_cbc != NULL && length != 0 &&
 	    (ctx->cbc_flags & CMAC_MODE) == 0 &&
 	    ctx->cbc_remainder_len == 0 && (length & (block_size - 1)) == 0 &&
 	    (out == NULL ||
-	    (CRYPTO_DATA_IS_CONTIGUOUS(out, length) &&
-	    CRYPTO_DATA_HAS_ROOM(out, length)))) {
+	    ((outp = crypto_data_contig(out, &outlen)) != NULL &&
+	    outlen >= length && CRYPTO_DATA_HAS_ROOM(out, length)))) {
 		if (out == NULL) {
 			encrypt_cbc(ctx->cbc_keysched, (uint8_t *)data,
 			    (uint8_t *)data, (uint8_t *)ctx->cbc_iv, length);
 			ctx->cbc_lastp = (uint8_t *)&data[length - block_size];
 		} else {
-			uint8_t *outp = CRYPTO_DATA_FIRST_BLOCK(out);
 			encrypt_cbc(ctx->cbc_keysched, (uint8_t *)data, outp,
 			    (uint8_t *)ctx->cbc_iv, length);
 			out->cd_offset += length;
@@ -304,6 +384,8 @@ cbc_decrypt_contiguous_blocks(cbc_ctx_t *ctx, char *data, size_t length,
 	uint8_t *lastp;
 	void *iov_or_mp;
 	offset_t offset;
+	uint8_t *outp;
+	size_t outlen;
 	uint8_t *out_data_1;
 	uint8_t *out_data_2;
 	size_t out_data_1_len;
@@ -358,18 +440,16 @@ cbc_decrypt_contiguous_blocks(cbc_ctx_t *ctx, char *data, size_t length,
 	 * CBC decryption fastpath requirements:
 	 * - fastpath is enabled
 	 * - input is block-aligned
-	 * - output is a single contiguous region that doesn't overlap the
-	 *   input (cbc_decrypt_fastpath() XORs with ciphertext it has
+	 * - the output segment at the current output position can take
+	 *   the whole write (crypto_data_contig()), and doesn't overlap
+	 *   the input (cbc_decrypt_fastpath() XORs with ciphertext it has
 	 *   already overwritten when run in place)
 	 */
 	if (cbc_fastpath_enabled && ctx->cbc_remainder_len == 0 &&
 	    length != 0 && (length & (block_size - 1)) == 0 &&
-	    CRYPTO_DATA_IS_CONTIGUOUS(out, length) &&
-	    CRYPTO_DATA_HAS_ROOM(out, length) &&
-	    ((uint8_t *)CRYPTO_DATA_FIRST_BLOCK(out) + length <= datap ||
-	    datap + length <= (uint8_t *)CRYPTO_DATA_FIRST_BLOCK(out))) {
-		uint8_t *outp = CRYPTO_DATA_FIRST_BLOCK(out);
-
+	    (outp = crypto_data_contig(out, &outlen)) != NULL &&
+	    outlen >= length && CRYPTO_DATA_HAS_ROOM(out, length) &&
+	    (outp + length <= datap || datap + length <= outp)) {
 		/*
 		 * The slow path below alternates the chaining value between
 		 * cbc_iv and cbc_lastblock (see OTHER()) and may leave

@@ -3616,9 +3616,24 @@ zdb_count_block(zdb_cb_t *zcb, const blkptr_t *bp, dmu_object_type_t type)
 		ddt_t *ddt = ddt_select(zcb->zcb_spa, bp);
 		ddt_enter(ddt);
 
-		ddt_entry_t *dde = ddt_lookup(ddt, bp, B_TRUE);
+		int lookup_error;
+		ddt_entry_t *dde = ddt_lookup_error(ddt, bp, B_TRUE,
+		    &lookup_error);
 		ddt_phys_variant_t v = (dde == NULL) ? DDT_PHYS_NONE :
 		    ddt_phys_select(ddt, dde, bp);
+
+		/*
+		 * The entry couldn't be read, so we can't tell whether this
+		 * block was already claimed.  Count the error and don't
+		 * claim it: claiming it twice would abort zdb.
+		 */
+		if (lookup_error != 0) {
+			mutex_enter(&zcb->zcb_spa->spa_scrub_lock);
+			zcb->zcb_haderrors = 1;
+			zcb->zcb_errors[lookup_error]++;
+			mutex_exit(&zcb->zcb_spa->spa_scrub_lock);
+			do_claim = B_FALSE;
+		}
 
 		/*
 		 * The DDT may have no live phys for this BP: the block was
@@ -3661,9 +3676,17 @@ zdb_count_block(zdb_cb_t *zcb, const blkptr_t *bp, dmu_object_type_t type)
 				}
 			}
 
-			VERIFY3U(ddt_phys_total_refcnt(ddt, dde->dde_phys),
-			    >, 0);
-			ddt_phys_decref(dde->dde_phys, v);
+			/*
+			 * Consume a reference, but never take the refcount
+			 * below zero: on a damaged pool more block pointers
+			 * can reference a block than its entry accounts for,
+			 * and zdb must keep going to report it rather than
+			 * abort.  Upstream OpenZFS relaxed the same VERIFY in
+			 * d4d79451c (DDT prune) and checks the variant's own
+			 * refcount since 956deba27.
+			 */
+			if (ddt_phys_refcnt(dde->dde_phys, v) > 0)
+				ddt_phys_decref(dde->dde_phys, v);
 
 			if (seen) {
 				zcb->zcb_dedup_asize += BP_GET_ASIZE(bp);

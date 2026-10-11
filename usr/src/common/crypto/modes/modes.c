@@ -85,6 +85,163 @@ crypto_init_ptrs(crypto_data_t *out, void **iov_or_mp, offset_t *current_offset)
 	} /* end switch */
 }
 
+/*
+ * Get pointers for where in the output to copy a block of encrypted or
+ * decrypted data.  The iov_or_mp argument stores a pointer to the current
+ * iovec or mp, and offset stores an offset into the current iovec or mp.
+ */
+void
+crypto_get_ptrs(crypto_data_t *out, void **iov_or_mp, offset_t *current_offset,
+    uint8_t **out_data_1, size_t *out_data_1_len, uint8_t **out_data_2,
+    size_t amt)
+{
+	offset_t offset;
+
+	switch (out->cd_format) {
+	case CRYPTO_DATA_RAW: {
+		iovec_t *iov;
+
+		offset = *current_offset;
+		iov = &out->cd_raw;
+		if ((offset + amt) <= iov->iov_len) {
+			/* one block fits */
+			*out_data_1 = (uint8_t *)iov->iov_base + offset;
+			*out_data_1_len = amt;
+			*out_data_2 = NULL;
+			*current_offset = offset + amt;
+		}
+		break;
+	}
+
+	case CRYPTO_DATA_UIO: {
+		uio_t *uio = out->cd_uio;
+		iovec_t *iov;
+		offset_t offset;
+		uintptr_t vec_idx;
+		uint8_t *p;
+
+		offset = *current_offset;
+		vec_idx = (uintptr_t)(*iov_or_mp);
+		iov = &uio->uio_iov[vec_idx];
+		p = (uint8_t *)iov->iov_base + offset;
+		*out_data_1 = p;
+
+		if (offset + amt <= iov->iov_len) {
+			/* can fit one block into this iov */
+			*out_data_1_len = amt;
+			*out_data_2 = NULL;
+			*current_offset = offset + amt;
+		} else {
+			/* one block spans two iovecs */
+			*out_data_1_len = iov->iov_len - offset;
+			if (vec_idx == uio->uio_iovcnt)
+				return;
+			vec_idx++;
+			iov = &uio->uio_iov[vec_idx];
+			*out_data_2 = (uint8_t *)iov->iov_base;
+			*current_offset = amt - *out_data_1_len;
+		}
+		*iov_or_mp = (void *)vec_idx;
+		break;
+	}
+
+	case CRYPTO_DATA_MBLK: {
+		mblk_t *mp;
+		uint8_t *p;
+
+		offset = *current_offset;
+		mp = (mblk_t *)*iov_or_mp;
+		p = mp->b_rptr + offset;
+		*out_data_1 = p;
+		if ((p + amt) <= mp->b_wptr) {
+			/* can fit one block into this mblk */
+			*out_data_1_len = amt;
+			*out_data_2 = NULL;
+			*current_offset = offset + amt;
+		} else {
+			/* one block spans two mblks */
+			*out_data_1_len = _PTRDIFF(mp->b_wptr, p);
+			if ((mp = mp->b_cont) == NULL)
+				return;
+			*out_data_2 = mp->b_rptr;
+			*current_offset = (amt - *out_data_1_len);
+		}
+		*iov_or_mp = mp;
+		break;
+	}
+	} /* end switch */
+}
+
+/*
+ * Resolve the current output position of a crypto_data_t object to the
+ * segment it falls in.  cd_offset is relative to the start of the whole
+ * object; for a uio it is resolved to an iovec and for an mblk chain to
+ * a b_cont block, exactly as crypto_init_ptrs() does.  Returns a pointer
+ * to that position and stores in *lenp the number of bytes that can be
+ * written there contiguously, i.e. up to the end of that iovec or mblk.
+ * Returns NULL, with *lenp set to 0, when `cd' is NULL or cd_offset
+ * lies at or beyond the end of the object.
+ *
+ * The fastpaths write their whole output with a single contiguous store,
+ * so they are taken only when this length covers the entire request;
+ * anything else goes to the per-block path, which can split blocks
+ * across segment boundaries.  Because the position is resolved from
+ * cd_offset rather than taken from the first segment, a stream whose
+ * earlier updates have already filled one or more leading iovecs or
+ * mblks still reaches the fastpath for the segment it is now writing.
+ * Shapes this covers include the ZFS cipher uio (the ciphertext in
+ * iov[0] and the 16-byte MAC in iov[1], see zio_crypt_init_uios()),
+ * multi-iovec SMB3 encryption uios, and IPsec ESP b_cont chains.  Note
+ * that the segments of one message are chained with b_cont; b_next
+ * links whole messages on a queue and is not followed.
+ */
+uint8_t *
+crypto_data_contig(crypto_data_t *cd, size_t *lenp)
+{
+	offset_t offset;
+
+	*lenp = 0;
+	if (cd == NULL || (offset = cd->cd_offset) < 0)
+		return (NULL);
+
+	switch (cd->cd_format) {
+	case CRYPTO_DATA_RAW:
+		if ((size_t)offset >= cd->cd_raw.iov_len)
+			return (NULL);
+		*lenp = cd->cd_raw.iov_len - (size_t)offset;
+		return ((uint8_t *)cd->cd_raw.iov_base + offset);
+
+	case CRYPTO_DATA_UIO: {
+		uio_t *uiop = cd->cd_uio;
+		int vec_idx;
+
+		for (vec_idx = 0; vec_idx < uiop->uio_iovcnt &&
+		    (size_t)offset >= uiop->uio_iov[vec_idx].iov_len;
+		    offset -= uiop->uio_iov[vec_idx++].iov_len)
+			;
+		if (vec_idx == uiop->uio_iovcnt)
+			return (NULL);
+		*lenp = uiop->uio_iov[vec_idx].iov_len - (size_t)offset;
+		return ((uint8_t *)uiop->uio_iov[vec_idx].iov_base + offset);
+	}
+
+	case CRYPTO_DATA_MBLK: {
+		mblk_t *mp;
+
+		for (mp = cd->cd_mp; mp != NULL &&
+		    (size_t)offset >= MBLKL(mp);
+		    offset -= MBLKL(mp), mp = mp->b_cont)
+			;
+		if (mp == NULL)
+			return (NULL);
+		*lenp = MBLKL(mp) - (size_t)offset;
+		return (mp->b_rptr + offset);
+	}
+	} /* end switch */
+
+	return (NULL);
+}
+
 void
 crypto_free_mode_ctx(void *ctx)
 {
@@ -348,4 +505,35 @@ crypto_put_output_data(uchar_t *buf, crypto_data_t *output, int len)
 	}
 
 	return (CRYPTO_SUCCESS);
+}
+
+/*
+ * Constant-time buffer comparison.
+ *
+ * Returns 0 if the two buffers are identical and non-zero otherwise,
+ * like bcmp(), but the execution time depends only on `len' and not on
+ * the buffer contents or on the position of the first differing byte.
+ *
+ * This must be used in place of bcmp() whenever a computed
+ * authentication tag or MAC is compared against a caller-supplied
+ * value: bcmp() is free to return as soon as it finds a difference, so
+ * its timing reveals how many leading bytes of a forged tag were
+ * guessed correctly, which reduces forgery to a per-byte search.
+ *
+ * The accumulator is volatile so that the compiler may not rewrite the
+ * loop into an early-exit comparison.
+ */
+int
+crypto_memcmp(const void *s1, const void *s2, size_t len)
+{
+	const uint8_t *p1 = s1;
+	const uint8_t *p2 = s2;
+	volatile uint8_t diff = 0;
+	size_t i;
+
+	for (i = 0; i < len; i++) {
+		diff |= p1[i] ^ p2[i];
+	}
+
+	return (diff != 0);
 }

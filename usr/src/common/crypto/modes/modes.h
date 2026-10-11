@@ -420,11 +420,12 @@ extern int gmac_init_ctx(gcm_ctx_t *, char *, size_t,
 extern void calculate_ccm_mac(ccm_ctx_t *, uint8_t *,
     int (*encrypt_block)(const void *, const uint8_t *, uint8_t *));
 
+extern int crypto_memcmp(const void *, const void *, size_t);
+
 extern void crypto_init_ptrs(crypto_data_t *, void **, offset_t *);
-#ifndef	INLINE_CRYPTO_GET_PTRS
 extern void crypto_get_ptrs(crypto_data_t *, void **, offset_t *,
     uint8_t **, size_t *, uint8_t **, size_t);
-#endif	/* INLINE_CRYPTO_GET_PTRS */
+extern uint8_t *crypto_data_contig(crypto_data_t *, size_t *);
 
 extern void *ecb_alloc_ctx(int);
 extern void *cbc_alloc_ctx(int);
@@ -440,137 +441,6 @@ extern boolean_t ctr_fastpath_enabled;
 extern boolean_t gcm_fastpath_enabled;
 extern int crypto_put_output_data(uchar_t *, crypto_data_t *, int);
 
-#ifdef	INLINE_CRYPTO_GET_PTRS
-/*
- * Get pointers for where in the output to copy a block of encrypted or
- * decrypted data.  The iov_or_mp argument stores a pointer to the current
- * iovec or mp, and offset stores an offset into the current iovec or mp.
- */
-static inline void
-crypto_get_ptrs(crypto_data_t *out, void **iov_or_mp, offset_t *current_offset,
-    uint8_t **out_data_1, size_t *out_data_1_len, uint8_t **out_data_2,
-    size_t amt)
-{
-	offset_t offset;
-
-	switch (out->cd_format) {
-	case CRYPTO_DATA_RAW: {
-		iovec_t *iov;
-
-		offset = *current_offset;
-		iov = &out->cd_raw;
-		if ((offset + amt) <= iov->iov_len) {
-			/* one block fits */
-			*out_data_1 = (uint8_t *)iov->iov_base + offset;
-			*out_data_1_len = amt;
-			*out_data_2 = NULL;
-			*current_offset = offset + amt;
-		}
-		break;
-	}
-
-	case CRYPTO_DATA_UIO: {
-		uio_t *uio = out->cd_uio;
-		iovec_t *iov;
-		offset_t offset;
-		uintptr_t vec_idx;
-		uint8_t *p;
-
-		offset = *current_offset;
-		vec_idx = (uintptr_t)(*iov_or_mp);
-		iov = &uio->uio_iov[vec_idx];
-		p = (uint8_t *)iov->iov_base + offset;
-		*out_data_1 = p;
-
-		if (offset + amt <= iov->iov_len) {
-			/* can fit one block into this iov */
-			*out_data_1_len = amt;
-			*out_data_2 = NULL;
-			*current_offset = offset + amt;
-		} else {
-			/* one block spans two iovecs */
-			*out_data_1_len = iov->iov_len - offset;
-			if (vec_idx == uio->uio_iovcnt)
-				return;
-			vec_idx++;
-			iov = &uio->uio_iov[vec_idx];
-			*out_data_2 = (uint8_t *)iov->iov_base;
-			*current_offset = amt - *out_data_1_len;
-		}
-		*iov_or_mp = (void *)vec_idx;
-		break;
-	}
-
-	case CRYPTO_DATA_MBLK: {
-		mblk_t *mp;
-		uint8_t *p;
-
-		offset = *current_offset;
-		mp = (mblk_t *)*iov_or_mp;
-		p = mp->b_rptr + offset;
-		*out_data_1 = p;
-		if ((p + amt) <= mp->b_wptr) {
-			/* can fit one block into this mblk */
-			*out_data_1_len = amt;
-			*out_data_2 = NULL;
-			*current_offset = offset + amt;
-		} else {
-			/* one block spans two mblks */
-			*out_data_1_len = _PTRDIFF(mp->b_wptr, p);
-			if ((mp = mp->b_cont) == NULL)
-				return;
-			*out_data_2 = mp->b_rptr;
-			*current_offset = (amt - *out_data_1_len);
-		}
-		*iov_or_mp = mp;
-		break;
-	}
-	} /* end switch */
-}
-#endif	/* INLINE_CRYPTO_GET_PTRS */
-
-/*
- * Checks whether a crypto_data_t object is composed of a single contiguous
- * buffer. This is used in all fastpath detection code to avoid the
- * possibility of having to do partial block splicing.
- */
-#define	CRYPTO_DATA_IS_SINGLE_BLOCK(cd) \
-	(cd != NULL && (cd->cd_format == CRYPTO_DATA_RAW || \
-	(cd->cd_format == CRYPTO_DATA_UIO && cd->cd_uio->uio_iovcnt == 1) || \
-	(cd->cd_format == CRYPTO_DATA_MBLK && cd->cd_mp->b_cont == NULL)))
-
-/*
- * Checks whether the next `len' bytes of output, starting at cd_offset,
- * lie entirely within the first segment of a crypto_data_t object
- * (the raw buffer, uio_iov[0] or the first mblk), i.e. whether a
- * fastpath may write them with one contiguous store starting at
- * CRYPTO_DATA_FIRST_BLOCK().  Unlike CRYPTO_DATA_IS_SINGLE_BLOCK() this
- * accepts multi-segment outputs such as the ciphertext uio ZFS passes
- * for encryption (data iovec followed by a MAC iovec), as long as this
- * write does not cross into a later segment.  For RAW buffers the
- * bound is checked by CRYPTO_DATA_HAS_ROOM().
- */
-#define	CRYPTO_DATA_IS_CONTIGUOUS(cd, len) \
-	((cd) != NULL && ((cd)->cd_format == CRYPTO_DATA_RAW || \
-	((cd)->cd_format == CRYPTO_DATA_UIO && \
-	(cd)->cd_uio->uio_iovcnt >= 1 && (cd)->cd_offset >= 0 && \
-	(size_t)(cd)->cd_offset <= (cd)->cd_uio->uio_iov[0].iov_len && \
-	(len) <= (cd)->cd_uio->uio_iov[0].iov_len - \
-	(size_t)(cd)->cd_offset) || \
-	((cd)->cd_format == CRYPTO_DATA_MBLK && (cd)->cd_offset >= 0 && \
-	(size_t)(cd)->cd_offset <= (size_t)MBLKL((cd)->cd_mp) && \
-	(len) <= (size_t)MBLKL((cd)->cd_mp) - (size_t)(cd)->cd_offset)))
-
-/*
- * Returns the first contiguous data buffer in a crypto_data_t object.
- */
-#define	CRYPTO_DATA_FIRST_BLOCK(cd) \
-	(cd->cd_format == CRYPTO_DATA_RAW ? \
-	(void *)(cd->cd_raw.iov_base + cd->cd_offset) : \
-	(cd->cd_format == CRYPTO_DATA_UIO ? \
-	(void *)(cd->cd_uio->uio_iov[0].iov_base + cd->cd_offset) : \
-	(void *)(cd->cd_mp->b_rptr + cd->cd_offset)))
-
 /*
  * Checks whether a crypto_data_t object can absorb `len' more bytes of
  * output at its current cd_offset.  This is used in all fastpath
@@ -578,6 +448,10 @@ crypto_get_ptrs(crypto_data_t *out, void **iov_or_mp, offset_t *current_offset,
  * with a single contiguous write and advances cd_offset directly) is
  * never taken when the write would exceed the output buffer; such
  * requests fall back to the generic path and its validation instead.
+ * cd_length is compared against the absolute cd_offset.  That is exact
+ * when the caller's output starts at cd_offset 0, as it does for ZFS
+ * and SMB3, and stricter than necessary when it starts further in;
+ * such calls simply stay on the generic path.
  * Written without addition so it cannot overflow.
  */
 #define	CRYPTO_DATA_HAS_ROOM(cd, len) \

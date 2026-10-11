@@ -61,4 +61,8 @@ $(OBJS_DIR)/aes_ctr_ktest.o: $(AES_GCM_KTEST_SRC)/aes_ctr_ktest.c
 	$(COMPILE.c) -o $@ $(AES_GCM_KTEST_SRC)/aes_ctr_ktest.c
 	$(CTFCONVERT_O)
 
+$(OBJS_DIR)/aes_modes_ktest.o: $(AES_GCM_KTEST_SRC)/aes_modes_ktest.c
+	$(COMPILE.c) -o $@ $(AES_GCM_KTEST_SRC)/aes_modes_ktest.c
+	$(CTFCONVERT_O)
+
 include $(UTSBASE)/intel/Makefile.targ

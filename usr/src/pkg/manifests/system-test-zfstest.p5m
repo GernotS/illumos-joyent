@@ -2422,6 +2422,7 @@ file path=opt/zfs-tests/tests/functional/dedup/dedup_prune_leak mode=0555
 file path=opt/zfs-tests/tests/functional/dedup/dedup_prune_log_flush mode=0555
 file path=opt/zfs-tests/tests/functional/dedup/dedup_prune_percentage mode=0555
 file path=opt/zfs-tests/tests/functional/dedup/dedup_prune_race mode=0555
+file path=opt/zfs-tests/tests/functional/dedup/dedup_prune_scrub mode=0555
 file path=opt/zfs-tests/tests/functional/dedup/dedup_quota mode=0555
 file path=opt/zfs-tests/tests/functional/dedup/dedup_sync_copies mode=0555
 file path=opt/zfs-tests/tests/functional/dedup/dedup_zap_shrink mode=0555

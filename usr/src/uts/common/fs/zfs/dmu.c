@@ -83,7 +83,7 @@ int zfs_nopwrite_enabled = 1;
  * will wait until the next TXG.
  * A value of zero will disable this throttle.
  */
-uint32_t zfs_per_txg_dirty_frees_percent = 5;
+uint32_t zfs_per_txg_dirty_frees_percent = 30;
 
 /*
  * This can be used for testing, to ensure that certain actions happen
@@ -879,11 +879,18 @@ get_next_chunk(dnode_t *dn, uint64_t *start, uint64_t minimum, uint64_t *l1blks)
 	uint64_t blks;
 	uint64_t maxblks = DMU_MAX_ACCESS >> (dn->dn_indblkshift + 1);
 	/* bytes of data covered by a level-1 indirect block */
-	uint64_t iblkrange =
-	    dn->dn_datablksz * EPB(dn->dn_indblkshift, SPA_BLKPTRSHIFT);
+	uint64_t iblkrange = (uint64_t)dn->dn_datablksz *
+	    EPB(dn->dn_indblkshift, SPA_BLKPTRSHIFT);
 	uint64_t total_l1blks;
 
 	ASSERT3U(minimum, <=, *start);
+
+	/* dn_nlevels == 1 means we don't have any L1 blocks */
+	if (dn->dn_nlevels <= 1) {
+		*l1blks = 0;
+		*start = minimum;
+		return (0);
+	}
 
 	/*
 	 * Check if we can free the entire range assuming that all of the

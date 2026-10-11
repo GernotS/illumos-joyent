@@ -40,6 +40,12 @@
 #	3. ddtprune -p 100 to empty the DDT.
 #	4. Remove the file (frees blocks whose DDT entry was pruned).
 #	5. `zdb -bcc` must report no leaked space.
+#	6. Write a block with copies=1, write it again with copies=2, so its
+#	   entry gains a copy that the first block does not refer to, and
+#	   remove the second file.  ddtprune must leave that entry alone
+#	   (upstream #19443 / #19549): pruning it would leak the added copy.
+#	7. `zdb -bcc` must report no leak after the prune, and again after
+#	   the first file is removed too.
 #
 # illumos adaptations vs upstream:
 #	- get/set_tunable (not save/restore_tunable).
@@ -63,11 +69,14 @@ typeset orig_flush_min=$(get_tunable zfs_dedup_log_flush_entries_min)
 log_must set_tunable32 zfs_dedup_log_txg_max 1
 log_must set_tunable32 zfs_dedup_log_flush_entries_min 1000000
 
+typeset blockfile=$TEST_BASE_DIR/dedup_prune_leak.blk.$$
+
 function cleanup
 {
 	if poolexists $TESTPOOL ; then
 		destroy_pool $TESTPOOL
 	fi
+	rm -f $blockfile
 	log_must set_tunable32 zfs_dedup_log_txg_max $orig_txg_max
 	log_must set_tunable32 zfs_dedup_log_flush_entries_min $orig_flush_min
 }
@@ -122,5 +131,49 @@ if ! echo "$zdb_out" | grep -q "No leaks (block sum matches space maps exactly)"
 	log_fail "DDT pruning followed by free leaked space"
 fi
 log_must check_pool_status $TESTPOOL "errors" "No known data errors"
+
+function zdb_no_leak	# message
+{
+	zdb_out=$(zdb -bcc $TESTPOOL 2>&1)
+	zdb_rc=$?
+	log_note "$zdb_out"
+	if (( zdb_rc != 0 )); then
+		log_fail "zdb -bcc failed (exit $zdb_rc)"
+	fi
+	if ! echo "$zdb_out" | \
+	    grep -q "No leaks (block sum matches space maps exactly)"; then
+		log_fail "$1"
+	fi
+}
+
+#
+# An entry extended by a copies=2 write must not be pruned: the block
+# written before the extension refers to only one of its two copies.
+#
+log_must zfs create -o dedup=on -o copies=1 -o compression=off \
+    $TESTPOOL/$TESTFS1
+mountpoint=$(get_prop mountpoint $TESTPOOL/$TESTFS1)
+log_must dd if=/dev/urandom of=$blockfile bs=128k count=1
+log_must cp $blockfile $mountpoint/f3
+sync_pool $TESTPOOL
+log_must zfs set copies=2 $TESTPOOL/$TESTFS1
+log_must cp $blockfile $mountpoint/f4
+sync_pool $TESTPOOL
+log_must rm $mountpoint/f4
+
+i=0
+while (( i < 5 )); do
+	sync_pool $TESTPOOL
+	(( i += 1 ))
+done
+sleep 2
+
+log_must zpool ddtprune -p 100 $TESTPOOL
+sync_pool $TESTPOOL
+zdb_no_leak "DDT pruning leaks the copy an extended entry gained"
+
+log_must rm $mountpoint/f3
+sync_pool $TESTPOOL
+zdb_no_leak "Freeing the block of a kept extended entry leaks space"
 
 log_pass "DDT pruning followed by free does not leak space"

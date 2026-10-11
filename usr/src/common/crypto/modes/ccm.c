@@ -33,14 +33,13 @@
 
 #include <sys/types.h>
 #include <sys/kmem.h>
-#define	INLINE_CRYPTO_GET_PTRS
 #include <modes/modes.h>
 #include <sys/crypto/common.h>
 #include <sys/crypto/impl.h>
 #include <sys/byteorder.h>
 
 #if defined(__amd64)
-#include <sys/x86_archext.h>	/* x86_featureset, X86FSET_AES, is_x86_feature */
+#include <sys/x86_archext.h>	/* x86_featureset, is_x86_feature() */
 #ifdef _KERNEL
 #include <sys/disp.h>		/* kpreempt_disable(), kpreempt_enable() */
 
@@ -625,8 +624,13 @@ ccm_decrypt_final(ccm_ctx_t *ctx, crypto_data_t *out, size_t block_size,
 	ccm_mac_p = (uint8_t *)ctx->ccm_tmp;
 	calculate_ccm_mac((ccm_ctx_t *)ctx, ccm_mac_p, encrypt_block);
 
-	/* compare the input CCM MAC value with what we calculated */
-	if (bcmp(ctx->ccm_mac_input_buf, ccm_mac_p, ctx->ccm_mac_len)) {
+	/*
+	 * Compare the input CCM MAC value with what we calculated.  As in
+	 * gcm_decrypt_final(), this comparison is against an
+	 * attacker-supplied value and so must not exit early.
+	 */
+	if (crypto_memcmp(ctx->ccm_mac_input_buf, ccm_mac_p,
+	    ctx->ccm_mac_len)) {
 		/* They don't match */
 		rv = CRYPTO_INVALID_MAC;
 		goto out;

@@ -41,9 +41,12 @@
 #include <sys/endian.h>
 #include <sys/errno.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 
 #include <err.h>
+#include <fcntl.h>
 #include <paths.h>
+#include <spawn.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -342,12 +345,67 @@ basl_load(struct vmctx *ctx, int fd)
 	return (0);
 }
 
+/*
+ * Run the ASL compiler directly rather than through system(3C).  This avoids
+ * the need for a shell, which is not available in a confined environment such
+ * as an illumos bhyve zone.  Creating the child still requires the proc_fork
+ * privilege.
+ */
+static int
+basl_run_iasl(const char *aml_file, const char *asl_file)
+{
+	extern char **environ;
+	posix_spawn_file_actions_t fa;
+	char *argv[] = { "iasl", "-p", (char *)aml_file, (char *)asl_file,
+	    NULL };
+	pid_t pid;
+	int err, status;
+
+	err = posix_spawn_file_actions_init(&fa);
+	if (err != 0)
+		return (err);
+
+	/*
+	 * iasl sends the results of the compilation to stdout.  Discard
+	 * them, unless the user has requested verbose output for debugging
+	 * purposes.
+	 */
+	if (!basl_verbose_iasl) {
+		err = posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO,
+		    "/dev/null", O_WRONLY, 0);
+		if (err != 0)
+			goto out;
+	}
+
+	err = posix_spawn(&pid, BHYVE_ASL_COMPILER, &fa, NULL, argv, environ);
+	if (err != 0) {
+		warnx("%s: unable to run %s: %s", __func__, BHYVE_ASL_COMPILER,
+		    strerror(err));
+		goto out;
+	}
+
+	while (waitpid(pid, &status, 0) == -1) {
+		if (errno != EINTR) {
+			err = errno;
+			goto out;
+		}
+	}
+
+	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+		warnx("%s: %s failed with status 0x%x", __func__,
+		    BHYVE_ASL_COMPILER, status);
+		err = EIO;
+	}
+
+out:
+	(void) posix_spawn_file_actions_destroy(&fa);
+	return (err);
+}
+
 static int
 basl_compile(struct vmctx *ctx, int (*fwrite_section)(FILE *))
 {
 	struct basl_fio io[2];
-	static char iaslbuf[3*MAXPATHLEN + 10];
-	const char *fmt;
 	int err;
 
 	err = basl_start(&io[0], &io[1]);
@@ -355,22 +413,7 @@ basl_compile(struct vmctx *ctx, int (*fwrite_section)(FILE *))
 		err = (*fwrite_section)(io[0].fp);
 
 		if (!err) {
-			/*
-			 * iasl sends the results of the compilation to
-			 * stdout. Shut this down by using the shell to
-			 * redirect stdout to /dev/null, unless the user
-			 * has requested verbose output for debugging
-			 * purposes
-			 */
-			fmt = basl_verbose_iasl ?
-				"%s -p %s %s" :
-				"/bin/sh -c \"%s -p %s %s\" 1> /dev/null";
-
-			snprintf(iaslbuf, sizeof(iaslbuf),
-				 fmt,
-				 BHYVE_ASL_COMPILER,
-				 io[1].f_name, io[0].f_name);
-			err = system(iaslbuf);
+			err = basl_run_iasl(io[1].f_name, io[0].f_name);
 
 			if (!err) {
 				/*

@@ -1393,6 +1393,10 @@ allocation class while greater blocks will be assigned to the regular class.
 Valid values are zero or a power of two from 512B up to 128K.
 The default size is 0 which means no small file or zvol blocks
 will be allocated in the special class.
+For volumes, the property only takes effect when it is set on the volume
+itself, locally or by
+.Nm zfs Cm receive ;
+a value inherited from a parent file system is ignored.
 .Pp
 Before setting this property, a special class vdev must be added to the
 pool.

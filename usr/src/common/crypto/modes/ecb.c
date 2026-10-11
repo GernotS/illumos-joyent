@@ -35,7 +35,6 @@
 
 #include <sys/debug.h>
 #include <sys/types.h>
-#define	INLINE_CRYPTO_GET_PTRS
 #include <modes/modes.h>
 #include <sys/crypto/common.h>
 #include <sys/crypto/impl.h>
@@ -63,6 +62,8 @@ ecb_cipher_contiguous_blocks(ecb_ctx_t *ctx, char *data, size_t length,
 	uint8_t *lastp;
 	void *iov_or_mp;
 	offset_t offset;
+	uint8_t *outp;
+	size_t outlen;
 	uint8_t *out_data_1;
 	uint8_t *out_data_2;
 	size_t out_data_1_len;
@@ -103,22 +104,25 @@ ecb_cipher_contiguous_blocks(ecb_ctx_t *ctx, char *data, size_t length,
 	 * - fastpath is enabled
 	 * - caller passed an accelerated ECB version of the cipher function
 	 * - input is block-aligned
-	 * - output is a single contiguous region or the user requested that
-	 *   we overwrite their input buffer (input/output aliasing allowed)
+	 * - the output segment at the current output position can take
+	 *   the whole write (crypto_data_contig()) or the user requested
+	 *   that we overwrite their input buffer (input/output aliasing
+	 *   allowed)
 	 * - the output has room for the entire contiguous write
 	 *   (CRYPTO_DATA_HAS_ROOM); otherwise fall back to the generic
 	 *   path and its per-segment handling
 	 */
 	if (ecb_fastpath_enabled && cipher_ecb != NULL &&
 	    ctx->ecb_remainder_len == 0 && length % block_size == 0 &&
-	    (out == NULL || (CRYPTO_DATA_IS_CONTIGUOUS(out, length) &&
-	    CRYPTO_DATA_HAS_ROOM(out, length)))) {
+	    (out == NULL ||
+	    ((outp = crypto_data_contig(out, &outlen)) != NULL &&
+	    outlen >= length && CRYPTO_DATA_HAS_ROOM(out, length)))) {
 		if (out == NULL) {
 			cipher_ecb(ctx->ecb_keysched, (uint8_t *)data,
 			    (uint8_t *)data, length);
 		} else {
 			cipher_ecb(ctx->ecb_keysched, (uint8_t *)data,
-			    CRYPTO_DATA_FIRST_BLOCK(out), length);
+			    outp, length);
 			out->cd_offset += length;
 		}
 		return (CRYPTO_SUCCESS);

@@ -3822,6 +3822,16 @@ spa_ld_load_dedup_tables(spa_t *spa)
 		return (spa_vdev_err(rvd, VDEV_AUX_CORRUPT_DATA, EIO));
 	}
 
+	/*
+	 * dsl_scan_init() runs before the DDTs are loaded, so its
+	 * ddt_walk_init() found no dedup log to flush.  Redo it now for a
+	 * scan that is being resumed, or its walk would miss entries that
+	 * so far exist only in the log.
+	 */
+	dsl_scan_t *scn = spa->spa_dsl_pool->dp_scan;
+	if (scn != NULL && scn->scn_phys.scn_state == DSS_SCANNING)
+		ddt_walk_init(spa, scn->scn_phys.scn_max_txg);
+
 	return (0);
 }
 

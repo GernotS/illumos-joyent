@@ -1919,8 +1919,9 @@ aes_ctr_mode(const void *ks, const uint8_t *input, uint8_t *output,
 			 * counter[1]); on overflow it wraps to 0 and must NOT
 			 * carry into the nonce.  aes_ctr_intel8() forms each of
 			 * its 8 counter blocks with a fixed upper half and a
-			 * plain 64-bit add of the lower half (see PREP_CTR_BLOCKS
-			 * in aes_intel.S), and the scalar tail below wraps the
+			 * plain 64-bit add of the lower half (see
+			 * PREP_CTR_BLOCKS in aes_intel.S), and the scalar
+			 * tail below wraps the
 			 * same way, so a wrap here needs no special handling.
 			 */
 			counter[1] += 8;

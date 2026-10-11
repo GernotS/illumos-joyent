@@ -2868,10 +2868,19 @@ zio_ddt_collision(zio_t *zio, ddt_t *ddt, ddt_entry_t *dde)
 	 * ddt_lock we hold here), so without it the lead zio could finish and
 	 * free its ABD while we compare against it -- a use-after-free panic
 	 * in abd_cmp().  Ported from upstream OpenZFS PR #18720.
+	 *
+	 * dde_lead_zio[] is indexed by DDT_PHYS_FOR_COPIES(): a flat table
+	 * keeps its one in-flight write in slot 0, a traditional table one
+	 * per copies value in slots 1-3, with slot 0 its (never written)
+	 * ditto slot.  Checking only slots 1-3 missed every in-flight write
+	 * on a flat table, so two different blocks with the same checksum
+	 * could share one location without being compared.
 	 */
 	if (dde->dde_io != NULL) {
 		mutex_enter(&dde->dde_io->dde_io_lock);
-		for (int p = DDT_PHYS_SINGLE; p <= DDT_PHYS_TRIPLE; p++) {
+		for (int p = 0; p < DDT_NPHYS(ddt); p++) {
+			if (DDT_PHYS_IS_DITTO(ddt, p))
+				continue;
 			zio_t *lio = dde->dde_io->dde_lead_zio[p];
 			if (lio == NULL)
 				continue;
@@ -3680,12 +3689,13 @@ zio_ddt_free(zio_t *zio)
 	ddt_t *ddt = ddt_select(spa, bp);
 	ddt_entry_t *dde;
 	ddt_phys_variant_t v;
+	int error;
 
 	ASSERT(BP_GET_DEDUP(bp));
 	ASSERT(zio->io_child_type == ZIO_CHILD_LOGICAL);
 
 	ddt_enter(ddt);
-	freedde = dde = ddt_lookup(ddt, bp, B_TRUE);
+	freedde = dde = ddt_lookup_error(ddt, bp, B_TRUE, &error);
 	if (dde != NULL) {
 		v = ddt_phys_select(ddt, dde, bp);
 		if (v != DDT_PHYS_NONE) {
@@ -3696,6 +3706,23 @@ zio_ddt_free(zio_t *zio)
 		}
 	}
 	ddt_exit(ddt);
+
+	/*
+	 * The entry couldn't be read, so we can't tell whether other block
+	 * pointers still reference this block.  Leak this reference rather
+	 * than risk freeing data other files still use.  Falling through to
+	 * the free below, as upstream OpenZFS does, would free a shared
+	 * block on a read error.
+	 */
+	if (error != 0) {
+		zfs_dbgmsg("%s: DDT entry for dedup BP DVA[0]=<%llu:%llx:%llx> "
+		    "unreadable (error %d); leaking the block instead of "
+		    "freeing it", spa_name(spa),
+		    (u_longlong_t)DVA_GET_VDEV(&bp->blk_dva[0]),
+		    (u_longlong_t)DVA_GET_OFFSET(&bp->blk_dva[0]),
+		    (u_longlong_t)DVA_GET_ASIZE(&bp->blk_dva[0]), error);
+		return (zio);
+	}
 
 	/*
 	 * The DDT has no matching entry for this BP -- either the entry
