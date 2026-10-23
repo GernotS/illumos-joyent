@@ -2605,6 +2605,8 @@ const struct re_hw_regaddr_array mac_r26_1_mcu[] = {
 	{ 0xb890, 0x3323 }, { 0xb890, 0x2324 }, { 0xb890, 0x2425 }
 };
 
+const size_t mac_r26_1_mcu_len = ARRAY_SIZE(mac_r26_1_mcu);
+
 const struct re_hw_regaddr_array mac_r26_2_mcu[] = {
 	{ 0xa436, 0x8023 }, { 0xa438, 0x4701 }, { 0xa436, 0xb82e },
 	{ 0xa438, 0x0001 }, { 0xb820, 0x0090 }, { 0xa436, 0xa016 },
@@ -3424,3 +3426,5 @@ const struct re_hw_regaddr_array mac_r26_2_mcu[] = {
 	{ 0xb82e, 0x0000 }, { 0xa436, 0x8023 }, { 0xa438, 0x0000 },
 	{ 0xb820, 0x0000 }
 };
+
+const size_t mac_r26_2_mcu_len = ARRAY_SIZE(mac_r26_2_mcu);
