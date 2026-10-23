@@ -33,3 +33,15 @@ PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
 LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
 NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+Realtek Semiconductor Corporation microcode notice
+--------------------------------------------------
+
+The RTL8127 MAC and PHY microcode tables in if_re_microcode_8127.c
+are distributed under the following notice:
+
+Copyright (c) 2026 Realtek Semiconductor Corporation
+
+Permission is hereby granted for the distribution of this firmware
+data in hexadecimal or equivalent format, provided this copyright
+notice is accompanying it.

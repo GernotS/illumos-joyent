@@ -329,6 +329,11 @@ re_mac_config_ext_mcu(struct re_softc *sc, enum re_mac_type type)
 				    bps->vals[i]);
 				/* Switch to page 1. */
 			re_switch_mcu_ram_page(sc, 1);
+			for (; i < 512; i++)
+				re_write_mac_ocp(sc, bps->regs[i],
+				    bps->vals[i]);
+			/* Switch to page 2. */
+			re_switch_mcu_ram_page(sc, 2);
 			for (; i < bps->count; i++)
 				re_write_mac_ocp(sc, bps->regs[i],
 				    bps->vals[i]);
@@ -342,7 +347,8 @@ re_mac_config_ext_mcu(struct re_softc *sc, enum re_mac_type type)
 		re_write_mac_ocp(sc, 0xfc32, 0x0166);
 		re_write_mac_ocp(sc, 0xfc34, 0x1a6a);
 		re_write_mac_ocp(sc, 0xfc36, 0x1a2c);
-		re_write_mac_ocp(sc, 0xfc48, 0x00ff);
+		re_write_mac_ocp(sc, 0xfc3c, 0x1598);
+		re_write_mac_ocp(sc, 0xfc48, 0x04ff);
 	}
 
 	/* Write microcode version. */
@@ -686,6 +692,18 @@ re_phy_config_mac_r27(struct re_softc *sc)
 	re_write_phy_ocp(sc, 0xb87c, 0x82ce);
 	val = re_read_phy_ocp(sc, 0xb87e) & ~0xf000;
 	re_write_phy_ocp(sc, 0xb87e, val | 0x4000);
+	re_write_phy_ocp(sc, 0xb87c, 0x83a5);
+	val = re_read_phy_ocp(sc, 0xb87e) & ~0xff00;
+	re_write_phy_ocp(sc, 0xb87e, val | 0x0400);
+	re_write_phy_ocp(sc, 0xb87c, 0x83a6);
+	val = re_read_phy_ocp(sc, 0xb87e) & ~0xff00;
+	re_write_phy_ocp(sc, 0xb87e, val | 0x0400);
+	re_write_phy_ocp(sc, 0xb87c, 0x83a7);
+	val = re_read_phy_ocp(sc, 0xb87e) & ~0xff00;
+	re_write_phy_ocp(sc, 0xb87e, val | 0x0400);
+	re_write_phy_ocp(sc, 0xb87c, 0x83a8);
+	val = re_read_phy_ocp(sc, 0xb87e) & ~0xff00;
+	re_write_phy_ocp(sc, 0xb87e, val | 0x0400);
 	re_write_phy_ocp(sc, 0xb87c, 0x84ac);
 	re_write_phy_ocp(sc, 0xb87e, 0x0000);
 	re_write_phy_ocp(sc, 0xb87c, 0x84ae);
@@ -698,7 +716,7 @@ re_phy_config_mac_r27(struct re_softc *sc)
 	re_write_phy_ocp(sc, 0xb87c, 0x8ffc);
 	re_write_phy_ocp(sc, 0xb87e, 0x6008);
 	re_write_phy_ocp(sc, 0xb87c, 0x8ffe);
-	re_write_phy_ocp(sc, 0xb87e, 0xf450);
+	re_write_phy_ocp(sc, 0xb87e, 0xf4ff);
 	re_write_phy_ocp(sc, 0xb87c, 0x8015);
 	RE_PHY_SETBIT(sc, 0xb87e, 0x0200);
 	re_write_phy_ocp(sc, 0xb87c, 0x8016);
@@ -809,6 +827,8 @@ re_phy_config_mac_r27(struct re_softc *sc)
 	val = re_read_phy_ocp(sc, 0xa438) & ~0xff00;
 	re_write_phy_ocp(sc, 0xa438, val | 0x1600);
 	RE_PHY_SETBIT(sc, 0xa430, 0x0003);
+	RE_PHY_SETBIT(sc, 0xa442, 0x0080);
+	RE_PHY_CLRBIT(sc, 0xa430, 0x1000);
 }
 
 static void
@@ -1684,7 +1704,7 @@ re_phy_config_mcu(struct re_softc *sc, uint16_t rcodever)
 				re_write_phy_ocp(sc,
 				    mac_r26_2_mcu[i].reg, mac_r26_2_mcu[i].val);
 		} else if (sc->re_type == MAC_R27) {
-			for (i = 0; i < 1887; i++)
+			for (i = 0; i < 4097; i++)
 				re_write_phy_ocp(sc,
 				    mac_r27_mcu[i].reg, mac_r27_mcu[i].val);
 			re_patch_phy_mcu(sc, 0);
