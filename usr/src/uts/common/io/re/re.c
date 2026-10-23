@@ -173,7 +173,7 @@ re_reinit_rings_for_reset(struct re_softc *sc)
 	for (i = 0; i < sc->num_rx_rings; i++) {
 		re_rx_ring_t *rr = &sc->rx_rings[i];
 
-		if (re_rx_ring_fill(sc, rr) != DDI_SUCCESS)
+		if (re_rx_ring_reinit(sc, rr) != DDI_SUCCESS)
 			return (DDI_FAILURE);
 	}
 
@@ -598,6 +598,16 @@ re_detach(dev_info_t *devinfo, ddi_detach_cmd_t cmd)
 	 */
 	if ((sc->attach_state & RE_ATTACH_MAC_START) != 0)
 		return (DDI_FAILURE);
+
+	/*
+	 * RX buffers that are still loaned up the stack reference DMA
+	 * resources of this instance and are freed when they come back.
+	 */
+	if (sc->rx_pending != 0) {
+		dev_err(devinfo, CE_NOTE, "!%u rx buffer sets still loaned, "
+		    "refusing detach", sc->rx_pending);
+		return (DDI_FAILURE);
+	}
 
 	re_unattach(sc);
 	return (DDI_SUCCESS);

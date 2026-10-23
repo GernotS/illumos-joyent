@@ -216,6 +216,7 @@ static void re_rx_recycle(caddr_t arg);
 static void re_tx_buf_recycle(re_tx_buffer_t *tb);
 static int re_alloc_rings_desc(struct re_softc *sc);
 static void re_free_rx_bufs(struct re_softc *sc);
+void re_free_rx_buf(struct re_softc *sc, re_rx_buffer_t *rb);
 static void re_free_tx_rings_bufs(struct re_softc *sc);
 static int re_rx_buf_create_mblk(re_rx_buffer_t *rb);
 static void re_rx_desc_rearm(struct re_softc *sc, re_rx_ring_t *rr, uint32_t idx, re_rx_buffer_t *rb);
@@ -285,12 +286,7 @@ re_alloc_rings(struct re_softc *sc)
 		rr->rrx_l4_csum_ok = B_FALSE;
 		mutex_init(&rr->rx_lock, NULL, MUTEX_DRIVER,
 		    DDI_INTR_PRI(sc->intr_pri));
-		mutex_init(&rr->rx_free_lock, NULL, MUTEX_DRIVER,
-		    DDI_INTR_PRI(sc->intr_pri));
 		rr->rx_lock_init = B_TRUE;
-
-		cv_init(&rr->rx_free_cv, NULL, CV_DRIVER, NULL);
-		rr->rx_free_cv_init = B_TRUE;
 
 		if (!re_rx_ring_kstats_init(sc, rr))
 			goto fail;
@@ -406,14 +402,8 @@ re_free_rings(struct re_softc *sc)
 				rr->rx_kstat_init = B_FALSE;
 			}
 
-			if (rr->rx_free_cv_init) {
-				cv_destroy(&rr->rx_free_cv);
-				rr->rx_free_cv_init = B_FALSE;
-			}
-
 			if (rr->rx_lock_init) {
 				mutex_destroy(&rr->rx_lock);
-				mutex_destroy(&rr->rx_free_lock);
 				rr->rx_lock_init = B_FALSE;
 			}
 		}
@@ -596,52 +586,149 @@ re_alloc_rx_buf(struct re_softc *sc, re_rx_buffer_t *rb, size_t len)
 	return (DDI_SUCCESS);
 }
 
-int
-re_alloc_rx_bufs(struct re_softc *sc)
+/*
+ * Free an re_rx_data_t.  No buffer may be loaned any more and the mblks
+ * of the buffers must already be gone.
+ */
+static void
+re_rx_data_destroy(re_rx_data_t *rxd)
 {
-	int r, i, err;
+	uint32_t i;
 
-	for (r = 0; r < sc->num_rx_rings; r++) {
-		re_rx_ring_t *rr = &sc->rx_rings[r];
+	ASSERT0(rxd->rxd_loaned);
 
-		if (rr->num_bufs < rr->num_desc)
-			goto fail;
+	if (rxd->rxd_bufs != NULL) {
+		for (i = 0; i < rxd->rxd_num_bufs; i++)
+			re_free_rx_buf(rxd->rxd_sc, &rxd->rxd_bufs[i]);
 
-		rr->rx_bufs = kmem_zalloc(sizeof (re_rx_buffer_t) *
-		    rr->num_bufs, KM_SLEEP);
-		rr->rx_free_list = kmem_zalloc(sizeof (re_rx_buffer_t *) *
-		    rr->num_bufs, KM_SLEEP);
-		rr->rx_desc_bufs = kmem_zalloc(sizeof (re_rx_buffer_t *) *
-		    rr->num_desc, KM_SLEEP);
+		kmem_free(rxd->rxd_bufs,
+		    sizeof (re_rx_buffer_t) * rxd->rxd_num_bufs);
+	}
 
-		rr->rx_nfree = 0;
-		rr->rx_cons = 0;
-		rr->rx_loaned = 0;
+	if (rxd->rxd_free_list != NULL) {
+		kmem_free(rxd->rxd_free_list,
+		    sizeof (re_rx_buffer_t *) * rxd->rxd_num_bufs);
+	}
 
-		for (i = 0; i < rr->num_bufs; i++) {
-			re_rx_buffer_t *rb = &rr->rx_bufs[i];
+	if (rxd->rxd_desc_bufs != NULL) {
+		kmem_free(rxd->rxd_desc_bufs,
+		    sizeof (re_rx_buffer_t *) * rxd->rxd_num_desc);
+	}
 
-			rb->rx_ring = rr;
+	cv_destroy(&rxd->rxd_cv);
+	mutex_destroy(&rxd->rxd_lock);
+	kmem_free(rxd, sizeof (*rxd));
+}
+
+/*
+ * Free the mblks of all buffers that are not loaned.  Their free routine
+ * re_rx_recycle() returns immediately for buffers that are not loaned.
+ */
+static void
+re_rx_data_free_mblks(re_rx_data_t *rxd)
+{
+	uint32_t i;
+
+	for (i = 0; i < rxd->rxd_num_bufs; i++) {
+		re_rx_buffer_t *rb = &rxd->rxd_bufs[i];
+
+		if (!rb->rrb_loaned && rb->re_rx_mp != NULL) {
+			mblk_t *mp = rb->re_rx_mp;
+
 			rb->re_rx_mp = NULL;
-			rb->rrb_loaned = B_FALSE;
-			rb->rrb_free_rtn.free_func = re_rx_recycle;
-			rb->rrb_free_rtn.free_arg = (caddr_t)rb;
-
-			err = re_alloc_rx_buf(sc, rb, RE_JUMBO_FRAMELEN);
-			if (err != DDI_SUCCESS)
-				goto fail;
-
-			err = re_rx_buf_create_mblk(rb);
-			if (err != DDI_SUCCESS)
-				goto fail;
+			freemsg(mp);
 		}
 	}
+}
+
+static int
+re_rx_data_alloc(struct re_softc *sc, re_rx_ring_t *rr)
+{
+	re_rx_data_t *rxd;
+	uint32_t i;
+
+	ASSERT3P(rr->rx_data, ==, NULL);
+
+	if (rr->num_bufs < rr->num_desc)
+		return (DDI_FAILURE);
+
+	rxd = kmem_zalloc(sizeof (*rxd), KM_SLEEP);
+	rxd->rxd_sc = sc;
+	rxd->rxd_ring = rr;
+	rxd->rxd_num_bufs = rr->num_bufs;
+	rxd->rxd_num_desc = rr->num_desc;
+	mutex_init(&rxd->rxd_lock, NULL, MUTEX_DRIVER,
+	    DDI_INTR_PRI(sc->intr_pri));
+	cv_init(&rxd->rxd_cv, NULL, CV_DRIVER, NULL);
+
+	rxd->rxd_bufs = kmem_zalloc(sizeof (re_rx_buffer_t) *
+	    rxd->rxd_num_bufs, KM_SLEEP);
+	rxd->rxd_free_list = kmem_zalloc(sizeof (re_rx_buffer_t *) *
+	    rxd->rxd_num_bufs, KM_SLEEP);
+	rxd->rxd_desc_bufs = kmem_zalloc(sizeof (re_rx_buffer_t *) *
+	    rxd->rxd_num_desc, KM_SLEEP);
+
+	for (i = 0; i < rxd->rxd_num_bufs; i++) {
+		re_rx_buffer_t *rb = &rxd->rxd_bufs[i];
+
+		rb->rx_data = rxd;
+		rb->rrb_free_rtn.free_func = re_rx_recycle;
+		rb->rrb_free_rtn.free_arg = (caddr_t)rb;
+
+		if (re_alloc_rx_buf(sc, rb, RE_JUMBO_FRAMELEN) != DDI_SUCCESS)
+			goto fail;
+
+		if (re_rx_buf_create_mblk(rb) != DDI_SUCCESS)
+			goto fail;
+	}
+
+	mutex_enter(&rr->rx_lock);
+	rr->rx_data = rxd;
+	rr->rx_cons = 0;
+	mutex_exit(&rr->rx_lock);
 
 	return (DDI_SUCCESS);
 
 fail:
-	re_free_rx_bufs(sc);
+	re_rx_data_free_mblks(rxd);
+	re_rx_data_destroy(rxd);
 	return (DDI_FAILURE);
+}
+
+/*
+ * Detach the RX buffers from the ring.  They are freed right away if none
+ * of them is loaned, otherwise by the last re_rx_recycle() call.
+ */
+static void
+re_rx_data_retire(re_rx_ring_t *rr)
+{
+	struct re_softc *sc = rr->sc;
+	re_rx_data_t *rxd;
+
+	if (rr->rx_data == NULL)
+		return;
+
+	mutex_enter(&rr->rx_lock);
+	rxd = rr->rx_data;
+	rr->rx_data = NULL;
+	re_rx_assembly_reset(rr);
+	mutex_exit(&rr->rx_lock);
+
+	re_rx_data_free_mblks(rxd);
+
+	mutex_enter(&rxd->rxd_lock);
+	rxd->rxd_retired = B_TRUE;
+	rxd->rxd_ring = NULL;
+	if (rxd->rxd_loaned != 0) {
+		atomic_inc_32(&sc->rx_pending);
+		dev_err(sc->dev, CE_NOTE, "!rx ring %u stopped with %u "
+		    "buffers still loaned", rr->index, rxd->rxd_loaned);
+		mutex_exit(&rxd->rxd_lock);
+		return;
+	}
+	mutex_exit(&rxd->rxd_lock);
+
+	re_rx_data_destroy(rxd);
 }
 
 static void
@@ -786,32 +873,49 @@ re_rx_buf_sync(re_rx_buffer_t *rb, uint_t sync_flag)
 #endif
 }
 
-int
+/*
+ * Hand all buffers of a freshly allocated re_rx_data_t to the hardware
+ * and the free list.  Must only be used before any buffer was loaned.
+ */
+static void
 re_rx_ring_fill(struct re_softc *sc, re_rx_ring_t *rr)
 {
+	re_rx_data_t *rxd = rr->rx_data;
 	uint32_t i;
 
-	if (rr->num_bufs < rr->num_desc)
-		return (DDI_FAILURE);
+	ASSERT0(rxd->rxd_loaned);
 
 	re_rx_assembly_reset(rr);
-
-	rr->rx_nfree = 0;
 	rr->rx_cons = 0;
-	rr->rx_loaned = 0;
 
-	for (i = 0; i < rr->num_desc; i++) {
-		re_rx_buffer_t *rb = &rr->rx_bufs[i];
+	mutex_enter(&rxd->rxd_lock);
+	rxd->rxd_nfree = 0;
+	for (i = rxd->rxd_num_desc; i < rxd->rxd_num_bufs; i++)
+		rxd->rxd_free_list[rxd->rxd_nfree++] = &rxd->rxd_bufs[i];
+	mutex_exit(&rxd->rxd_lock);
 
-		rr->rx_desc_bufs[i] = rb;
+	for (i = 0; i < rxd->rxd_num_desc; i++) {
+		re_rx_buffer_t *rb = &rxd->rxd_bufs[i];
+
+		rxd->rxd_desc_bufs[i] = rb;
 		re_rx_desc_rearm(sc, rr, i, rb);
 	}
+}
 
-	for (; i < rr->num_bufs; i++) {
-		re_rx_buffer_t *rb = &rr->rx_bufs[i];
-		rr->rx_free_list[rr->rx_nfree++] = rb;
-	}
+/*
+ * Replace the RX buffers of a stopped ring, used by the reset path.
+ * Buffers that are still loaned up the stack must not be given back to the
+ * hardware, so the old set is retired and a new one allocated.
+ */
+int
+re_rx_ring_reinit(struct re_softc *sc, re_rx_ring_t *rr)
+{
+	re_rx_data_retire(rr);
 
+	if (re_rx_data_alloc(sc, rr) != DDI_SUCCESS)
+		return (DDI_FAILURE);
+
+	re_rx_ring_fill(sc, rr);
 	return (DDI_SUCCESS);
 }
 
@@ -821,58 +925,21 @@ re_free_rx_buf(struct re_softc *sc, re_rx_buffer_t *rb)
 	(void)sc;
 
 	re_dma_block_free(&rb->rx_dma_buf);
-
-	rb->rx_ring = NULL;
 }
 
 static void
 re_free_rx_bufs(struct re_softc *sc)
 {
-	int r, i;
+	int r;
 
 	if (sc == NULL)
 		return;
 
-	for (r = 0; r < sc->num_rx_rings; r++) {
-		re_rx_ring_t *rr = &sc->rx_rings[r];
+	if (sc->rx_rings == NULL)
+		return;
 
-		if (rr == NULL)
-			continue;
-
-		re_rx_assembly_reset(rr);
-
-		if (rr->rx_bufs != NULL) {
-			for (i = 0; i < rr->num_bufs; i++) {
-				re_rx_buffer_t *rb = &rr->rx_bufs[i];
-
-				if (rb->re_rx_mp != NULL) {
-					freemsg(rb->re_rx_mp);
-					rb->re_rx_mp = NULL;
-				}
-
-				re_free_rx_buf(sc, rb);
-			}
-
-			kmem_free(rr->rx_bufs,
-			    sizeof (re_rx_buffer_t) * rr->num_bufs);
-			rr->rx_bufs = NULL;
-		}
-
-		if (rr->rx_free_list != NULL) {
-			kmem_free(rr->rx_free_list,
-			    sizeof (re_rx_buffer_t *) * rr->num_bufs);
-			rr->rx_free_list = NULL;
-		}
-
-		if (rr->rx_desc_bufs != NULL) {
-			kmem_free(rr->rx_desc_bufs,
-			    sizeof (re_rx_buffer_t *) * rr->num_desc);
-			rr->rx_desc_bufs = NULL;
-		}
-
-		rr->rx_nfree = 0;
-		rr->rx_cons = 0;
-	}
+	for (r = 0; r < sc->num_rx_rings; r++)
+		re_rx_data_retire(&sc->rx_rings[r]);
 }
 
 static void
@@ -903,21 +970,17 @@ re_rx_ring_init_masks(struct re_softc *sc, re_rx_ring_t *rr)
 int
 re_init_rx_rings(struct re_softc *sc)
 {
-	int err;
 	int i;
-
-	err = re_alloc_rx_bufs(sc);
-	if (err != DDI_SUCCESS)
-		return (DDI_FAILURE);
 
 	for (i = 0; i < sc->num_rx_rings; i++) {
 		re_rx_ring_t *rr = &sc->rx_rings[i];
 
 		re_rx_ring_init_masks(sc, rr);
 
-		err = re_rx_ring_fill(sc, rr);
-		if (err != DDI_SUCCESS)
+		if (re_rx_data_alloc(sc, rr) != DDI_SUCCESS)
 			goto fail;
+
+		re_rx_ring_fill(sc, rr);
 	}
 
 	return (DDI_SUCCESS);
@@ -947,42 +1010,59 @@ static void
 re_rx_recycle(caddr_t arg)
 {
 	re_rx_buffer_t *rb = (re_rx_buffer_t *)arg;
-	re_rx_ring_t *rr = rb->rx_ring;
+	re_rx_data_t *rxd = rb->rx_data;
+	struct re_softc *sc = rxd->rxd_sc;
+	boolean_t last;
 
 	rb->re_rx_mp = NULL;
 
+	/*
+	 * Buffers that were never loaned only get here when the driver
+	 * frees their mblk itself.
+	 */
 	if (!rb->rrb_loaned)
 		return;
 
+	mutex_enter(&rxd->rxd_lock);
 	rb->rrb_loaned = B_FALSE;
+	ASSERT(rxd->rxd_loaned != 0);
+	rxd->rxd_loaned--;
 
-	if (re_rx_buf_create_mblk(rb) != DDI_SUCCESS) {
-		mutex_enter(&rr->rx_free_lock);
-		ASSERT(rr->rx_loaned != 0);
-		rr->rx_loaned--;
-		cv_signal(&rr->rx_free_cv);
-		mutex_exit(&rr->rx_free_lock);
+	if (rxd->rxd_retired) {
+		/*
+		 * The ring no longer uses these buffers.  The last buffer to
+		 * come back frees the whole set.
+		 */
+		last = (rxd->rxd_loaned == 0);
+		mutex_exit(&rxd->rxd_lock);
+
+		if (last) {
+			re_rx_data_destroy(rxd);
+			atomic_dec_32(&sc->rx_pending);
+		}
 		return;
 	}
 
-	mutex_enter(&rr->rx_free_lock);
-	ASSERT(rr->rx_loaned != 0);
-	rr->rx_loaned--;
-	rr->rx_free_list[rr->rx_nfree++] = rb;
-	rr->rx_kstat.rx_recycled.value.ui64++;
-	cv_signal(&rr->rx_free_cv);
-	mutex_exit(&rr->rx_free_lock);
+	if (re_rx_buf_create_mblk(rb) == DDI_SUCCESS) {
+		ASSERT3U(rxd->rxd_nfree, <, rxd->rxd_num_bufs);
+		rxd->rxd_free_list[rxd->rxd_nfree++] = rb;
+		rxd->rxd_ring->rx_kstat.rx_recycled.value.ui64++;
+	}
+
+	cv_broadcast(&rxd->rxd_cv);
+	mutex_exit(&rxd->rxd_lock);
 }
 
 static re_rx_buffer_t *
 re_rx_get_free_buf(re_rx_ring_t *rr)
 {
+	re_rx_data_t *rxd = rr->rx_data;
 	re_rx_buffer_t *rb = NULL;
 
-	mutex_enter(&rr->rx_free_lock);
-	if (rr->rx_nfree != 0)
-		rb = rr->rx_free_list[--rr->rx_nfree];
-	mutex_exit(&rr->rx_free_lock);
+	mutex_enter(&rxd->rxd_lock);
+	if (rxd->rxd_nfree != 0)
+		rb = rxd->rxd_free_list[--rxd->rxd_nfree];
+	mutex_exit(&rxd->rxd_lock);
 
 	return (rb);
 }
@@ -990,9 +1070,12 @@ re_rx_get_free_buf(re_rx_ring_t *rr)
 static void
 re_rx_put_free_buf(re_rx_ring_t *rr, re_rx_buffer_t *rb)
 {
-	mutex_enter(&rr->rx_free_lock);
-	rr->rx_free_list[rr->rx_nfree++] = rb;
-	mutex_exit(&rr->rx_free_lock);
+	re_rx_data_t *rxd = rr->rx_data;
+
+	mutex_enter(&rxd->rxd_lock);
+	ASSERT3U(rxd->rxd_nfree, <, rxd->rxd_num_bufs);
+	rxd->rxd_free_list[rxd->rxd_nfree++] = rb;
+	mutex_exit(&rxd->rxd_lock);
 }
 
 static void
@@ -1019,27 +1102,38 @@ re_rx_desc_rearm(struct re_softc *sc, re_rx_ring_t *rr,
 static int
 re_rx_drain_ring(re_rx_ring_t *rr, clock_t ticks)
 {
+	re_rx_data_t *rxd;
 	int ret = 0;
 	clock_t deadline = 0;
 
-	mutex_enter(&rr->rx_free_lock);
+	/*
+	 * Waiting is only an optimization: buffers still loaned after the
+	 * timeout are freed later by re_rx_recycle().
+	 */
+	mutex_enter(&rr->rx_lock);
+	rxd = rr->rx_data;
+	mutex_exit(&rr->rx_lock);
+	if (rxd == NULL)
+		return (0);
+
+	mutex_enter(&rxd->rxd_lock);
 
 	if (ticks > 0)
 		deadline = ddi_get_lbolt() + ticks;
 
-	while (rr->rx_loaned != 0) {
+	while (rxd->rxd_loaned != 0) {
 		if (ticks > 0) {
-			if (cv_timedwait(&rr->rx_free_cv,
-			    &rr->rx_free_lock, deadline) == -1) {
+			if (cv_timedwait(&rxd->rxd_cv,
+			    &rxd->rxd_lock, deadline) == -1) {
 				ret = ETIME;
 				break;
 			}
 		} else {
-			cv_wait(&rr->rx_free_cv, &rr->rx_free_lock);
+			cv_wait(&rxd->rxd_cv, &rxd->rxd_lock);
 		}
 	}
 
-	mutex_exit(&rr->rx_free_lock);
+	mutex_exit(&rxd->rxd_lock);
 	return (ret);
 }
 
@@ -1094,17 +1188,17 @@ static mblk_t *
 re_rx_bind(re_rx_buffer_t *rb, size_t pkt_len)
 {
 	mblk_t *mp;
-	re_rx_ring_t *rr = rb->rx_ring;
+	re_rx_data_t *rxd = rb->rx_data;
 
 	re_rx_buf_sync(rb, DDI_DMA_SYNC_FORKERNEL);
 
 	mp = rb->re_rx_mp;
 	rb->re_rx_mp = NULL;
-	rb->rrb_loaned = B_TRUE;
 
-	mutex_enter(&rr->rx_free_lock);
-	rr->rx_loaned++;
-	mutex_exit(&rr->rx_free_lock);
+	mutex_enter(&rxd->rxd_lock);
+	rb->rrb_loaned = B_TRUE;
+	rxd->rxd_loaned++;
+	mutex_exit(&rxd->rxd_lock);
 
 	mp->b_rptr = (uchar_t *)rb->rx_dma_buf.re_db_va;
 	mp->b_wptr = mp->b_rptr + pkt_len;
@@ -1230,7 +1324,9 @@ re_ring_rx(re_rx_ring_t *rr, int poll_bytes)
 	ASSERT(rr != NULL);
 	ASSERT(sc != NULL);
 
-	if (sc->sc_stopped)
+	ASSERT(MUTEX_HELD(&rr->rx_lock));
+
+	if (sc->sc_stopped || rr->rx_data == NULL)
 		return (NULL);
 
 	/*
@@ -1281,7 +1377,7 @@ re_ring_rx(re_rx_ring_t *rr, int poll_bytes)
 		membar_consumer();
 
 		opts2 = re_rx_desc_get_opts2(sc, rr, idx);
-		rb = rr->rx_desc_bufs[idx];
+		rb = rr->rx_data->rxd_desc_bufs[idx];
 		sof = ((opts1 & rr->desc_sof_mask) != 0);
 		eof = ((opts1 & rr->desc_eof_mask) != 0);
 		have_assembly = (pkt_head != NULL);
@@ -1364,7 +1460,7 @@ re_ring_rx(re_rx_ring_t *rr, int poll_bytes)
 
 		if (use_bind) {
 			rr->rx_kstat.rx_bind_pkts.value.ui64++;
-			rr->rx_desc_bufs[idx] = new_rb;
+			rr->rx_data->rxd_desc_bufs[idx] = new_rb;
 			re_rx_desc_rearm(sc, rr, idx, new_rb);
 		} else {
 			mp = re_rx_copy(rb, frag_len);
@@ -2576,9 +2672,11 @@ re_stop_datapath(struct re_softc *sc, clock_t ticks)
 	if (ret != 0)
 		return (ret);
 
-	ret = re_rx_drain(sc, ticks);
-	if (ret != 0)
-		return (ret);
+	/*
+	 * A timeout here is not fatal: RX buffers still loaned up the stack
+	 * are freed when they come back, see re_rx_data_retire().
+	 */
+	(void) re_rx_drain(sc, ticks);
 
 	ret = re_tx_drain(sc, ticks);
 	if (ret != 0)

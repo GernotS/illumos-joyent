@@ -68,6 +68,7 @@ extern "C" {
 #include <sys/cmn_err.h>
 #include <sys/random.h>
 #include <sys/sysmacros.h>
+#include <sys/atomic.h>
 #include <sys/time.h>
 #include <sys/miiregs.h>
 
@@ -266,29 +267,52 @@ typedef struct re_dma_buffer {
 } re_dma_buffer_t;
 
 typedef struct re_rx_buffer {
-	struct re_rx_ring *rx_ring;
+	struct re_rx_data *rx_data;
 	mblk_t *re_rx_mp;
 	re_dma_buffer_t rx_dma_buf;
 	frtn_t rrb_free_rtn;
 	boolean_t rrb_loaned;
 } re_rx_buffer_t;
 
+/*
+ * RX buffers of one ring for one start/stop cycle.
+ *
+ * Buffers can be loaned up the stack and may come back long after the ring
+ * was stopped.  The buffers therefore live in their own allocation, which
+ * the ring drops ("retires") when it stops.  If buffers are still loaned at
+ * that point, the last one returned through re_rx_recycle() frees the
+ * whole re_rx_data_t.  sc->rx_pending counts retired but not yet freed
+ * instances; detach is refused while it is non-zero.
+ */
+typedef struct re_rx_data {
+	struct re_softc *rxd_sc;
+	struct re_rx_ring *rxd_ring;	/* NULL once retired */
+
+	kmutex_t rxd_lock;
+	kcondvar_t rxd_cv;
+
+	re_rx_buffer_t *rxd_bufs;
+	re_rx_buffer_t **rxd_free_list;
+	re_rx_buffer_t **rxd_desc_bufs;
+	uint32_t rxd_num_bufs;
+	uint32_t rxd_num_desc;
+	uint32_t rxd_nfree;		/* protected by rxd_lock */
+	uint32_t rxd_loaned;		/* protected by rxd_lock */
+	boolean_t rxd_retired;		/* protected by rxd_lock */
+} re_rx_data_t;
+
 typedef struct re_rx_ring {
 	struct re_softc *sc;
 	mac_ring_handle_t rh;
 
-	re_rx_buffer_t *rx_bufs;
-	re_rx_buffer_t **rx_free_list;
-	re_rx_buffer_t **rx_desc_bufs;
+	re_rx_data_t *rx_data;		/* protected by rx_lock */
 	kmutex_t rx_lock;
 	ddi_taskq_t *rx_taskq;
 	boolean_t rx_taskq_scheduled;
 	uint64_t ring_gen;
 	uint32_t num_desc;
 	uint32_t num_bufs;
-	uint32_t rx_nfree;
 	uint32_t rx_cons;
-	uint32_t rx_loaned;
 
 	/* in-progress fragmented RX packet assembly */
 	mblk_t		*rrx_assem_head;
@@ -306,11 +330,7 @@ typedef struct re_rx_ring {
 	uint32_t desc_eof_mask;
 
 	boolean_t rx_lock_init;
-	boolean_t rx_free_cv_init;
 	boolean_t rx_kstat_init;
-
-	kmutex_t rx_free_lock;
-	kcondvar_t rx_free_cv;
 
 	kstat_t *rx_ksp;
 	re_rx_ring_kstats_t rx_kstat;
@@ -565,6 +585,7 @@ struct re_softc {
 	uint16_t num_rx_rings;
 	re_rx_ring_t *rx_rings;
 	re_tx_ring_t *tx_rings;
+	volatile uint32_t rx_pending;	/* retired re_rx_data_t not yet freed */
 
 	/* chip specific variables */
 	uint16_t re_rcodever;
@@ -676,7 +697,7 @@ void re_txeof(re_tx_ring_t *tr);
 uint32_t re_tx_desc_free(re_tx_ring_t *tr);
 boolean_t re_txeof_should_wake(re_tx_ring_t *tr);
 void re_tx_desc_init_ring(re_tx_ring_t *tr);
-int re_rx_ring_fill(struct re_softc *sc, re_rx_ring_t *rr);
+int re_rx_ring_reinit(struct re_softc *sc, re_rx_ring_t *rr);
 
 void re_schedule_reset_locked(struct re_softc *sc, uint32_t reason);
 /* gld */
