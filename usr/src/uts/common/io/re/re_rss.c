@@ -242,8 +242,9 @@ re_init_rss(struct re_softc *sc)
 	(void)random_get_pseudo_bytes(sc->rss_key, RE_RSS_KEY_SIZE);
 
 	/*
-	 * По умолчанию: TCP + IP, UDP выключен.
-	 * Если хочешь — можно включить UDP сразу.
+	 * By default hash on IPv4/IPv6 addresses and TCP ports only.
+	 * UDP port hashing stays disabled unless RE_RSS_FLAG_HASH_UDP_IPV4
+	 * or RE_RSS_FLAG_HASH_UDP_IPV6 is set here (see re_build_rss_ctrl()).
 	 */
 	sc->rss_ctrl = 0;
 }

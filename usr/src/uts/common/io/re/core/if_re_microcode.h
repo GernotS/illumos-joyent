@@ -25,7 +25,7 @@
 
 /*
  * The original huge arrays of code were distributed among the corresponding files
- * if_re_microcode_8125.c if_re_microcode_8127.c if_re_microcode_8127.c
+ * if_re_microcode_8125.c if_re_microcode_8126.c if_re_microcode_8127.c
  *
  * In if_re_hw nitems replaced with len variable
  * Example:

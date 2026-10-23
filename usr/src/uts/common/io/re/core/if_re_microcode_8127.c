@@ -126,7 +126,7 @@ const uint16_t rtl8127_mac_bps_vals[] = {
 };
 
 const struct re_mac_bps rtl8127_mac_bps = {
-	nitems(rtl8127_mac_bps_regs),
+	ARRAY_SIZE(rtl8127_mac_bps_regs),
 	rtl8127_mac_bps_regs,
 	rtl8127_mac_bps_vals
 };
@@ -146,7 +146,7 @@ const struct re_hw_regaddr_array mac_r27_ephy[] = {
 	{ 0x941c, 0x0190 }, { 0x981c, 0x0140 }, { 0x9c1c, 0x0140 }
 };
 
-const size_t mac_r27_ephy_len = nitems(mac_r27_ephy);
+const size_t mac_r27_ephy_len = ARRAY_SIZE(mac_r27_ephy);
 
 const struct re_hw_regaddr_array mac_r27_mcu[] = {
 	{ 0xa436, 0x8023 }, { 0xa438, 0x6100 }, { 0xa436, 0xb82e },
@@ -802,4 +802,4 @@ const struct re_hw_regaddr_array mac_r27_mcu[] = {
 	{ 0xb890, 0x2090 }, { 0xb820, 0x0000 }
 };
 
-const size_t mac_r27_mcu_len = nitems(mac_r27_mcu);
+const size_t mac_r27_mcu_len = ARRAY_SIZE(mac_r27_mcu);

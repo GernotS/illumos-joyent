@@ -40,18 +40,18 @@ static const ddi_device_acc_attr_t re_stat_accattr = {
 };
 
 static const ddi_dma_attr_t re_stats_dma_attr = {
-    .dma_attr_version   = DMA_ATTR_V0,
-    .dma_attr_addr_lo   = 0,
-    .dma_attr_addr_hi   = UINT64_MAX,
-    .dma_attr_count_max = sizeof (struct re_stats),
-    .dma_attr_align     = RE_STATS_ALIGNMENT,
-    .dma_attr_burstsizes= 0xFFFFFFFF,
-    .dma_attr_minxfer   = 1,
-    .dma_attr_maxxfer   = sizeof (struct re_stats),
-    .dma_attr_seg       = UINT64_MAX,
-    .dma_attr_sgllen    = 1,
-    .dma_attr_granular  = 1,
-    .dma_attr_flags     = 0
+	.dma_attr_version	= DMA_ATTR_V0,
+	.dma_attr_addr_lo	= 0,
+	.dma_attr_addr_hi	= UINT64_MAX,
+	.dma_attr_count_max	= sizeof (struct re_stats),
+	.dma_attr_align		= RE_STATS_ALIGNMENT,
+	.dma_attr_burstsizes	= 0xFFFFFFFF,
+	.dma_attr_minxfer	= 1,
+	.dma_attr_maxxfer	= sizeof (struct re_stats),
+	.dma_attr_seg		= UINT64_MAX,
+	.dma_attr_sgllen	= 1,
+	.dma_attr_granular	= 1,
+	.dma_attr_flags		= 0
 };
 
 static char force_msi_propname[] = "force_msi";
@@ -61,69 +61,71 @@ static char timer_count_propname[] = "timer_count";
 static void
 re_pci_cfg_init(struct re_softc *sc)
 {
-	sc->pci_cfg.command = pci_config_get16(sc->cfg_handle, PCI_CONF_COMM);
-	sc->pci_cfg.vendor = pci_config_get16(sc->cfg_handle, PCI_CONF_VENID);
-	sc->pci_cfg.subven = pci_config_get16(sc->cfg_handle, PCI_CONF_SUBVENID);
-	sc->pci_cfg.subdev = pci_config_get16(sc->cfg_handle, PCI_CONF_SUBSYSID);
-	sc->pci_cfg.device = pci_config_get16(sc->cfg_handle, PCI_CONF_DEVID);
-	sc->pci_cfg.revision = pci_config_get8(sc->cfg_handle,  PCI_CONF_REVID);
-	sc->pci_cfg.clsize = pci_config_get8(sc->cfg_handle,  PCI_CONF_CACHE_LINESZ);
-	sc->pci_cfg.ilr = pci_config_get8(sc->cfg_handle,  PCI_CONF_ILINE);
+	ddi_acc_handle_t h = sc->cfg_handle;
+
+	sc->pci_cfg.command = pci_config_get16(h, PCI_CONF_COMM);
+	sc->pci_cfg.vendor = pci_config_get16(h, PCI_CONF_VENID);
+	sc->pci_cfg.subven = pci_config_get16(h, PCI_CONF_SUBVENID);
+	sc->pci_cfg.subdev = pci_config_get16(h, PCI_CONF_SUBSYSID);
+	sc->pci_cfg.device = pci_config_get16(h, PCI_CONF_DEVID);
+	sc->pci_cfg.revision = pci_config_get8(h, PCI_CONF_REVID);
+	sc->pci_cfg.clsize = pci_config_get8(h, PCI_CONF_CACHE_LINESZ);
+	sc->pci_cfg.ilr = pci_config_get8(h, PCI_CONF_ILINE);
 	sc->re_device_id = sc->pci_cfg.device;
 
 	sc->pci_cfg.command |= PCI_COMM_ME | PCI_COMM_MAE;
-	pci_config_put16(sc->cfg_handle, PCI_CONF_COMM, sc->pci_cfg.command);
+	pci_config_put16(h, PCI_CONF_COMM, sc->pci_cfg.command);
 }
 
 static int
 re_alloc_stats(struct re_softc *sc)
 {
-    int err;
-    re_dma_buffer_t *dma_p = &sc->re_tally.tally_buf;
+	int err;
+	re_dma_buffer_t *dma_p = &sc->re_tally.tally_buf;
 
-    dma_p->re_db_va = NULL;
-    dma_p->re_acc_hdl = NULL;
-    dma_p->re_dma_hdl = NULL;
-    dma_p->ncookies = 0;
-    dma_p->re_db_alloc_len = 0;
+	dma_p->re_db_va = NULL;
+	dma_p->re_acc_hdl = NULL;
+	dma_p->re_dma_hdl = NULL;
+	dma_p->ncookies = 0;
+	dma_p->re_db_alloc_len = 0;
 
-    err = ddi_dma_alloc_handle(sc->dev, &re_stats_dma_attr,
-        DDI_DMA_SLEEP, NULL, &dma_p->re_dma_hdl);
-    if (err != DDI_SUCCESS)
-        return (DDI_FAILURE);
+	err = ddi_dma_alloc_handle(sc->dev, &re_stats_dma_attr,
+	    DDI_DMA_SLEEP, NULL, &dma_p->re_dma_hdl);
+	if (err != DDI_SUCCESS)
+		return (DDI_FAILURE);
 
-    err = ddi_dma_mem_alloc(dma_p->re_dma_hdl, RE_STATS_BUF_SIZE,
-        &re_stat_accattr, DDI_DMA_CONSISTENT, DDI_DMA_SLEEP, NULL,
-        &dma_p->re_db_va, &dma_p->re_db_alloc_len, &dma_p->re_acc_hdl);
-    if (err != DDI_SUCCESS) {
-        ddi_dma_free_handle(&dma_p->re_dma_hdl);
-        dma_p->re_dma_hdl = NULL;
-        return (DDI_FAILURE);
-    }
+	err = ddi_dma_mem_alloc(dma_p->re_dma_hdl, RE_STATS_BUF_SIZE,
+	    &re_stat_accattr, DDI_DMA_CONSISTENT, DDI_DMA_SLEEP, NULL,
+	    &dma_p->re_db_va, &dma_p->re_db_alloc_len, &dma_p->re_acc_hdl);
+	if (err != DDI_SUCCESS) {
+		ddi_dma_free_handle(&dma_p->re_dma_hdl);
+		dma_p->re_dma_hdl = NULL;
+		return (DDI_FAILURE);
+	}
 
-    err = ddi_dma_addr_bind_handle(dma_p->re_dma_hdl, NULL,
-        dma_p->re_db_va, dma_p->re_db_alloc_len,
-        DDI_DMA_RDWR | DDI_DMA_CONSISTENT, DDI_DMA_SLEEP, NULL,
-        &dma_p->cookie, &dma_p->ncookies);
+	err = ddi_dma_addr_bind_handle(dma_p->re_dma_hdl, NULL,
+	    dma_p->re_db_va, dma_p->re_db_alloc_len,
+	    DDI_DMA_RDWR | DDI_DMA_CONSISTENT, DDI_DMA_SLEEP, NULL,
+	    &dma_p->cookie, &dma_p->ncookies);
 
-    if (err != DDI_DMA_MAPPED || dma_p->ncookies != 1) {
-        if (err == DDI_DMA_MAPPED)
-            (void) ddi_dma_unbind_handle(dma_p->re_dma_hdl);
+	if (err != DDI_DMA_MAPPED || dma_p->ncookies != 1) {
+		if (err == DDI_DMA_MAPPED)
+			(void) ddi_dma_unbind_handle(dma_p->re_dma_hdl);
 
-        ddi_dma_mem_free(&dma_p->re_acc_hdl);
-        dma_p->re_acc_hdl = NULL;
-        dma_p->re_db_va = NULL;
+		ddi_dma_mem_free(&dma_p->re_acc_hdl);
+		dma_p->re_acc_hdl = NULL;
+		dma_p->re_db_va = NULL;
 
-        ddi_dma_free_handle(&dma_p->re_dma_hdl);
-        dma_p->re_dma_hdl = NULL;
+		ddi_dma_free_handle(&dma_p->re_dma_hdl);
+		dma_p->re_dma_hdl = NULL;
 
-        return (DDI_FAILURE);
-    }
+		return (DDI_FAILURE);
+	}
 
-    sc->re_tally.stats = (struct re_stats *)(void *)dma_p->re_db_va;
-    bzero(sc->re_tally.stats, sizeof (struct re_stats));
+	sc->re_tally.stats = (struct re_stats *)(void *)dma_p->re_db_va;
+	bzero(sc->re_tally.stats, sizeof (struct re_stats));
 
-    return (DDI_SUCCESS);
+	return (DDI_SUCCESS);
 }
 
 static void
@@ -255,7 +257,7 @@ re_tx_ring_has_pending(re_tx_ring_t *tr)
 	return (pending);
 }
 
-#define RE_TX_WATCHDOG_NS	(6LL * NANOSEC)
+#define	RE_TX_WATCHDOG_NS	(6LL * NANOSEC)
 
 static void
 re_watchdog_periodic(void *arg)
@@ -305,7 +307,9 @@ static void
 re_unattach(struct re_softc *sc)
 {
 	sc->sc_stopped = B_TRUE;
-	re_disable_extend_tally_couter(sc);
+
+	if ((sc->attach_state & RE_ATTACH_REGS_MAP) != 0)
+		re_disable_extend_tally_couter(sc);
 
 	if (sc->link_status != NULL) {
 		ddi_periodic_delete(sc->link_status);
@@ -337,12 +341,7 @@ re_unattach(struct re_softc *sc)
 	}
 
 	/*
-	 * If at some point attach/start path enables DDI interrupts explicitly
-	 * and tracks RE_ATTACH_ENABLE_INTR, disable them here before tearing
-	 * handlers down.
-	 *
-	 * If re_intr_disable_all() remains static in re_intr.c, either export it
-	 * or keep RE_ATTACH_ENABLE_INTR unused in attach/unattach.
+	 * DDI interrupts must be disabled before the handlers are removed.
 	 */
 	if ((sc->attach_state & RE_ATTACH_ENABLE_INTR) != 0) {
 		re_intr_disable_all(sc);
@@ -408,7 +407,6 @@ re_attach(dev_info_t *devinfo, ddi_attach_cmd_t cmd)
 	caddr_t regs;
 	uint8_t eaddr[ETHERADDRL];
 	int err;
-	char tq_name[64];
 
 	if (cmd != DDI_ATTACH) {
 		return (DDI_FAILURE);
@@ -460,22 +458,6 @@ re_attach(dev_info_t *devinfo, ddi_attach_cmd_t cmd)
 
 	re_init_software_variable(sc);
 
-	mutex_init(&sc->mtx, NULL, MUTEX_DRIVER, NULL);
-	sc->attach_state |= RE_ATTACH_LOCKS;
-
-	err = re_alloc_stats(sc);
-	if (err != DDI_SUCCESS) {
-		dev_err(devinfo, CE_WARN, "re_alloc_stats failed");
-		goto fail;
-	}
-	sc->attach_state |= RE_ATTACH_STATS;
-
-	if (!re_softc_kstat_init(sc)) {
-		dev_err(devinfo, CE_WARN, "re_softc_kstat_init failed");
-		goto fail;
-	}
-	sc->attach_state |= RE_ATTACH_KSTATS;
-
 	/*
 	 * Register IRM before interrupt allocation so allocator can account
 	 * for desired MSI-X layout immediately.
@@ -496,12 +478,32 @@ re_attach(dev_info_t *devinfo, ddi_attach_cmd_t cmd)
 	}
 	sc->attach_state |= RE_ATTACH_ALLOC_INTR;
 
+	/*
+	 * The softc mutex is taken from the interrupt handler, so it can
+	 * only be initialized once the interrupt priority is known.
+	 */
+	RE_LOCK_INIT(sc);
+	sc->attach_state |= RE_ATTACH_LOCKS;
+
+	err = re_alloc_stats(sc);
+	if (err != DDI_SUCCESS) {
+		dev_err(devinfo, CE_WARN, "re_alloc_stats failed");
+		goto fail;
+	}
+	sc->attach_state |= RE_ATTACH_STATS;
+
+	if (!re_softc_kstat_init(sc)) {
+		dev_err(devinfo, CE_WARN, "re_softc_kstat_init failed");
+		goto fail;
+	}
+	sc->attach_state |= RE_ATTACH_KSTATS;
+
 	if (sc->HwCurrIsrVer > 1) {
 		if (!(sc->re_intr_type & DDI_INTR_TYPE_MSIX) ||
-			sc->intr_cnt < sc->msix_min_reqired) {
+		    sc->intr_cnt < sc->msix_min_reqired) {
 			sc->num_rx_rings = 1;
 			sc->num_tx_rings = 1;
-			if(sc->timer_int_enable) {
+			if (sc->timer_int_enable) {
 				sc->HwCurrIsrVer = 1;
 				sc->use_new_intr_mapping = 0;
 			}
@@ -546,6 +548,18 @@ re_attach(dev_info_t *devinfo, ddi_attach_cmd_t cmd)
 
 	re_sensor_init(sc);
 
+	/*
+	 * ddi_taskq_create() prefixes the name with the driver name and
+	 * tags the taskq with the instance number, so the name only has to
+	 * be unique within one instance.
+	 */
+	sc->reset_tq = ddi_taskq_create(sc->dev, "reset", 1,
+	    TASKQ_DEFAULTPRI, 0);
+	if (sc->reset_tq == NULL) {
+		dev_err(devinfo, CE_WARN, "failed to create reset taskq");
+		goto fail;
+	}
+
 	if (!re_mac_register(sc)) {
 		dev_err(devinfo, CE_WARN, "re_mac_register failed");
 		goto fail;
@@ -555,17 +569,8 @@ re_attach(dev_info_t *devinfo, ddi_attach_cmd_t cmd)
 	sc->link_status = ddi_periodic_add(re_check_link_status, sc,
 	    RE_CYCLIC_PERIOD, DDI_IPL_0);
 
-	(void) snprintf(tq_name, sizeof (tq_name),
-    "%s%d_reset_taskq", RE_MOD_NAME, ddi_get_instance(sc->dev));
-
-	sc->reset_tq = ddi_taskq_create(sc->dev, "re_reset_taskq",
-    1, TASKQ_DEFAULTPRI, 0);
-
-	if (sc->reset_tq == NULL)
-		return (DDI_FAILURE);
-
 	sc->watchdog_periodic = ddi_periodic_add(re_watchdog_periodic,
-		sc, RE_CYCLIC_PERIOD, DDI_IPL_0);
+	    sc, RE_CYCLIC_PERIOD, DDI_IPL_0);
 
 	return (DDI_SUCCESS);
 
@@ -577,12 +582,13 @@ fail:
 static int
 re_detach(dev_info_t *devinfo, ddi_detach_cmd_t cmd)
 {
+	struct re_softc *sc;
+
 	if (cmd != DDI_DETACH) {
 		return (DDI_FAILURE);
 	}
 
-	struct re_softc *sc = ddi_get_driver_private(devinfo);
-
+	sc = ddi_get_driver_private(devinfo);
 	if (sc == NULL)
 		return (DDI_FAILURE);
 
@@ -594,6 +600,32 @@ re_detach(dev_info_t *devinfo, ddi_detach_cmd_t cmd)
 		return (DDI_FAILURE);
 
 	re_unattach(sc);
+	return (DDI_SUCCESS);
+}
+
+/*
+ * quiesce(9E) entry point, used by fast reboot.
+ *
+ * This runs single-threaded with interrupts disabled, so it must not take
+ * locks, block or wait for taskqs.  All that is needed is to mask the
+ * device interrupts and stop DMA, which re_hw_reset() does by only
+ * touching registers and busy-waiting.
+ */
+static int
+re_quiesce(dev_info_t *devinfo)
+{
+	struct re_softc *sc;
+
+	sc = ddi_get_driver_private(devinfo);
+	if (sc == NULL)
+		return (DDI_FAILURE);
+
+	if ((sc->attach_state & RE_ATTACH_REGS_MAP) == 0)
+		return (DDI_SUCCESS);
+
+	sc->sc_stopped = B_TRUE;
+	re_hw_reset(sc);
+
 	return (DDI_SUCCESS);
 }
 
@@ -626,7 +658,7 @@ static struct dev_ops re_dev_ops = {
 	.devo_attach = re_attach,
 	.devo_detach = re_detach,
 	.devo_reset = nodev,
-	.devo_quiesce = ddi_quiesce_not_supported,
+	.devo_quiesce = re_quiesce,
 	.devo_cb_ops = &re_cb_ops
 };
 

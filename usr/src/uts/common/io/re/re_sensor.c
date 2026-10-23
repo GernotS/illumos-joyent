@@ -19,24 +19,22 @@
  * CDDL HEADER END
  */
 /*
-* Copyright 2026 Eduard Siboshvili <edsiboshvili@gmail.com>
-* Use is subject to license terms.
-*/
-
-
+ * Copyright 2026 Eduard Siboshvili <edsiboshvili@gmail.com>
+ * Use is subject to license terms.
+ */
 
 #include "re.h"
-
 
 static int
 re_sensor_read_temperature(void *arg, sensor_ioctl_scalar_t *scalar)
 {
 	struct re_softc *sc = arg;
+
 	scalar->sis_unit = SENSOR_UNIT_CELSIUS;
 	scalar->sis_gran = 1;
 	scalar->sis_prec = 0;
 	scalar->sis_value = re_read_thermal_sensor(sc);
-	return 0;
+	return (0);
 }
 
 static const ksensor_ops_t re_temp_ops = {
@@ -49,29 +47,28 @@ re_sensor_init(struct re_softc *sc)
 {
 	int err;
 	char name[32];
-	if(sc->re_type == MAC_R25) {
-		return;
-	}
 
-	(void)snprintf(name, sizeof (name), "%s%d_ethernet",
-			RE_MOD_NAME,
-			ddi_get_instance(sc->dev));
+	if (sc->re_type == MAC_R25)
+		return;
+
+	(void) snprintf(name, sizeof (name), "%s%d_ethernet",
+	    RE_MOD_NAME, ddi_get_instance(sc->dev));
 
 	if ((err = ksensor_create_scalar_pcidev(sc->dev,
-		SENSOR_KIND_TEMPERATURE, &re_temp_ops, sc, name,
-		&sc->sensor.isn_reg_ksensor)) !=
-		0) {
-		dev_err(sc->dev, CE_WARN, "failed to create ksensor, err: %d", err);
+	    SENSOR_KIND_TEMPERATURE, &re_temp_ops, sc, name,
+	    &sc->sensor.isn_reg_ksensor)) != 0) {
+		dev_err(sc->dev, CE_WARN, "failed to create ksensor, err: %d",
+		    err);
+		return;
 	}
 
 	sc->sensor.isn_valid = B_TRUE;
 }
 
-
 void
 re_sensor_fini(struct re_softc *sc)
 {
-    if(sc->sensor.isn_valid)
-	    (void) ksensor_remove(sc->dev, KSENSOR_ALL_IDS);
-    sc->sensor.isn_valid = B_FALSE;
+	if (sc->sensor.isn_valid)
+		(void) ksensor_remove(sc->dev, KSENSOR_ALL_IDS);
+	sc->sensor.isn_valid = B_FALSE;
 }

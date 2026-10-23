@@ -96,7 +96,7 @@ const uint16_t rtl8126_1_mac_bps_vals[] = {
 };
 
 const struct re_mac_bps rtl8126_1_mac_bps = {
-	nitems(rtl8126_1_mac_bps_regs),
+	ARRAY_SIZE(rtl8126_1_mac_bps_regs),
 	rtl8126_1_mac_bps_regs,
 	rtl8126_1_mac_bps_vals
 };
@@ -206,7 +206,7 @@ const uint16_t rtl8126_2_mac_bps_vals[] = {
 };
 
 const struct re_mac_bps rtl8126_2_mac_bps = {
-	nitems(rtl8126_2_mac_bps_regs),
+	ARRAY_SIZE(rtl8126_2_mac_bps_regs),
 	rtl8126_2_mac_bps_regs,
 	rtl8126_2_mac_bps_vals
 };

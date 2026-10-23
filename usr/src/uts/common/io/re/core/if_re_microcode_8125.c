@@ -116,7 +116,7 @@ const struct re_hw_regaddr_array rtl8125_mac_bps[] = {
 	{ 0xf9fe, 0x0000 }
 };
 
-const size_t rtl8125_mac_bps_len = nitems(rtl8125_mac_bps);
+const size_t rtl8125_mac_bps_len = ARRAY_SIZE(rtl8125_mac_bps);
 
 const struct re_hw_regaddr_array rtl8125b_mac_bps[] = {
 	{ 0xf800, 0xe010 }, { 0xf802, 0xe01b }, { 0xf804, 0xe026 },
@@ -167,7 +167,7 @@ const struct re_hw_regaddr_array rtl8125b_mac_bps[] = {
 	{ 0xfc30, 0x4a20 }, { 0xfc32, 0x47a0 }, { 0xfc48, 0x003f }
 };
 
-const size_t rtl8125b_mac_bps_len = nitems(rtl8125b_mac_bps);
+const size_t rtl8125b_mac_bps_len = ARRAY_SIZE(rtl8125b_mac_bps);
 
 const struct re_hw_regaddr_array rtl8125d_2_mac_bps[] = {
 	{ 0xf800, 0xe010 }, { 0xf802, 0xe014 }, { 0xf804, 0xe016 },
@@ -194,7 +194,7 @@ const struct re_hw_regaddr_array rtl8125d_2_mac_bps[] = {
 	{ 0xf87e, 0xc602 }, { 0xf880, 0xbe00 }, { 0xf882, 0x0000 }
 };
 
-const size_t rtl8125d_2_mac_bps_len = nitems(rtl8125d_2_mac_bps);
+const size_t rtl8125d_2_mac_bps_len = ARRAY_SIZE(rtl8125d_2_mac_bps);
 
 const struct re_hw_regaddr_array mac_r25_ephy[] = {
 	{ 0x0004, 0xd000 }, { 0x000a, 0x8653 }, { 0x0023, 0xab66 },
@@ -203,7 +203,7 @@ const struct re_hw_regaddr_array mac_r25_ephy[] = {
 	{ 0x0060, 0x9455 }, { 0x0061, 0x99ff }, { 0x0069, 0xfe04 }
 };
 
-const size_t mac_r25_ephy_len = nitems(mac_r25_ephy);
+const size_t mac_r25_ephy_len = ARRAY_SIZE(mac_r25_ephy);
 
 const struct re_hw_regaddr_array mac_r25b_ephy[] = {
 	{ 0x000b, 0xa908 }, { 0x001e, 0x20eb }, { 0x0022, 0x0023 },
@@ -212,7 +212,7 @@ const struct re_hw_regaddr_array mac_r25b_ephy[] = {
 	{ 0x0069, 0xff00 }
 };
 
-const size_t mac_r25b_ephy_len = nitems(mac_r25b_ephy);
+const size_t mac_r25b_ephy_len = ARRAY_SIZE(mac_r25b_ephy);
 
 const struct re_hw_regaddr_array mac_r25d_2_mcu[] = {
 	{ 0xa436, 0x8023 }, { 0xa438, 0x3801 }, { 0xa436, 0xb82e },
@@ -823,7 +823,7 @@ const struct re_hw_regaddr_array mac_r25d_2_mcu[] = {
 	{ 0xa436, 0xacc8 }, { 0xa438, 0x0000 }, { 0xb820, 0x0000 }
 };
 
-const size_t mac_r25d_2_mcu_len = nitems(mac_r25d_2_mcu);
+const size_t mac_r25d_2_mcu_len = ARRAY_SIZE(mac_r25d_2_mcu);
 
 #define MAC_R25_MCU		\
 	{ 0xa436, 0xa016 },	\
@@ -6073,16 +6073,16 @@ const struct re_mcu_reg mac_r25_mcu[] = {
     MAC_R25_MCU
 };
 
-const size_t mac_r25_mcu_len = nitems(mac_r25_mcu);
+const size_t mac_r25_mcu_len = ARRAY_SIZE(mac_r25_mcu);
 
 const struct re_mcu_reg mac_r25b_mcu[] = {
     MAC_R25B_MCU
 };
 
-const size_t mac_r25b_mcu_len = nitems(mac_r25b_mcu);
+const size_t mac_r25b_mcu_len = ARRAY_SIZE(mac_r25b_mcu);
 
 const struct re_mcu_reg mac_r25d_1_mcu[] = {
     MAC_R25D_MCU
 };
 
-const size_t mac_r25d_1_mcu_len = nitems(mac_r25d_1_mcu);
+const size_t mac_r25d_1_mcu_len = ARRAY_SIZE(mac_r25d_1_mcu);

@@ -664,7 +664,7 @@ re_phy_config_mac_r27(struct re_softc *sc)
 	re_write_phy_ocp(sc, 0xb87c, 0x8199);
 	val = re_read_phy_ocp(sc, 0xb87e) & ~0xff00;
 	re_write_phy_ocp(sc, 0xb87e, val | 0x5700);
-	for (i = 0; i < nitems(mac_cfg_value); i+=2) {
+	for (i = 0; i < ARRAY_SIZE(mac_cfg_value); i+=2) {
 		re_write_phy_ocp(sc, 0xb87c, mac_cfg_value[i]);
 		re_write_phy_ocp(sc, 0xb87e, mac_cfg_value[i + 1]);
 	}
@@ -793,9 +793,9 @@ re_phy_config_mac_r27(struct re_softc *sc)
 	re_write_phy_ocp(sc, 0xbfb4, val | 0x0328);
 	re_write_phy_ocp(sc, 0xbfb6, 0x3e14);
 	re_write_phy_ocp(sc, 0xa436, 0x81c4);
-	for (i = 0; i < nitems(mac_cfg_a438_value); i++)
+	for (i = 0; i < ARRAY_SIZE(mac_cfg_a438_value); i++)
 		re_write_phy_ocp(sc, 0xa438, mac_cfg_a438_value[i]);
-	for (i = 0; i < nitems(mac_cfg2_value); i+=2) {
+	for (i = 0; i < ARRAY_SIZE(mac_cfg2_value); i+=2) {
 		re_write_phy_ocp(sc, 0xb87c, mac_cfg2_value[i]);
 		re_write_phy_ocp(sc, 0xb87e, mac_cfg2_value[i + 1]);
 	}
@@ -1062,7 +1062,7 @@ re_phy_config_mac_r26_1(struct re_softc *sc)
 	re_write_phy_ocp(sc, 0xb87e, val | 0x9d00);
 
 	re_write_phy_ocp(sc, 0xa436, 0x8f97);
-	for (; i < nitems(mac_cfg2_a438_value); i++)
+	for (; i < ARRAY_SIZE(mac_cfg2_a438_value); i++)
 		re_write_phy_ocp(sc, 0xa438, mac_cfg2_a438_value[i]);
 
 	RE_PHY_SETBIT(sc, 0xad9c, 0x0020);
@@ -1079,7 +1079,7 @@ re_phy_config_mac_r26_1(struct re_softc *sc)
 	re_write_phy_ocp(sc, 0xb87e, val | 0x0c00);
 
 	re_write_phy_ocp(sc, 0xb87c, 0x82a0);
-	for (; i < nitems(mac_cfg2_b87e_value); i++)
+	for (; i < ARRAY_SIZE(mac_cfg2_b87e_value); i++)
 		re_write_phy_ocp(sc, 0xb87e, mac_cfg2_b87e_value[i]);
 
 	re_write_phy_ocp(sc, 0xa436, 0x8018);
@@ -1215,7 +1215,7 @@ re_phy_config_mac_r26_2(struct re_softc *sc)
 	re_write_phy_ocp(sc, 0xb87c, 0x80ef);
 	val = re_read_phy_ocp(sc, 0xb87e) & ~0xff00;
 	re_write_phy_ocp(sc, 0xb87e, val | 0x0c00);
-	for (; i < nitems(mac_cfg3_b87e_value); i++)
+	for (; i < ARRAY_SIZE(mac_cfg3_b87e_value); i++)
 		re_write_phy_ocp(sc, 0xb87e, mac_cfg3_b87e_value[i]);
 	RE_PHY_SETBIT(sc, 0xa430, 0x0003);
 	val = re_read_phy_ocp(sc, 0xb54c) & ~0xffc0;
@@ -1284,7 +1284,7 @@ re_phy_config_mac_r25(struct re_softc *sc)
 	re_write_phy_ocp(sc, 0xb87e, 0x0153);
 
 	re_write_phy_ocp(sc, 0xa436, 0x81b3);
-	for (i = 0; i < nitems(mac_cfg3_a438_value); i++)
+	for (i = 0; i < ARRAY_SIZE(mac_cfg3_a438_value); i++)
 		re_write_phy_ocp(sc, 0xa438, mac_cfg3_a438_value[i]);
 	for (i = 0; i < 26; i++)
 		re_write_phy_ocp(sc, 0xa438, 0);
@@ -1296,7 +1296,7 @@ re_phy_config_mac_r25(struct re_softc *sc)
 	re_patch_phy_mcu(sc, 1);
 	RE_PHY_CLRBIT(sc, 0xb896, 0x0001);
 	RE_PHY_CLRBIT(sc, 0xb892, 0xff00);
-	for (i = 0; i < nitems(mac_cfg3_b88e_value); i += 2) {
+	for (i = 0; i < ARRAY_SIZE(mac_cfg3_b88e_value); i += 2) {
 		re_write_phy_ocp(sc, 0xb88e, mac_cfg3_b88e_value[i]);
 		re_write_phy_ocp(sc, 0xb890, mac_cfg3_b88e_value[i + 1]);
 	}

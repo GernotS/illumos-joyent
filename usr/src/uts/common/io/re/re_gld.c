@@ -848,7 +848,7 @@ re_m_getprop(void *drv, const char *name, mac_prop_id_t prop,
 		}
 		cap = re_prop_to_cap(prop);
 		u8p = pr_val;
-		*u8p = ((sc->hw_caps & cap) != 0) ? 1 : 0;
+		*u8p = ((sc->adv_caps & cap) != 0) ? 1 : 0;
 		break;
 
 	case MAC_PROP_EN_10HDX_CAP:
@@ -933,8 +933,24 @@ re_m_setprop(void *drv, const char *name, mac_prop_id_t prop, uint_t size,
 		}
 
 		bcopy(val, &mtu, sizeof (mtu));
-		ret = mac_maxsdu_update(sc->mh, mtu);
 		update_link = B_FALSE;
+
+		if (mtu == sc->mtu)
+			break;
+
+		if (mtu < ETHERMIN || mtu > RE_JUMBO_MTU) {
+			ret = EINVAL;
+			break;
+		}
+
+		/*
+		 * RX buffers and RE_RXMAXSIZE are always sized for jumbo
+		 * frames, so the MTU can be changed without reprogramming
+		 * the hardware.
+		 */
+		ret = mac_maxsdu_update(sc->mh, mtu);
+		if (ret == 0)
+			sc->mtu = mtu;
 		break;
 
 	case MAC_PROP_FLOWCTRL:

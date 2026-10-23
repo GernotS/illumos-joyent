@@ -1060,8 +1060,10 @@ re_intr_vector_init_msix(struct re_softc *sc)
 			i);
 		iv->taskq = ddi_taskq_create(sc->dev, tq_name,
 		    1, TASKQ_DEFAULTPRI, 0);
-		if (iv->taskq == NULL)
+		if (iv->taskq == NULL) {
+			mutex_destroy(&iv->lock);
 			goto fail;
+		}
 	}
 
 	return (DDI_SUCCESS);

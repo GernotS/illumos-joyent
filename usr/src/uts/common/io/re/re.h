@@ -607,11 +607,10 @@ enum rx_ring_desc_type {
 					    0, 0, flag)
 #endif	/* DEBUG */
 
-#define nitems(_a) (sizeof ((_a)) / sizeof ((_a)[0]))
-
 #define RE_LOCK(_sc)		mutex_enter(&(_sc)->mtx)
 #define RE_UNLOCK(_sc)		mutex_exit(&(_sc)->mtx)
-#define RE_LOCK_INIT(_sc)	mutex_init(&(_sc)->mtx, NULL, MUTEX_DRIVER, DDI_INTR_PRI(sc->intr_pri))
+#define RE_LOCK_INIT(_sc)	mutex_init(&(_sc)->mtx, NULL, MUTEX_DRIVER, \
+				    DDI_INTR_PRI((_sc)->intr_pri))
 #define RE_LOCK_DESTROY(_sc)	mutex_destroy(&(_sc)->mtx)
 #define RE_LOCK_ASSERT(_sc)	ASSERT(MUTEX_HELD(&(_sc)->mtx))
 #define RE_ASSERT_LOCKED(sc)    ASSERT(MUTEX_HELD(&(sc)->mtx))
