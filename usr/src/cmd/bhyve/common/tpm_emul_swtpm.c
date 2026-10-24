@@ -16,6 +16,7 @@
 #include <malloc_np.h>
 #else
 #include <sys/vmm.h>
+#include <endian.h>
 #endif
 #include <stdlib.h>
 #include <string.h>
@@ -122,10 +123,54 @@ tpm_swtpm_execute_cmd(void *sc, void *cmd, uint32_t cmd_size, void *rsp,
 		cmd_size -= len;
 	}
 
-	size_t buflen = rsp_size;
+	/*
+	 * The response can arrive in several pieces.  Read the header first
+	 * to learn the response length, then read until the whole response
+	 * is in.  Stopping early would leave the rest in the socket, where it
+	 * would be mistaken for the start of the next response.
+	 */
+	uint8_t *buf = rsp;
 	size_t rcvd = 0;
-	while (buflen > 0 && rcvd < sizeof (struct tpm_resp_hdr)) {
-		len = recv(tpm->fd, rsp, buflen, 0);
+	size_t want = sizeof (struct tpm_resp_hdr);
+	size_t total = 0;
+
+	while (rcvd < want) {
+		len = recv(tpm->fd, buf + rcvd, want - rcvd, 0);
+		if (len == -1) {
+			if (errno == EINTR)
+				continue;
+			err(1, "%s: rsp recv failed, is swtpm running?",
+			    __func__);
+		}
+		if (len == 0) {
+			warnx("%s: swtpm closed the connection (bytes read: "
+			    "%zu / %zu)", __func__, rcvd, want);
+			return (EFAULT);
+		}
+		rcvd += len;
+
+		if (total == 0 && rcvd >= sizeof (struct tpm_resp_hdr)) {
+			const struct tpm_resp_hdr *hdr = rsp;
+
+			total = be32toh(hdr->len);
+			if (total < sizeof (struct tpm_resp_hdr)) {
+				warnx("%s: invalid response length %zu",
+				    __func__, total);
+				return (EFAULT);
+			}
+			want = MIN(total, rsp_size);
+		}
+	}
+
+	/*
+	 * A response larger than the guest's buffer cannot be returned in
+	 * full.  Drain the remainder to keep the socket in sync.
+	 */
+	while (rcvd < total) {
+		uint8_t discard[256];
+
+		len = recv(tpm->fd, discard,
+		    MIN(sizeof (discard), total - rcvd), 0);
 		if (len == -1) {
 			if (errno == EINTR)
 				continue;
@@ -134,9 +179,12 @@ tpm_swtpm_execute_cmd(void *sc, void *cmd, uint32_t cmd_size, void *rsp,
 		}
 		if (len == 0)
 			break;
-		rsp += len;
-		buflen -= len;
 		rcvd += len;
+	}
+	if (total > rsp_size) {
+		warnx("%s: response of %zu bytes truncated to %u", __func__,
+		    total, rsp_size);
+		return (EFAULT);
 	}
 #endif
 
