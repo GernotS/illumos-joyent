@@ -27,7 +27,7 @@
 .\" Portions Copyright 2023 OmniOS Community Edition (OmniOSce) Association.
 .\" Portions Copyright 2026 Oxide Computer Company
 .\"
-.Dd February 9, 2026
+.Dd October 24, 2026
 .Dt BHYVE_CONFIG 5
 .Os
 .Sh NAME
@@ -665,6 +665,18 @@ The following nodes are available under
 .Va tpm :
 .Bl -column "tpm.version" "Format" "Default"
 .It Sy Name Ta Sy Format Ta Sy Default Ta Sy Description
+.It Va tpm.ctrl Ta string Ta Ta
+Path to the UNIX domain socket of the
+.Sy swtpm
+control channel.
+Only used if
+.Va tpm.type
+is
+.Dq swtpm .
+If set, the TPM is initialized through this channel when
+.Xr bhyve 8
+starts, which resets its volatile state, including the PCRs, on every guest
+boot.
 .It Va tpm.path Ta string Ta Ta
 Path to the TPM backend.
 Depending on the

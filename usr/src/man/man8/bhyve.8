@@ -26,7 +26,7 @@
 .\" Portions Copyright 2022 OmniOS Community Edition (OmniOSce) Association.
 .\" Copyright 2026 Oxide Computer Company
 .\"
-.Dd February 9, 2026
+.Dd October 24, 2026
 .Dt BHYVE 8
 .Os
 .Sh NAME
@@ -670,6 +670,22 @@ Version of the TPM device according to the TCG specification.
 Defaults to
 .Cm 2.0 ,
 which is the only version currently supported.
+.It Cm ctrl= Ns Ar path
+Only for the
+.Cm swtpm
+type.
+Path to the UNIX domain socket of the
+.Cm swtpm
+control channel.
+If given,
+.Nm
+initializes the TPM through this channel when it starts, as a power-on of
+the platform does.
+This resets the TPM's volatile state, including the PCRs, on every guest boot
+and allows
+.Cm swtpm
+to run without
+.Fl -flags Cm not-need-init .
 .El
 .Pp
 .Sy Boot ROM device backends :

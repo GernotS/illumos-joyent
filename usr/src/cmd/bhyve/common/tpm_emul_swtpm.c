@@ -13,6 +13,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #ifdef	__FreeBSD__
+#include <sys/endian.h>
 #include <malloc_np.h>
 #else
 #include <sys/vmm.h>
@@ -37,18 +38,117 @@ struct tpm_resp_hdr {
 	uint32_t errcode;
 } __packed;
 
+/*
+ * swtpm control channel protocol, see swtpm's tpm_ioctl.h.  Every request
+ * starts with the command code, all fields are big endian.
+ */
+#define	SWTPM_CMD_INIT		2
+
+struct swtpm_ctrl_init_req {
+	uint32_t cmd;
+	uint32_t init_flags;
+} __packed;
+
+static int
+tpm_swtpm_connect(const char *path)
+{
+	struct sockaddr_un addr;
+	int fd;
+
+	fd = socket(PF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	if (fd < 0) {
+		warn("%s: unable to open socket", __func__);
+		return (-1);
+	}
+
+	bzero(&addr, sizeof (addr));
+	addr.sun_family = AF_UNIX;
+	if (strlcpy(addr.sun_path, path, sizeof (addr.sun_path)) >=
+	    sizeof (addr.sun_path)) {
+		warnx("%s: socket path \"%s\" is too long", __func__, path);
+		(void) close(fd);
+		return (-1);
+	}
+
+	if (connect(fd, (struct sockaddr *)&addr, sizeof (addr)) == -1) {
+		warn("%s: unable to connect to socket \"%s\"", __func__, path);
+		(void) close(fd);
+		return (-1);
+	}
+
+	return (fd);
+}
+
+/*
+ * Initialize the TPM through swtpm's control channel, as a power-on of the
+ * platform does.  Without this, a TPM that was already running, e.g. before a
+ * guest reboot, keeps its state and PCR values, and swtpm has to be started
+ * with --flags not-need-init.
+ */
+static int
+tpm_swtpm_ctrl_init(const char *path)
+{
+	struct swtpm_ctrl_init_req req;
+	uint8_t *p;
+	uint32_t res;
+	size_t done;
+	ssize_t len;
+	int fd, error = 0;
+
+	fd = tpm_swtpm_connect(path);
+	if (fd < 0)
+		return (ENOENT);
+
+	req.cmd = htobe32(SWTPM_CMD_INIT);
+	req.init_flags = htobe32(0);
+
+	for (p = (uint8_t *)&req, done = 0; done < sizeof (req); ) {
+		len = send(fd, p + done, sizeof (req) - done, MSG_NOSIGNAL);
+		if (len == -1) {
+			if (errno == EINTR)
+				continue;
+			warn("%s: unable to send CMD_INIT", __func__);
+			error = EIO;
+			goto out;
+		}
+		done += len;
+	}
+
+	for (p = (uint8_t *)&res, done = 0; done < sizeof (res); ) {
+		len = recv(fd, p + done, sizeof (res) - done, 0);
+		if (len == -1) {
+			if (errno == EINTR)
+				continue;
+			warn("%s: unable to receive CMD_INIT result", __func__);
+			error = EIO;
+			goto out;
+		}
+		if (len == 0) {
+			warnx("%s: swtpm closed the control channel",
+			    __func__);
+			error = EIO;
+			goto out;
+		}
+		done += len;
+	}
+
+	if (be32toh(res) != 0) {
+		warnx("%s: CMD_INIT failed with TPM result 0x%x", __func__,
+		    be32toh(res));
+		error = EIO;
+	}
+
+out:
+	(void) close(fd);
+	return (error);
+}
+
 static int
 tpm_swtpm_init(void **sc, nvlist_t *nvl)
 {
 	struct tpm_swtpm *tpm;
-	const char *path;
-	struct sockaddr_un tpm_addr;
-
-	tpm = calloc(1, sizeof (struct tpm_swtpm));
-	if (tpm == NULL) {
-		warnx("%s: failed to allocate tpm_swtpm", __func__);
-		return (ENOMEM);
-	}
+	const char *path, *ctrl;
+	int error;
 
 	path = get_config_value_node(nvl, "path");
 	if (path == NULL) {
@@ -56,20 +156,26 @@ tpm_swtpm_init(void **sc, nvlist_t *nvl)
 		return (ENOENT);
 	}
 
-	tpm->fd = socket(PF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-	if (tpm->fd < 0) {
-		warnx("%s: unable to open tpm socket", __func__);
-		return (ENOENT);
+	/*
+	 * The control channel is optional.  If it is configured, initialize
+	 * the TPM before the guest can use it.
+	 */
+	ctrl = get_config_value_node(nvl, "ctrl");
+	if (ctrl != NULL) {
+		error = tpm_swtpm_ctrl_init(ctrl);
+		if (error != 0)
+			return (error);
 	}
 
-	bzero(&tpm_addr, sizeof (tpm_addr));
-	tpm_addr.sun_family = AF_UNIX;
-	strlcpy(tpm_addr.sun_path, path, sizeof (tpm_addr.sun_path) - 1);
+	tpm = calloc(1, sizeof (struct tpm_swtpm));
+	if (tpm == NULL) {
+		warnx("%s: failed to allocate tpm_swtpm", __func__);
+		return (ENOMEM);
+	}
 
-	if (connect(tpm->fd, (struct sockaddr *)&tpm_addr, sizeof (tpm_addr)) ==
-	    -1) {
-		warnx("%s: unable to connect to tpm socket \"%s\"", __func__,
-		    path);
+	tpm->fd = tpm_swtpm_connect(path);
+	if (tpm->fd < 0) {
+		free(tpm);
 		return (ENOENT);
 	}
 
