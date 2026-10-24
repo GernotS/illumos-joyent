@@ -44,6 +44,18 @@ struct tpm_resp_hdr {
  */
 #define	SWTPM_CMD_INIT		2
 
+/* TPM2_Startup(TPM_SU_CLEAR) */
+static const uint8_t tpm2_startup_clear[] = {
+	0x80, 0x01,			/* TPM_ST_NO_SESSIONS */
+	0x00, 0x00, 0x00, 0x0c,		/* commandSize */
+	0x00, 0x00, 0x01, 0x44,		/* TPM_CC_Startup */
+	0x00, 0x00			/* TPM_SU_CLEAR */
+};
+#define	TPM2_RC_SUCCESS		0x000
+#define	TPM2_RC_INITIALIZE	0x100
+
+static int tpm_swtpm_execute_cmd(void *, void *, uint32_t, void *, uint32_t);
+
 struct swtpm_ctrl_init_req {
 	uint32_t cmd;
 	uint32_t init_flags;
@@ -177,6 +189,33 @@ tpm_swtpm_init(void **sc, nvlist_t *nvl)
 	if (tpm->fd < 0) {
 		free(tpm);
 		return (ENOENT);
+	}
+
+	/*
+	 * After CMD_INIT the TPM waits for TPM2_Startup, which is normally
+	 * sent by TPM-aware firmware.  The bhyve UEFI firmware does not
+	 * necessarily do this, so send it here.  Firmware that does send it
+	 * gets TPM_RC_INITIALIZE, which it treats as "already started".
+	 */
+	if (ctrl != NULL) {
+		uint8_t rsp[sizeof (struct tpm_resp_hdr)];
+		const struct tpm_resp_hdr *hdr = (void *)rsp;
+		uint32_t rc;
+
+		error = tpm_swtpm_execute_cmd(tpm, (void *)tpm2_startup_clear,
+		    sizeof (tpm2_startup_clear), rsp, sizeof (rsp));
+		rc = be32toh(hdr->errcode);
+		if (error == 0 && rc != TPM2_RC_SUCCESS &&
+		    rc != TPM2_RC_INITIALIZE) {
+			warnx("%s: TPM2_Startup failed with TPM result 0x%x",
+			    __func__, rc);
+			error = EIO;
+		}
+		if (error != 0) {
+			(void) close(tpm->fd);
+			free(tpm);
+			return (error);
+		}
 	}
 
 	*sc = tpm;

@@ -680,7 +680,9 @@ control channel.
 If given,
 .Nm
 initializes the TPM through this channel when it starts, as a power-on of
-the platform does.
+the platform does, and then starts it with
+.Sy TPM2_Startup ,
+which the boot firmware might not do.
 This resets the TPM's volatile state, including the PCRs, on every guest boot
 and allows
 .Cm swtpm

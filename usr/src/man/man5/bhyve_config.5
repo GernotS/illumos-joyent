@@ -673,7 +673,9 @@ Only used if
 .Va tpm.type
 is
 .Dq swtpm .
-If set, the TPM is initialized through this channel when
+If set, the TPM is initialized through this channel and started with
+.Sy TPM2_Startup
+when
 .Xr bhyve 8
 starts, which resets its volatile state, including the PCRs, on every guest
 boot.
