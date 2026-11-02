@@ -93,6 +93,22 @@ write_is_encrypted(const struct drr_write *drrw)
 }
 
 /*
+ * In a send stream an uncompressed WRITE has drr_compressiontype == 0, which
+ * is ZIO_COMPRESS_INHERIT in enum zio_compress, not ZIO_COMPRESS_OFF.
+ * ZIO_COMPRESS_OFF itself appears only for uncompressed blocks in raw sends,
+ * where the record must be passed through untouched. Either way such a
+ * record must never be handed to a decompressor.
+ */
+#define	DRR_UNCOMPRESSED	0
+
+static boolean_t
+write_is_compressed(const struct drr_write *drrw)
+{
+	return (drrw->drr_compressiontype != DRR_UNCOMPRESSED &&
+	    drrw->drr_compressiontype != ZIO_COMPRESS_OFF);
+}
+
+/*
  * We can ignore the context here because it's already been evaluated by the
  * cost function. If the cost function returned something other than zero,
  * we have to decompress.
@@ -108,7 +124,7 @@ chain_decompress_writes(drr_packet_t *item, void *context)
 	uint8_t *buff = safe_calloc(drrw->drr_logical_size);
 
 	VERIFY3U(drr->drr_type, ==, DRR_WRITE);
-	VERIFY3U(drrw->drr_compressiontype, !=, ZIO_COMPRESS_OFF);
+	VERIFY(write_is_compressed(drrw));
 	if (zio_decompress_data_buf(dtype, item->dp_payload, buff,
 	    item->dp_payload_size, drrw->drr_logical_size) != 0) {
 		errx(4, "decompression type %d failed for ino %llu "
@@ -120,7 +136,7 @@ chain_decompress_writes(drr_packet_t *item, void *context)
 	item->dp_payload = buff;
 	item->dp_payload_size = drrw->drr_logical_size;
 	drrw->drr_compressed_size = 0;
-	drrw->drr_compressiontype = ZIO_COMPRESS_OFF;
+	drrw->drr_compressiontype = DRR_UNCOMPRESSED;
 }
 
 static void
@@ -134,7 +150,7 @@ chain_compress_writes(drr_packet_t *item, compression_spec_t *context)
 	abd_t *sabd;
 
 	VERIFY3U(drr->drr_type, ==, DRR_WRITE);
-	VERIFY3U(drrw->drr_compressiontype, ==, ZIO_COMPRESS_OFF);
+	VERIFY3U(drrw->drr_compressiontype, ==, DRR_UNCOMPRESSED);
 	VERIFY3U(item->dp_payload_size, ==, lsize);
 
 	sabd = abd_get_from_buf(item->dp_payload, lsize);
@@ -168,7 +184,7 @@ chain_compress_cost(drr_packet_t *item, compression_spec_t *context)
 	if (drr->drr_type != DRR_WRITE || write_is_encrypted(drrw))
 		return (0);
 	if (context->cs_type == ZIO_COMPRESS_OFF ||
-	    drrw->drr_compressiontype == context->cs_type)
+	    drrw->drr_compressiontype != DRR_UNCOMPRESSED)
 		return (0);
 	return (item->dp_payload_size);
 }
@@ -179,8 +195,7 @@ chain_decompress_cost(drr_packet_t *item, compression_spec_t *context)
 	dmu_replay_record_t *drr = &item->dp_drr;
 	struct drr_write *drrw = &drr->drr_u.drr_write;
 
-	if (drr->drr_type != DRR_WRITE ||
-	    drrw->drr_compressiontype == ZIO_COMPRESS_OFF ||
+	if (drr->drr_type != DRR_WRITE || !write_is_compressed(drrw) ||
 	    write_is_encrypted(drrw))
 		return (0);
 	if (context == NULL || drrw->drr_compressiontype != context->cs_type)
@@ -238,6 +253,57 @@ parallel_compress_writes(compression_spec_t target)
 			    (zq_process_item_f *)chain_compress_writes,
 			.csp_cost = (zq_estimate_cost_f *)chain_compress_cost,
 			.csp_context = context
+		}
+	};
+	return (step);
+}
+
+/*
+ * A receiver interprets compressed WRITE records only if the stream's BEGIN
+ * record carries DMU_BACKUP_FEATURE_COMPRESSED (plus DMU_BACKUP_FEATURE_LZ4
+ * for lz4), as "zfs send -c" sets them. Set them on every substream BEGIN
+ * when recompressing, so that an uncompressed "zfs send" can be compressed.
+ * As in zstream dedup, the DMU_COMPOUNDSTREAM header of a "-R"/"-I" package
+ * is left byte-for-byte intact: its checksum lives in the following
+ * toguid==0 END record, which is not recomputed.
+ */
+static boolean_t
+chain_set_compress_features(drr_packet_t *item, compression_spec_t *context,
+    chain_attrs_t attrs)
+{
+	(void) attrs;
+
+	if (item == NULL || item->dp_drr.drr_type != DRR_BEGIN ||
+	    context->cs_type == ZIO_COMPRESS_OFF)
+		return (B_TRUE);
+
+	struct drr_begin *drrb = &item->dp_drr.drr_u.drr_begin;
+	if (DMU_GET_STREAM_HDRTYPE(drrb->drr_versioninfo) ==
+	    DMU_COMPOUNDSTREAM)
+		return (B_TRUE);
+
+	uint64_t fflags = DMU_GET_FEATUREFLAGS(drrb->drr_versioninfo);
+	fflags |= DMU_BACKUP_FEATURE_COMPRESSED;
+	if (context->cs_type == ZIO_COMPRESS_LZ4)
+		fflags |= DMU_BACKUP_FEATURE_LZ4;
+	DMU_SET_FEATUREFLAGS(drrb->drr_versioninfo, fflags);
+	return (B_TRUE);
+}
+
+static chain_step_t
+serial_set_compress_features(compression_spec_t target)
+{
+	compression_spec_t *context = next_context();
+
+	*context = target;
+	chain_step_t step = {
+		.cs_type = CS_SERIAL,
+		.cs_in_size = sizeof (drr_packet_t),
+		.cs_out_size = sizeof (drr_packet_t),
+		.serial = {
+			.css_process =
+			    (zc_serial_process_f *)chain_set_compress_features,
+			.css_context = context
 		}
 	};
 	return (step);
@@ -322,6 +388,7 @@ zstream_do_recompress(int argc, char *argv[])
 		parallel_validate_records(),
 		parallel_decompress_writes(&spec),
 		parallel_compress_writes(spec),
+		serial_set_compress_features(spec),
 		parallel_calc_fletcher4(),
 		serial_add_fletcher4(),
 		serial_write_stream(NULL)
