@@ -1,0 +1,239 @@
+'\" te
+.\" Copyright (c) 2020 by Delphix. All rights reserved.
+.\" The contents of this file are subject to the terms of the Common Development and Distribution License (the "License").  You may not use this file except in compliance with the License. You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE or http://www.opensolaris.org/os/licensing.
+.\"  See the License for the specific language governing permissions and limitations under the License. When distributing Covered Code, include this CDDL HEADER in each file and include the License file at usr/src/OPENSOLARIS.LICENSE.  If applicable, add the following below this CDDL HEADER, with
+.\" the fields enclosed by brackets "[]" replaced with your own identifying information: Portions Copyright [yyyy] [name of copyright owner]
+.TH ZSTREAM 8 "Nov 2, 2026"
+.SH NAME
+zstream \- manipulate zfs send streams
+.SH SYNOPSIS
+.LP
+.nf
+\fBzstream\fR dump [\fB-Cvd\fR] [\fIfile\fR]
+\fBzstream\fR decompress [\fB-v\fR] [\fIobject\fR,\fIoffset\fR[,\fItype\fR]] ...
+\fBzstream\fR drop_records [\fB-v\fR] [\fIobject\fR,\fIoffset\fR] ... [\fIfile\fR]
+\fBzstream\fR recompress [\fB-v\fR] \fItype\fR [\fIfile\fR]
+\fBzstream\fR token \fIresume_token\fR
+\fBzstream\fR redup [\fB-v\fR] \fIfile\fR
+\fBzstream\fR dedup [\fB-v\fR] [\fB-m\fR \fIpercent\fR] [\fB-c\fR \fIcache_dir\fR] [\fIfile\fR]
+.fi
+
+.SH DESCRIPTION
+.LP
+The \fBzstream\fR utility operates on send streams produced by the
+\fBzfs send\fR command. See \fBzfs\fR(8). Each operation is invoked as a
+subcommand, described below.
+.sp
+This is a separate binary from \fBzstreamdump\fR(8), which remains
+available unchanged for existing scripts and tooling. \fBzstream dump\fR
+provides equivalent functionality along with the additional stream
+manipulation subcommands below.
+
+.SS "zstream dump"
+.LP
+.nf
+\fBzstream\fR dump [\fB-Cvd\fR] [\fIfile\fR]
+.fi
+.sp
+Prints information about the specified send stream, including record
+headers and counts. The stream is read from \fIfile\fR if given, or from
+standard input.
+.sp
+.ne 2
+.na
+\fB\fB-C\fR\fR
+.ad
+.RS 4n
+Suppress validation of checksums.
+.RE
+.sp
+.ne 2
+.na
+\fB\fB-v\fR\fR
+.ad
+.RS 4n
+Verbose. Print metadata for every record, not only \fBBEGIN\fR and
+\fBEND\fR records.
+.RE
+.sp
+.ne 2
+.na
+\fB\fB-d\fR\fR
+.ad
+.RS 4n
+Dump the data contained in each record. Implies \fB-v\fR.
+.RE
+
+.SS "zstream decompress"
+.LP
+.nf
+\fBzstream\fR decompress [\fB-v\fR] [\fIobject\fR,\fIoffset\fR[,\fItype\fR]] ...
+.fi
+.sp
+Reads a send stream on standard input and decompresses selected records,
+for use when the compression type recorded in a record's metadata is
+incorrect. Each argument names the object number and byte offset of a
+record to repair; every record for that object beginning at that offset
+is decompressed, where possible. A record may not be repairable if it is
+corrupted in some, but not all, of the stream's snapshots.
+.sp
+\fItype\fR is one of \fBoff\fR, \fBgzip\fR, \fBlz4\fR, \fBlzjb\fR, or
+\fBzle\fR, and defaults to \fBlz4\fR if omitted. A type of
+\fBoff\fR corrects the stream's metadata to indicate the record is
+already uncompressed, without attempting decompression.
+.sp
+Note: \fBzstd\fR is not supported on this platform and is not accepted
+as a \fItype\fR.
+.sp
+The repaired stream is written to standard output.
+.sp
+.ne 2
+.na
+\fB\fB-v\fR\fR
+.ad
+.RS 4n
+Verbose. Print a summary of the records that were decompressed.
+.RE
+
+.SS "zstream drop_records"
+.LP
+.nf
+\fBzstream\fR drop_records [\fB-v\fR] [\fIobject\fR,\fIoffset\fR] ... [\fIfile\fR]
+.fi
+.sp
+Reads a send stream from \fIfile\fR, or from standard input, and drops
+selected records, identified by object number and byte offset. Only
+\fBWRITE\fR and \fBWRITE_EMBEDDED\fR records may currently be dropped.
+Deduplicated streams are not supported. The repaired stream, with its
+checksums regenerated, is written to standard output.
+.sp
+\fBdrop_record\fR is accepted as an alias for compatibility.
+.sp
+.ne 2
+.na
+\fB\fB-v\fR\fR
+.ad
+.RS 4n
+Verbose. Print a summary of the records that were dropped.
+.RE
+
+.SS "zstream recompress"
+.LP
+.nf
+\fBzstream\fR recompress [\fB-v\fR] \fItype\fR [\fIfile\fR]
+.fi
+.sp
+Reads a send stream from \fIfile\fR, or from standard input, and writes
+it to standard output with every \fBWRITE\fR record recompressed using
+\fItype\fR, which is one of \fBoff\fR, \fBlzjb\fR, \fBgzip\fR,
+\fBgzip-\fR\fIN\fR (\fIN\fR from 1 to 9), \fBzle\fR, or \fBlz4\fR.
+Records that do not compress usefully are left uncompressed. Encrypted
+(raw) records are passed through unchanged. Compression and
+decompression run in parallel.
+.sp
+Note: \fBzstd\fR is not supported on this platform.
+.sp
+.ne 2
+.na
+\fB\fB-v\fR\fR
+.ad
+.RS 4n
+Verbose.
+.RE
+
+.SS "zstream token"
+.LP
+.nf
+\fBzstream\fR token \fIresume_token\fR
+.fi
+.sp
+Decodes and prints the contents of a \fBzfs\fR resume token.
+
+.SS "zstream redup"
+.LP
+.nf
+\fBzstream\fR redup [\fB-v\fR] \fIfile\fR
+.fi
+.sp
+\fBzfs send -D\fR can produce a deduplicated send stream, in which
+duplicate blocks are referenced rather than retransmitted; support for
+\fBzfs receive\fR of such streams is deprecated. \fBzstream redup\fR
+reads a deduplicated stream from \fIfile\fR and writes an equivalent
+non-deduplicated stream to standard output, allowing it to still be
+received:
+.sp
+.RS 4n
+.nf
+# zstream redup \fIfile\fR | zfs receive ...
+.fi
+.RE
+.sp
+.ne 2
+.na
+\fB\fB-v\fR\fR
+.ad
+.RS 4n
+Verbose. Print a summary of the records that were converted.
+.RE
+
+.SS "zstream dedup"
+.LP
+.nf
+\fBzstream\fR dedup [\fB-v\fR] [\fB-m\fR \fIpercent\fR] [\fB-c\fR \fIcache_dir\fR] [\fIfile\fR]
+.fi
+.sp
+The inverse of \fBzstream redup\fR. Reads a send stream from \fIfile\fR,
+or from standard input, and writes a deduplicated stream to standard
+output, replacing each \fBWRITE\fR record whose contents duplicate an
+earlier one with a \fBWRITE_BYREF\fR record. Candidates are found by a
+payload hash and confirmed by a full comparison of the records. The
+dedup table is kept in memory and moves to disk if it outgrows its
+memory budget.
+.sp
+.ne 2
+.na
+\fB\fB-v\fR\fR
+.ad
+.RS 4n
+Verbose. Print periodic status updates.
+.RE
+.sp
+.ne 2
+.na
+\fB\fB-m\fR \fIpercent\fR\fR
+.ad
+.RS 4n
+The percentage of physical memory the dedup table may use before it
+moves to disk. The default is 30.
+.RE
+.sp
+.ne 2
+.na
+\fB\fB-c\fR \fIcache_dir\fR\fR
+.ad
+.RS 4n
+The directory to hold the dedup table if it moves to disk. The default
+is \fB/tmp\fR.
+.RE
+
+.SH ATTRIBUTES
+.sp
+.LP
+See \fBattributes\fR(7) for descriptions of the following attributes:
+.sp
+.TS
+box;
+c | c
+l | l .
+ATTRIBUTE TYPE	ATTRIBUTE VALUE
+_
+Interface Stability	Uncommitted
+.TE
+
+.SH SEE ALSO
+.sp
+.LP
+.BR attributes (7),
+.BR zdb (8),
+.BR zfs (8),
+.BR zstreamdump (8)
