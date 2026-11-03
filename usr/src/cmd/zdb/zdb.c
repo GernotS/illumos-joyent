@@ -61,6 +61,7 @@
 #include <sys/dmu_traverse.h>
 #include <sys/zio_checksum.h>
 #include <sys/zio_compress.h>
+#include <sys/zstd/zstd.h>
 #include <zfs_fletcher.h>
 #include <sys/zfs_fuid.h>
 #include <sys/arc.h>
@@ -136,7 +137,7 @@ static void
 usage(void)
 {
 	(void) fprintf(stderr,
-	    "Usage:\t%s [-AbcdDFGhikLMPsvX] [-e [-V] [-p <path> ...]] "
+	    "Usage:\t%s [-AbcdDFGhikLMPsvXZ] [-e [-V] [-p <path> ...]] "
 	    "[-I <inflight I/Os>]\n"
 	    "\t\t[-o <var>=<value>]... [-t <txg>] [-U <cache>] [-x <dumpdir>]\n"
 	    "\t\t[<poolname> [<object> ...]]\n"
@@ -214,7 +215,9 @@ usage(void)
 	(void) fprintf(stderr, "        -x <dumpdir> -- "
 	    "dump all read blocks into specified directory\n");
 	(void) fprintf(stderr, "        -X attempt extreme rewind (does not "
-	    "work with dataset)\n\n");
+	    "work with dataset)\n");
+	(void) fprintf(stderr, "        -Z show ZSTD headers of zstd "
+	    "compressed blocks\n\n");
 	(void) fprintf(stderr, "Specify an option more than once (e.g. -bb) "
 	    "to make only that option verbose\n");
 	(void) fprintf(stderr, "Default is to dump everything non-verbosely\n");
@@ -1599,8 +1602,74 @@ snprintf_blkptr_compact(char *blkbuf, size_t buflen, const blkptr_t *bp)
 	}
 }
 
+/*
+ * Append the header of a zstd-compressed block (compressed size, zstd
+ * version and level) to blkbuf, for -Z.
+ */
 static void
-print_indirect(blkptr_t *bp, const zbookmark_phys_t *zb,
+snprintf_zstd_header(spa_t *spa, char *blkbuf, size_t buflen,
+    const blkptr_t *bp)
+{
+	static abd_t *pabd = NULL;
+	void *buf;
+	zio_t *zio;
+	zfs_zstdhdr_t zstd_hdr;
+	int error;
+
+	if (BP_GET_COMPRESS(bp) != ZIO_COMPRESS_ZSTD)
+		return;
+
+	if (BP_IS_HOLE(bp))
+		return;
+
+	if (BP_IS_EMBEDDED(bp)) {
+		buf = malloc(SPA_MAXBLOCKSIZE);
+		if (buf == NULL) {
+			(void) fprintf(stderr, "out of memory\n");
+			exit(1);
+		}
+		decode_embedded_bp_compressed(bp, buf);
+		(void) memcpy(&zstd_hdr, buf, sizeof (zstd_hdr));
+		free(buf);
+		zstd_hdr.c_len = BE_32(zstd_hdr.c_len);
+		zstd_hdr.raw_version_level = BE_32(zstd_hdr.raw_version_level);
+		(void) snprintf(blkbuf + strlen(blkbuf),
+		    buflen - strlen(blkbuf),
+		    " ZSTD:size=%u:version=%u:level=%u:EMBEDDED",
+		    zstd_hdr.c_len, zfs_get_hdrversion(&zstd_hdr),
+		    zfs_get_hdrlevel(&zstd_hdr));
+		return;
+	}
+
+	if (pabd == NULL)
+		pabd = abd_alloc_for_io(SPA_MAXBLOCKSIZE, B_FALSE);
+	zio = zio_root(spa, NULL, NULL, 0);
+
+	/* Decrypt but don't decompress so we can read the compression header */
+	zio_nowait(zio_read(zio, spa, bp, pabd, BP_GET_PSIZE(bp), NULL, NULL,
+	    ZIO_PRIORITY_SYNC_READ, ZIO_FLAG_CANFAIL | ZIO_FLAG_RAW_COMPRESS,
+	    NULL));
+	error = zio_wait(zio);
+	if (error) {
+		(void) fprintf(stderr, "read failed: %d\n", error);
+		return;
+	}
+	buf = abd_borrow_buf_copy(pabd, BP_GET_LSIZE(bp));
+	(void) memcpy(&zstd_hdr, buf, sizeof (zstd_hdr));
+	zstd_hdr.c_len = BE_32(zstd_hdr.c_len);
+	zstd_hdr.raw_version_level = BE_32(zstd_hdr.raw_version_level);
+
+	(void) snprintf(blkbuf + strlen(blkbuf),
+	    buflen - strlen(blkbuf),
+	    " ZSTD:size=%u:version=%u:level=%u:NORMAL",
+	    zstd_hdr.c_len, zfs_get_hdrversion(&zstd_hdr),
+	    zfs_get_hdrlevel(&zstd_hdr));
+
+	abd_return_buf_copy(pabd, buf, BP_GET_LSIZE(bp));
+}
+
+static void
+print_indirect(spa_t *spa, blkptr_t *bp, const zbookmark_phys_t *zb,
     const dnode_phys_t *dnp)
 {
 	char blkbuf[BP_SPRINTF_LEN];
@@ -1624,6 +1693,8 @@ print_indirect(blkptr_t *bp, const zbookmark_phys_t *zb,
 	}
 
 	snprintf_blkptr_compact(blkbuf, sizeof (blkbuf), bp);
+	if (dump_opt['Z'] && BP_GET_COMPRESS(bp) == ZIO_COMPRESS_ZSTD)
+		snprintf_zstd_header(spa, blkbuf, sizeof (blkbuf), bp);
 	(void) printf("%s\n", blkbuf);
 }
 
@@ -1636,7 +1707,7 @@ visit_indirect(spa_t *spa, const dnode_phys_t *dnp,
 	if (bp->blk_birth == 0)
 		return (0);
 
-	print_indirect(bp, zb, dnp);
+	print_indirect(spa, bp, zb, dnp);
 
 	if (BP_GET_LEVEL(bp) > 0 && !BP_IS_HOLE(bp)) {
 		arc_flags_t flags = ARC_FLAG_WAIT;
@@ -6568,7 +6639,7 @@ main(int argc, char **argv)
 	zfs_btree_verify_intensity = 3;
 
 	while ((c = getopt(argc, argv,
-	    "AbcCdDeEFGhiI:klLmMo:Op:PqRsSt:uU:vVx:X")) != -1) {
+	    "AbcCdDeEFGhiI:klLmMo:Op:PqRsSt:uU:vVx:XZ")) != -1) {
 		switch (c) {
 		case 'b':
 		case 'c':
@@ -6598,6 +6669,7 @@ main(int argc, char **argv)
 		case 'P':
 		case 'q':
 		case 'X':
+		case 'Z':
 			dump_opt[c]++;
 			break;
 		/* NB: Sort single match options below. */

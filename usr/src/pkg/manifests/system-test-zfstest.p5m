@@ -592,6 +592,8 @@ file path=opt/zfs-tests/tests/functional/cli_root/zdb/zdb_002_pos mode=0555
 file path=opt/zfs-tests/tests/functional/cli_root/zdb/zdb_003_pos mode=0555
 file path=opt/zfs-tests/tests/functional/cli_root/zdb/zdb_004_pos mode=0555
 file path=opt/zfs-tests/tests/functional/cli_root/zdb/zdb_005_pos mode=0555
+file path=opt/zfs-tests/tests/functional/cli_root/zdb/zdb_decompress_zstd \
+    mode=0555
 dir  path=opt/zfs-tests/tests/functional/cli_root/zfs
 file path=opt/zfs-tests/tests/functional/cli_root/zfs/cleanup mode=0555
 file path=opt/zfs-tests/tests/functional/cli_root/zfs/setup mode=0555
@@ -1025,6 +1027,9 @@ file \
 file \
     path=opt/zfs-tests/tests/functional/cli_root/zfs_receive/zfs_receive_from_encrypted \
     mode=0555
+file \
+    path=opt/zfs-tests/tests/functional/cli_root/zfs_receive/zfs_receive_from_zstd \
+    mode=0555
 file path=opt/zfs-tests/tests/functional/cli_root/zfs_receive/zfs_receive_raw \
     mode=0555
 file \
@@ -1033,6 +1038,9 @@ file \
 file \
     path=opt/zfs-tests/tests/functional/cli_root/zfs_receive/zfs_receive_to_encrypted \
     mode=0555
+file \
+    path=opt/zfs-tests/tests/functional/cli_root/zfs_receive/zstd_test_data.txt \
+    mode=0444
 dir  path=opt/zfs-tests/tests/functional/cli_root/zfs_remap
 file path=opt/zfs-tests/tests/functional/cli_root/zfs_remap/cleanup mode=0555
 file path=opt/zfs-tests/tests/functional/cli_root/zfs_remap/setup mode=0555
@@ -1218,6 +1226,9 @@ file path=opt/zfs-tests/tests/functional/cli_root/zfs_set/zfs_set_003_neg \
 file \
     path=opt/zfs-tests/tests/functional/cli_root/zfs_set/zfs_set_common.kshlib \
     mode=0444
+file \
+    path=opt/zfs-tests/tests/functional/cli_root/zfs_set/zfs_set_feature_activation \
+    mode=0555
 file path=opt/zfs-tests/tests/functional/cli_root/zfs_set/zfs_set_keylocation \
     mode=0555
 dir  path=opt/zfs-tests/tests/functional/cli_root/zfs_share
@@ -2388,12 +2399,21 @@ file path=opt/zfs-tests/tests/functional/compression/compress_001_pos mode=0555
 file path=opt/zfs-tests/tests/functional/compression/compress_002_pos mode=0555
 file path=opt/zfs-tests/tests/functional/compression/compress_003_pos mode=0555
 file path=opt/zfs-tests/tests/functional/compression/compress_004_pos mode=0555
+file path=opt/zfs-tests/tests/functional/compression/compress_zstd_bswap \
+    mode=0555
 file path=opt/zfs-tests/tests/functional/compression/l2arc_compressed_arc \
     mode=0555
 file \
     path=opt/zfs-tests/tests/functional/compression/l2arc_compressed_arc_disabled \
     mode=0555
+file path=opt/zfs-tests/tests/functional/compression/l2arc_encrypted mode=0555
+file \
+    path=opt/zfs-tests/tests/functional/compression/l2arc_encrypted_no_compressed_arc \
+    mode=0555
 file path=opt/zfs-tests/tests/functional/compression/setup mode=0555
+file path=opt/zfs-tests/tests/functional/compression/testpool_zstd.bz2 mode=0444
+file path=opt/zfs-tests/tests/functional/compression/testpool_zstd_map.txt \
+    mode=0444
 dir  path=opt/zfs-tests/tests/functional/ctime
 file path=opt/zfs-tests/tests/functional/ctime/cleanup mode=0555
 file path=opt/zfs-tests/tests/functional/ctime/ctime_001_pos mode=0555
