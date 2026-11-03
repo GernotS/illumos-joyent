@@ -624,7 +624,8 @@ spa_prop_validate(spa_t *spa, nvlist_t *props)
 				    dsl_prop_get_int_ds(dmu_objset_ds(os),
 				    zfs_prop_to_name(ZFS_PROP_COMPRESSION),
 				    &propval)) == 0 &&
-				    !BOOTFS_COMPRESS_VALID(propval)) {
+				    !BOOTFS_COMPRESS_VALID(
+				    ZIO_COMPRESS_ALGO(propval))) {
 					error = SET_ERROR(ENOTSUP);
 				} else {
 					objnum = dmu_objset_id(os);

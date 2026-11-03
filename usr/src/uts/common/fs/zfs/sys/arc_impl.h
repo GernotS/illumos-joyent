@@ -453,6 +453,13 @@ struct arc_buf_hdr {
 	uint64_t		b_birth;
 
 	arc_buf_contents_t	b_type;
+	/*
+	 * Compression level the data was (or will be) compressed with, for
+	 * algorithms that have levels (zstd). Needed to recompress the
+	 * block identically, e.g. for L2ARC when compressed ARC is
+	 * disabled. ZIO_COMPLEVEL_INHERIT if unknown.
+	 */
+	uint8_t			b_complevel;
 	arc_buf_hdr_t		*b_hash_next;
 	arc_flags_t		b_flags;
 

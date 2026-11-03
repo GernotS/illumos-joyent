@@ -33,7 +33,8 @@ include ../../../uts/common/Makefile.files
 KERNEL_OBJS = kernel.o util.o
 DTRACE_OBJS = zfs.o
 
-OBJECTS=$(LUA_OBJS) $(ZFS_COMMON_OBJS) $(ZFS_SHARED_OBJS) $(KERNEL_OBJS)
+OBJECTS=$(LUA_OBJS) $(ZFS_COMMON_OBJS) $(ZFS_SHARED_OBJS) $(KERNEL_OBJS) \
+	$(ZSTD_OBJS)
 
 # include library definitions
 include ../../Makefile.lib
@@ -92,6 +93,19 @@ CERRWARN +=	-_gcc=-Wno-unused-function
 # not linted
 SMATCH=off
 
+#
+# The zstd library is unmodified upstream code (see usr/src/common/zstd);
+# build it as the kernel does and do not hold it to illumos warning policy.
+#
+ZSTD_PICS = $(ZSTD_OBJS:%=pics/%)
+$(ZSTD_PICS) := CPPFLAGS += \
+	-DZSTD_DISABLE_ASM -DZSTD_NO_INTRINSICS -DZSTD_TRACE=0 \
+	-DMEM_MODULE -DXXH_NAMESPACE=ZSTD_ -DXXH_PRIVATE_API -DXXH_INLINE_ALL \
+	-DZSTD_LEGACY_SUPPORT=0 -DZSTD_LIB_DICTBUILDER=0 \
+	-DZSTD_LIB_DEPRECATED=0 -DZSTD_NOBENCH -DDEBUGLEVEL=0
+$(ZSTD_PICS) := CERRWARN += -_gcc=-w
+pics/zfs_zstd.o := CPPFLAGS += -I../../../common/zstd
+
 .KEEP_STATE:
 
 all: $(LIBS)
@@ -113,6 +127,18 @@ pics/%.o: ../../../common/zfs/%.c ../common/zfs.h
 	$(POST_PROCESS_O)
 
 pics/%.o: ../../../common/lz4/%.c ../common/zfs.h
+	$(COMPILE.c) -o $@ $<
+	$(POST_PROCESS_O)
+
+pics/%.o: ../../../common/zstd/lib/common/%.c
+	$(COMPILE.c) -o $@ $<
+	$(POST_PROCESS_O)
+
+pics/%.o: ../../../common/zstd/lib/compress/%.c
+	$(COMPILE.c) -o $@ $<
+	$(POST_PROCESS_O)
+
+pics/%.o: ../../../common/zstd/lib/decompress/%.c
 	$(COMPILE.c) -o $@ $<
 	$(POST_PROCESS_O)
 

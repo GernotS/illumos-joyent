@@ -2608,6 +2608,15 @@ zfs_prop_set_special(const char *dsname, zprop_source_t source,
 	case ZFS_PROP_REFRESERVATION:
 		err = dsl_dataset_set_refreservation(dsname, source, intval);
 		break;
+	case ZFS_PROP_COMPRESSION:
+		err = dsl_dataset_set_compression(dsname, source, intval);
+		/*
+		 * Set err to -1 to force the zfs_set_prop_nvlist code down the
+		 * default path to set the value in the nvlist.
+		 */
+		if (err == 0)
+			err = -1;
+		break;
 	case ZFS_PROP_VOLSIZE:
 		err = zvol_set_volsize(dsname, intval);
 		break;
@@ -4464,6 +4473,20 @@ zfs_check_settable(const char *dsname, nvpair_t *pair, cred_t *cr)
 				spa_close(spa, FTAG);
 			}
 
+			if (ZIO_COMPRESS_ALGO(intval) == ZIO_COMPRESS_ZSTD) {
+				spa_t *spa;
+
+				if ((err = spa_open(dsname, &spa, FTAG)) != 0)
+					return (err);
+
+				if (!spa_feature_is_enabled(spa,
+				    SPA_FEATURE_ZSTD_COMPRESS)) {
+					spa_close(spa, FTAG);
+					return (SET_ERROR(ENOTSUP));
+				}
+				spa_close(spa, FTAG);
+			}
+
 			/*
 			 * If this is a bootable dataset then
 			 * verify that the compression algorithm
@@ -4472,7 +4495,7 @@ zfs_check_settable(const char *dsname, nvpair_t *pair, cred_t *cr)
 			 * implies a downrev pool version.
 			 */
 			if (zfs_is_bootfs(dsname) &&
-			    !BOOTFS_COMPRESS_VALID(intval)) {
+			    !BOOTFS_COMPRESS_VALID(ZIO_COMPRESS_ALGO(intval))) {
 				return (SET_ERROR(ERANGE));
 			}
 		}

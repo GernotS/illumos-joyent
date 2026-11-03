@@ -1664,7 +1664,7 @@ arc_hdr_authenticate(arc_buf_hdr_t *hdr, spa_t *spa, uint64_t dsobj)
 		abd_take_ownership_of_buf(abd, B_TRUE);
 
 		csize = zio_compress_data(HDR_GET_COMPRESS(hdr),
-		    hdr->b_l1hdr.b_pabd, tmpbuf, lsize);
+		    hdr->b_l1hdr.b_pabd, tmpbuf, lsize, hdr->b_complevel);
 		ASSERT3U(csize, <=, psize);
 		abd_zero_off(abd, csize, psize - csize);
 	}
@@ -1748,9 +1748,9 @@ arc_hdr_decrypt(arc_buf_hdr_t *hdr, spa_t *spa, const zbookmark_phys_t *zb)
 		cabd = arc_get_data_abd(hdr, arc_hdr_size(hdr), hdr, B_TRUE);
 		tmp = abd_borrow_buf(cabd, arc_hdr_size(hdr));
 
-		ret = zio_decompress_data(HDR_GET_COMPRESS(hdr),
+		ret = zio_decompress_data_level(HDR_GET_COMPRESS(hdr),
 		    hdr->b_l1hdr.b_pabd, tmp, HDR_GET_PSIZE(hdr),
-		    HDR_GET_LSIZE(hdr));
+		    HDR_GET_LSIZE(hdr), &hdr->b_complevel);
 		if (ret != 0) {
 			abd_return_buf(cabd, tmp, arc_hdr_size(hdr));
 			goto error;
@@ -1997,9 +1997,10 @@ arc_buf_fill(arc_buf_t *buf, spa_t *spa, const zbookmark_phys_t *zb,
 			ASSERT3P(hdr->b_l1hdr.b_freeze_cksum, !=, NULL);
 			return (0);
 		} else {
-			error = zio_decompress_data(HDR_GET_COMPRESS(hdr),
-			    hdr->b_l1hdr.b_pabd, buf->b_data,
-			    HDR_GET_PSIZE(hdr), HDR_GET_LSIZE(hdr));
+			error = zio_decompress_data_level(
+			    HDR_GET_COMPRESS(hdr), hdr->b_l1hdr.b_pabd,
+			    buf->b_data, HDR_GET_PSIZE(hdr),
+			    HDR_GET_LSIZE(hdr), &hdr->b_complevel);
 
 			/*
 			 * Absent hardware errors or software bugs, this should
@@ -3130,6 +3131,7 @@ arc_hdr_alloc(uint64_t spa, int32_t psize, int32_t lsize,
 	HDR_SET_LSIZE(hdr, lsize);
 	hdr->b_spa = spa;
 	hdr->b_type = type;
+	hdr->b_complevel = ZIO_COMPLEVEL_INHERIT;
 	hdr->b_flags = 0;
 	arc_hdr_set_flags(hdr, arc_bufc_to_flags(type) | ARC_FLAG_HAS_L1HDR);
 	arc_hdr_set_compress(hdr, compression_type);
@@ -3476,6 +3478,7 @@ arc_buf_alloc_l2only(size_t size, arc_buf_contents_t type, l2arc_dev_t *dev,
 	hdr = kmem_cache_alloc(hdr_l2only_cache, KM_SLEEP);
 	hdr->b_birth = birth;
 	hdr->b_type = type;
+	hdr->b_complevel = ZIO_COMPLEVEL_INHERIT;
 	hdr->b_flags = 0;
 	arc_hdr_set_flags(hdr, arc_bufc_to_flags(type) | ARC_FLAG_HAS_L2HDR);
 	HDR_SET_LSIZE(hdr, size);
@@ -4683,6 +4686,7 @@ arc_kmem_reap_soon(void)
 	kmem_cache_reap_soon(hdr_full_cache);
 	kmem_cache_reap_soon(hdr_l2only_cache);
 	kmem_cache_reap_soon(zfs_btree_leaf_cache);
+	zfs_zstd_cache_reap_now();
 
 	if (zio_arena != NULL) {
 		/*
@@ -5457,6 +5461,14 @@ arc_read_done(zio_t *zio)
 		} else {
 			hdr->b_l1hdr.b_byteswap = DMU_BSWAP_NUMFUNCS;
 		}
+		/*
+		 * The level is known here only if the zio pipeline
+		 * decompressed the block; an L2ARC read must not clobber
+		 * the level the hdr already has.
+		 */
+		if (!HDR_L2_READING(hdr) &&
+		    zio->io_prop.zp_complevel != ZIO_COMPLEVEL_INHERIT)
+			hdr->b_complevel = zio->io_prop.zp_complevel;
 	}
 
 	arc_hdr_clear_flags(hdr, ARC_FLAG_L2_EVICTED);
@@ -6512,6 +6524,7 @@ arc_write_ready(zio_t *zio)
 	}
 	HDR_SET_PSIZE(hdr, psize);
 	arc_hdr_set_compress(hdr, compress);
+	hdr->b_complevel = zio->io_prop.zp_complevel;
 
 	if (zio->io_error != 0 || psize == 0)
 		goto out;
@@ -6698,6 +6711,7 @@ arc_write(zio_t *pio, spa_t *spa, uint64_t txg, blkptr_t *bp, arc_buf_t *buf,
 		ASSERT(ARC_BUF_COMPRESSED(buf));
 		localprop.zp_encrypt = B_TRUE;
 		localprop.zp_compress = HDR_GET_COMPRESS(hdr);
+		localprop.zp_complevel = hdr->b_complevel;
 		/* CONSTCOND */
 		localprop.zp_byteorder =
 		    (hdr->b_l1hdr.b_byteswap == DMU_BSWAP_NUMFUNCS) ?
@@ -6717,6 +6731,7 @@ arc_write(zio_t *pio, spa_t *spa, uint64_t txg, blkptr_t *bp, arc_buf_t *buf,
 	} else if (ARC_BUF_COMPRESSED(buf)) {
 		ASSERT3U(HDR_GET_LSIZE(hdr), !=, arc_buf_size(buf));
 		localprop.zp_compress = HDR_GET_COMPRESS(hdr);
+		localprop.zp_complevel = hdr->b_complevel;
 		zio_flags |= ZIO_FLAG_RAW_COMPRESS;
 	}
 
@@ -8148,9 +8163,9 @@ l2arc_untransform(zio_t *zio, l2arc_read_callback_t *cb)
 		    B_TRUE);
 		void *tmp = abd_borrow_buf(cabd, arc_hdr_size(hdr));
 
-		ret = zio_decompress_data(HDR_GET_COMPRESS(hdr),
+		ret = zio_decompress_data_level(HDR_GET_COMPRESS(hdr),
 		    hdr->b_l1hdr.b_pabd, tmp, HDR_GET_PSIZE(hdr),
-		    HDR_GET_LSIZE(hdr));
+		    HDR_GET_LSIZE(hdr), &hdr->b_complevel);
 		if (ret != 0) {
 			abd_return_buf_copy(cabd, tmp, arc_hdr_size(hdr));
 			arc_free_data_abd(hdr, cabd, arc_hdr_size(hdr), hdr);
@@ -8626,7 +8641,8 @@ l2arc_apply_transforms(spa_t *spa, arc_buf_hdr_t *hdr, uint64_t asize,
 		cabd = abd_alloc_for_io(asize, ismd);
 		tmp = abd_borrow_buf(cabd, asize);
 
-		psize = zio_compress_data(compress, to_write, tmp, size);
+		psize = zio_compress_data(compress, to_write, tmp, size,
+		    hdr->b_complevel);
 		ASSERT3U(psize, <=, HDR_GET_PSIZE(hdr));
 		if (psize < asize)
 			bzero((char *)tmp + psize, asize - psize);
@@ -10057,7 +10073,7 @@ l2arc_log_blk_commit(l2arc_dev_t *dev, zio_t *pio, l2arc_write_callback_t *cb)
 
 	/* try to compress the buffer */
 	psize = zio_compress_data(ZIO_COMPRESS_LZ4,
-	    abd_buf->abd, tmpbuf, sizeof (*lb));
+	    abd_buf->abd, tmpbuf, sizeof (*lb), ZIO_COMPLEVEL_DEFAULT);
 
 	/* a log block is never entirely zero */
 	ASSERT(psize != 0);

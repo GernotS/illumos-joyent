@@ -42,7 +42,9 @@ ARCHDIR:sh = cd ..; basename `pwd`
 #	Define the module and object file sets.
 #
 MODULE		= zfs
-OBJECTS		= $(ZFS_OBJS:%=$(OBJS_DIR)/%) $(LUA_OBJS:%=$(OBJS_DIR)/%)
+ZSTD_OBJECTS	= $(ZSTD_OBJS:%=$(OBJS_DIR)/%)
+OBJECTS		= $(ZFS_OBJS:%=$(OBJS_DIR)/%) $(LUA_OBJS:%=$(OBJS_DIR)/%) \
+		  $(ZSTD_OBJECTS)
 ROOTMODULE	= $(ROOT_DRV_DIR)/$(MODULE)
 ROOTLINK	= $(ROOT_FS_DIR)/$(MODULE)
 CONF_SRCDIR	= $(UTSBASE)/common/fs/zfs
@@ -92,6 +94,21 @@ $(OBJS_DIR)/zvol.o := SMOFF += deref_check,signed
 
 # false positive
 $(OBJS_DIR)/zfs_ctldir.o := SMOFF += strcpy_overflow
+
+#
+# The zstd library is unmodified upstream code (see usr/src/common/zstd):
+# build it the way OpenZFS does, and do not hold it to illumos warning and
+# smatch policy. Assembly and SIMD intrinsics are disabled, as the kernel
+# may not use the FPU.
+#
+$(ZSTD_OBJECTS) := CPPFLAGS += -I$(COMMONBASE)/zstd/include \
+	-DZSTD_DISABLE_ASM -DZSTD_NO_INTRINSICS -DZSTD_TRACE=0 \
+	-DMEM_MODULE -DXXH_NAMESPACE=ZSTD_ -DXXH_PRIVATE_API -DXXH_INLINE_ALL \
+	-DZSTD_LEGACY_SUPPORT=0 -DZSTD_LIB_DICTBUILDER=0 \
+	-DZSTD_LIB_DEPRECATED=0 -DZSTD_NOBENCH -DDEBUGLEVEL=0 \
+	-DZSTD_DEPS_ASSERT
+$(ZSTD_OBJECTS) := CERRWARN += -_gcc=-w
+$(ZSTD_OBJECTS) := SMATCH = off
 
 #
 #	Default build targets.

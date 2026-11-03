@@ -116,6 +116,7 @@ struct dsl_crypto_params;
 #define	SPA_ASIZEBITS		24	/* ASIZE up to 64 times larger	*/
 
 #define	SPA_COMPRESSBITS	7
+#define	SPA_COMPRESSMASK	((1U << SPA_COMPRESSBITS) - 1)
 #define	SPA_VDEVBITS		24
 
 /*
