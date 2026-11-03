@@ -426,10 +426,21 @@ zpool_feature_init(void)
 	    "Support for advanced deduplication",
 	    ZFEATURE_FLAG_READONLY_COMPAT, ZFEATURE_TYPE_BOOLEAN, NULL);
 
+	{
+		static const spa_feature_t zstd_deps[] = {
+			SPA_FEATURE_EXTENSIBLE_DATASET,
+			SPA_FEATURE_NONE
+		};
+		zfeature_register(SPA_FEATURE_ZSTD_COMPRESS,
+		    "org.freebsd:zstd_compress", "zstd_compress",
+		    "zstd compression algorithm support.",
+		    ZFEATURE_FLAG_PER_DATASET, ZFEATURE_TYPE_BOOLEAN,
+		    zstd_deps);
+	}
+
 	/*
 	 * Slots for:
 	 * SPA_FEATURE_DEVICE_REBUILD
-	 * SPA_FEATURE_ZSTD_COMPRESS
 	 * SPA_FEATURE_DRAID
 	 * SPA_FEATURE_ZILSAXATTR
 	 * SPA_FEATURE_HEAD_ERRLOG

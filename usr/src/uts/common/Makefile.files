@@ -1377,6 +1377,34 @@ amd64_ZFS_OBJS +=		\
 
 sparcv9_ZFS_OBJS +=
 
+#
+# zstd library (usr/src/common/zstd/lib), used by ZFS for zstd compression.
+# These are unmodified upstream sources; see usr/src/common/zstd.
+#
+ZSTD_OBJS +=			\
+	entropy_common.o	\
+	error_private.o		\
+	fse_decompress.o	\
+	pool.o			\
+	zstd_common.o		\
+	fse_compress.o		\
+	hist.o			\
+	huf_compress.o		\
+	zstd_compress.o		\
+	zstd_compress_literals.o \
+	zstd_compress_sequences.o \
+	zstd_compress_superblock.o \
+	zstd_double_fast.o	\
+	zstd_fast.o		\
+	zstd_lazy.o		\
+	zstd_ldm.o		\
+	zstd_opt.o		\
+	zstd_preSplit.o		\
+	huf_decompress.o	\
+	zstd_ddict.o		\
+	zstd_decompress.o	\
+	zstd_decompress_block.o
+
 ZFS_COMMON_OBJS +=		\
 	$($(MACH64)_ZFS_OBJS)	\
 	abd.o			\
@@ -1482,6 +1510,7 @@ ZFS_COMMON_OBJS +=		\
 	zio.o			\
 	zio_checksum.o		\
 	zio_compress.o		\
+	zfs_zstd.o		\
 	zio_crypt.o		\
 	zio_inject.o		\
 	zle.o			\

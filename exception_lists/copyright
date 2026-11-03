@@ -480,6 +480,8 @@ usr/src/uts/common/io/igc/core/*
 usr/src/uts/common/io/ixgbe/core/*
 usr/src/uts/common/fs/zfs/THIRDPARTYLICENSE.lz4.descrip
 usr/src/uts/common/fs/zfs/THIRDPARTYLICENSE.cityhash.descrip
+usr/src/uts/common/fs/zfs/THIRDPARTYLICENSE.zstd.descrip
+usr/src/common/zstd/lib/*
 usr/src/uts/common/sys/THIRDPARTYLICENSE.firmload
 usr/src/uts/common/sys/THIRDPARTYLICENSE.firmload.descrip
 usr/src/uts/common/sys/scsi/adapters/mpi/*

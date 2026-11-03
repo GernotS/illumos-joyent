@@ -245,6 +245,9 @@ dmu_recv_begin_check(void *arg, dmu_tx_t *tx)
 	if ((featureflags & DMU_BACKUP_FEATURE_LZ4) &&
 	    !spa_feature_is_enabled(dp->dp_spa, SPA_FEATURE_LZ4_COMPRESS))
 		return (SET_ERROR(ENOTSUP));
+	if ((featureflags & DMU_BACKUP_FEATURE_ZSTD) &&
+	    !spa_feature_is_enabled(dp->dp_spa, SPA_FEATURE_ZSTD_COMPRESS))
+		return (SET_ERROR(ENOTSUP));
 
 	/*
 	 * The receiving code doesn't know how to translate large blocks
@@ -581,6 +584,9 @@ dmu_recv_resume_begin_check(void *arg, dmu_tx_t *tx)
 		return (SET_ERROR(ENOTSUP));
 	if ((featureflags & DMU_BACKUP_FEATURE_LZ4) &&
 	    !spa_feature_is_enabled(dp->dp_spa, SPA_FEATURE_LZ4_COMPRESS))
+		return (SET_ERROR(ENOTSUP));
+	if ((featureflags & DMU_BACKUP_FEATURE_ZSTD) &&
+	    !spa_feature_is_enabled(dp->dp_spa, SPA_FEATURE_ZSTD_COMPRESS))
 		return (SET_ERROR(ENOTSUP));
 
 	/*
@@ -2258,6 +2264,11 @@ receive_read_record(struct receive_arg *ra)
 	case DRR_WRITE:
 	{
 		struct drr_write *drrw = &ra->rrd->header.drr_u.drr_write;
+		/* zstd records are valid only in streams that announce them */
+		if (drrw->drr_compressiontype == ZIO_COMPRESS_ZSTD &&
+		    !(ra->featureflags & DMU_BACKUP_FEATURE_ZSTD))
+			return (SET_ERROR(EINVAL));
+
 		int size = DRR_WRITE_PAYLOAD_SIZE(drrw);
 		abd_t *abd = abd_alloc_linear(size, B_FALSE);
 		err = receive_read_payload_and_next_header(ra, size,
@@ -2276,6 +2287,11 @@ receive_read_record(struct receive_arg *ra)
 		struct drr_write_embedded *drrwe =
 		    &ra->rrd->header.drr_u.drr_write_embedded;
 		uint32_t size = P2ROUNDUP(drrwe->drr_psize, 8);
+
+		if (drrwe->drr_compression == ZIO_COMPRESS_ZSTD &&
+		    !(ra->featureflags & DMU_BACKUP_FEATURE_ZSTD))
+			return (SET_ERROR(EINVAL));
+
 		void *buf = kmem_zalloc(size, KM_SLEEP);
 
 		err = receive_read_payload_and_next_header(ra, size, buf);
@@ -2307,6 +2323,10 @@ receive_read_record(struct receive_arg *ra)
 	case DRR_SPILL:
 	{
 		struct drr_spill *drrs = &ra->rrd->header.drr_u.drr_spill;
+		if (drrs->drr_compressiontype == ZIO_COMPRESS_ZSTD &&
+		    !(ra->featureflags & DMU_BACKUP_FEATURE_ZSTD))
+			return (SET_ERROR(EINVAL));
+
 		int size = DRR_SPILL_PAYLOAD_SIZE(drrs);
 		abd_t *abd = abd_alloc_linear(size, B_FALSE);
 		err = receive_read_payload_and_next_header(ra, size,

@@ -110,6 +110,7 @@ static vdev_list_t zfs_vdevs;
  */
 static const char *features_for_read[] = {
 	"org.illumos:lz4_compress",
+	"org.freebsd:zstd_compress",
 	"com.delphix:hole_birth",
 	"com.delphix:extensible_dataset",
 	"com.delphix:embedded_data",
