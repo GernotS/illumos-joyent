@@ -97,6 +97,8 @@ zstream_do_decompress(int argc, char *argv[])
 				type = ZIO_COMPRESS_OFF;
 			else if (0 == strcmp("lz4", argv[i]))
 				type = ZIO_COMPRESS_LZ4;
+			else if (0 == strcmp("zstd", argv[i]))
+				type = ZIO_COMPRESS_ZSTD;
 			else if (0 == strcmp("lzjb", argv[i]))
 				type = ZIO_COMPRESS_LZJB;
 			else if (0 == strcmp("gzip", argv[i]))
@@ -106,8 +108,7 @@ zstream_do_decompress(int argc, char *argv[])
 			else {
 				fprintf(stderr, "Invalid compression type %s.\n"
 				    "Supported types are off, lz4, lzjb, gzip, "
-				    "and zle (zstd is not supported on "
-				    "illumos)\n",
+				    "zle, and zstd\n",
 				    argv[i]);
 				exit(2);
 			}

@@ -58,7 +58,7 @@ zstream_usage(void)
 	    "\n"
 	    "    zstream recompress [-v] TYPE [FILE]\n"
 	    "       TYPE  Compression type: off, lzjb, gzip, gzip-[1-9], zle,\n"
-	    "             or lz4 (zstd is not supported on illumos)\n"
+	    "             lz4, zstd, or zstd-[1-19]\n"
 	    "\n"
 	    "    zstream token TOKEN\n"
 	    "      TOKEN  Resume token to be analyzed\n"

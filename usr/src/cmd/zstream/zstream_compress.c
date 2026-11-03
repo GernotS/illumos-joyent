@@ -31,11 +31,11 @@
 /*
  * illumos port notes (relative to the OpenZFS zstream-dedup-forwarding
  * branch):
- *   - zstd does not exist on illumos, so zstd support and the compression
- *     level option (-l) are removed. illumos encodes gzip levels in the
- *     algorithm itself: "gzip-1" ... "gzip-9" (and "gzip" == "gzip-6").
- *   - illumos' zio_compress_data(c, src_abd, dst_buf, s_len) compresses into
- *     a plain buffer and has no level argument; it returns 0 for an all-zero
+ *   - The compression level is given in the type name rather than with -l:
+ *     "gzip-1" ... "gzip-9" (and "gzip" == "gzip-6"), "zstd-1" ... "zstd-19"
+ *     (and "zstd" == "zstd-3").
+ *   - illumos' zio_compress_data(c, src_abd, dst_buf, s_len, level)
+ *     compresses into a plain buffer; it returns 0 for an all-zero
  *     block and s_len when the data did not compress by at least 12.5%.
  *     Decompression uses zio_decompress_data_buf(), which avoids abds.
  *   - The libzpool subsystems are brought up by zstream_chain_exec(); the
@@ -154,7 +154,8 @@ chain_compress_writes(drr_packet_t *item, compression_spec_t *context)
 	VERIFY3U(item->dp_payload_size, ==, lsize);
 
 	sabd = abd_get_from_buf(item->dp_payload, lsize);
-	csize = zio_compress_data(context->cs_type, sabd, buff, lsize);
+	csize = zio_compress_data(context->cs_type, sabd, buff, lsize,
+	    context->cs_level);
 	abd_put(sabd);
 
 	/*
@@ -286,6 +287,8 @@ chain_set_compress_features(drr_packet_t *item, compression_spec_t *context,
 	fflags |= DMU_BACKUP_FEATURE_COMPRESSED;
 	if (context->cs_type == ZIO_COMPRESS_LZ4)
 		fflags |= DMU_BACKUP_FEATURE_LZ4;
+	if (context->cs_type == ZIO_COMPRESS_ZSTD)
+		fflags |= DMU_BACKUP_FEATURE_ZSTD;
 	DMU_SET_FEATUREFLAGS(drrb->drr_versioninfo, fflags);
 	return (B_TRUE);
 }
@@ -315,10 +318,24 @@ serial_set_compress_features(compression_spec_t target)
  * empty) that cannot describe a block's actual compression.
  */
 static boolean_t
-parse_compression_type(const char *name, enum zio_compress *typep)
+parse_compression_type(const char *name, compression_spec_t *spec)
 {
+	enum zio_compress *typep = &spec->cs_type;
+
+	spec->cs_level = ZIO_COMPLEVEL_DEFAULT;
 	if (strcmp(name, "off") == 0) {
 		*typep = ZIO_COMPRESS_OFF;
+		return (B_TRUE);
+	}
+	if (strncmp(name, "zstd-", 5) == 0) {
+		char *end;
+		unsigned long level = strtoul(name + 5, &end, 10);
+
+		if (*end != '\0' || level < ZIO_ZSTD_LEVEL_MIN ||
+		    level > ZIO_ZSTD_LEVEL_MAX)
+			return (B_FALSE);
+		*typep = ZIO_COMPRESS_ZSTD;
+		spec->cs_level = (uint8_t)level;
 		return (B_TRUE);
 	}
 	if (strcmp(name, "gzip") == 0) {
@@ -364,10 +381,10 @@ zstream_do_recompress(int argc, char *argv[])
 		zstream_usage();
 
 	compression_spec_t spec;
-	if (!parse_compression_type(argv[0], &spec.cs_type)) {
+	if (!parse_compression_type(argv[0], &spec)) {
 		(void) fprintf(stderr, "Invalid compression type %s.\n"
 		    "Supported types are off, lzjb, gzip, gzip-[1-9], zle, "
-		    "and lz4 (zstd is not supported on illumos)\n", argv[0]);
+		    "lz4, zstd, and zstd-[1-19]\n", argv[0]);
 		exit(2);
 	}
 
