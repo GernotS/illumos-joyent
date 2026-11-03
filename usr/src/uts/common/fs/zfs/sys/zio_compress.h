@@ -54,7 +54,75 @@ enum zio_compress {
 	ZIO_COMPRESS_GZIP_9,
 	ZIO_COMPRESS_ZLE,
 	ZIO_COMPRESS_LZ4,
+	ZIO_COMPRESS_ZSTD,
 	ZIO_COMPRESS_FUNCTIONS
+};
+
+/*
+ * Compression algorithms that take a level. The level is stored in the
+ * upper bits of the compression property value (see ZIO_COMPRESS_RAW() in
+ * <sys/zio.h>) and, for zstd, in each compressed block's header.
+ */
+#define	ZIO_COMPRESS_HASLEVEL(compress)	((compress) == ZIO_COMPRESS_ZSTD)
+
+#define	ZIO_COMPLEVEL_INHERIT	0
+#define	ZIO_COMPLEVEL_DEFAULT	255
+
+/*
+ * zstd levels as stored on disk. These values are part of the on-disk
+ * format shared with OpenZFS and must not be changed.
+ */
+enum zio_zstd_levels {
+	ZIO_ZSTD_LEVEL_INHERIT = 0,
+	ZIO_ZSTD_LEVEL_1,
+#define	ZIO_ZSTD_LEVEL_MIN	ZIO_ZSTD_LEVEL_1
+	ZIO_ZSTD_LEVEL_2,
+	ZIO_ZSTD_LEVEL_3,
+#define	ZIO_ZSTD_LEVEL_DEFAULT	ZIO_ZSTD_LEVEL_3
+	ZIO_ZSTD_LEVEL_4,
+	ZIO_ZSTD_LEVEL_5,
+	ZIO_ZSTD_LEVEL_6,
+	ZIO_ZSTD_LEVEL_7,
+	ZIO_ZSTD_LEVEL_8,
+	ZIO_ZSTD_LEVEL_9,
+	ZIO_ZSTD_LEVEL_10,
+	ZIO_ZSTD_LEVEL_11,
+	ZIO_ZSTD_LEVEL_12,
+	ZIO_ZSTD_LEVEL_13,
+	ZIO_ZSTD_LEVEL_14,
+	ZIO_ZSTD_LEVEL_15,
+	ZIO_ZSTD_LEVEL_16,
+	ZIO_ZSTD_LEVEL_17,
+	ZIO_ZSTD_LEVEL_18,
+	ZIO_ZSTD_LEVEL_19,
+#define	ZIO_ZSTD_LEVEL_MAX	ZIO_ZSTD_LEVEL_19
+	ZIO_ZSTD_LEVEL_RESERVE = 101, /* Leave room for new positive levels */
+	ZIO_ZSTD_LEVEL_FAST, /* Fast levels are negative */
+	ZIO_ZSTD_LEVEL_FAST_1,
+#define	ZIO_ZSTD_LEVEL_FAST_DEFAULT	ZIO_ZSTD_LEVEL_FAST_1
+	ZIO_ZSTD_LEVEL_FAST_2,
+	ZIO_ZSTD_LEVEL_FAST_3,
+	ZIO_ZSTD_LEVEL_FAST_4,
+	ZIO_ZSTD_LEVEL_FAST_5,
+	ZIO_ZSTD_LEVEL_FAST_6,
+	ZIO_ZSTD_LEVEL_FAST_7,
+	ZIO_ZSTD_LEVEL_FAST_8,
+	ZIO_ZSTD_LEVEL_FAST_9,
+	ZIO_ZSTD_LEVEL_FAST_10,
+	ZIO_ZSTD_LEVEL_FAST_20,
+	ZIO_ZSTD_LEVEL_FAST_30,
+	ZIO_ZSTD_LEVEL_FAST_40,
+	ZIO_ZSTD_LEVEL_FAST_50,
+	ZIO_ZSTD_LEVEL_FAST_60,
+	ZIO_ZSTD_LEVEL_FAST_70,
+	ZIO_ZSTD_LEVEL_FAST_80,
+	ZIO_ZSTD_LEVEL_FAST_90,
+	ZIO_ZSTD_LEVEL_FAST_100,
+	ZIO_ZSTD_LEVEL_FAST_500,
+	ZIO_ZSTD_LEVEL_FAST_1000,
+#define	ZIO_ZSTD_LEVEL_FAST_MAX	ZIO_ZSTD_LEVEL_FAST_1000
+	ZIO_ZSTD_LEVEL_AUTO = 251, /* Reserved for future use */
+	ZIO_ZSTD_LEVEL_LEVELS
 };
 
 /* Common signature for all zio compress functions. */
@@ -102,16 +170,29 @@ extern size_t lz4_compress(void *src, void *dst, size_t s_len, size_t d_len,
     int level);
 extern int lz4_decompress(void *src, void *dst, size_t s_len, size_t d_len,
     int level);
+extern size_t zfs_zstd_compress(void *src, void *dst, size_t s_len,
+    size_t d_len, int level);
+extern int zfs_zstd_decompress(void *src, void *dst, size_t s_len,
+    size_t d_len, int level);
+extern int zfs_zstd_decompress_level(void *src, void *dst, size_t s_len,
+    size_t d_len, uint8_t *level);
+extern int zfs_zstd_get_level(void *src, size_t s_len, uint8_t *level);
+extern void zstd_init(void);
+extern void zstd_fini(void);
+extern void zfs_zstd_cache_reap_now(void);
 
 /*
  * Compress and decompress data if necessary.
  */
 extern size_t zio_compress_data(enum zio_compress c, abd_t *src, void *dst,
-    size_t s_len);
+    size_t s_len, uint8_t level);
 extern int zio_decompress_data(enum zio_compress c, abd_t *src, void *dst,
     size_t s_len, size_t d_len);
+extern int zio_decompress_data_level(enum zio_compress c, abd_t *src,
+    void *dst, size_t s_len, size_t d_len, uint8_t *level);
 extern int zio_decompress_data_buf(enum zio_compress c, void *src, void *dst,
     size_t s_len, size_t d_len);
+extern int zio_compress_to_feature(enum zio_compress comp);
 
 #ifdef	__cplusplus
 }

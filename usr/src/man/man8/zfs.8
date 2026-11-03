@@ -31,7 +31,7 @@
 .\" Copyright 2023 RackTop Systems, Inc.
 .\" Copyright 2026 Oxide Computer Company
 .\"
-.Dd January 30, 2026
+.Dd November 3, 2026
 .Dt ZFS 8
 .Os
 .Sh NAME
@@ -1200,7 +1200,9 @@ for more information on these algorithms.
 Changing this property affects only newly-written data.
 .It Xo
 .Sy compression Ns = Ns Sy on Ns | Ns Sy off Ns | Ns Sy gzip Ns | Ns
-.Sy gzip- Ns Em N Ns | Ns Sy lz4 Ns | Ns Sy lzjb Ns | Ns Sy zle
+.Sy gzip- Ns Em N Ns | Ns Sy lz4 Ns | Ns Sy lzjb Ns | Ns Sy zle Ns | Ns
+.Sy zstd Ns | Ns Sy zstd- Ns Em N Ns | Ns Sy zstd-fast Ns | Ns
+.Sy zstd-fast- Ns Em N
 .Xc
 Controls the compression algorithm used for this dataset.
 .Pp
@@ -1270,6 +1272,46 @@ is equivalent to
 The
 .Sy zle
 compression algorithm compresses runs of zeros.
+.Pp
+The
+.Sy zstd
+compression algorithm provides both high compression ratios and good
+performance, and can only be used on pools with the
+.Sy zstd_compress
+feature set to
+.Sy enabled .
+You can specify the
+.Sy zstd
+level by using the value
+.Sy zstd- Ns Em N ,
+where
+.Em N
+is an integer from 1
+.Pq fastest
+to 19
+.Pq best compression ratio .
+.Sy zstd
+is equivalent to
+.Sy zstd-3 .
+Faster, lower-ratio levels are available as
+.Sy zstd-fast- Ns Em N ,
+where
+.Em N
+is an integer in
+.Bq Sy 1 Ns - Ns Sy 10 , 20 , 30 , No ... , Sy 100 , 500 , 1000
+and larger values mean faster compression;
+.Sy zstd-fast
+is equivalent to
+.Sy zstd-fast-1 .
+The on-disk format is the same as in OpenZFS.
+Setting a
+.Sy zstd
+value activates the
+.Sy zstd_compress
+feature; a pool with this feature active cannot be booted by boot loaders
+that do not support it.
+See
+.Xr zpool-features 7 .
 .Pp
 This property can also be referred to by its shortened column name
 .Sy compress .

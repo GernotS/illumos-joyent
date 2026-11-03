@@ -45,3 +45,6 @@ usr/src/cmd/acpi/common/utnonansi.c
 usr/src/cmd/acpi/common/utprint.c
 usr/src/cmd/acpi/common/utxferror.c
 usr/src/cmd/smbsrv/smbd/eventlog.dll
+usr/src/common/zstd/lib/*
+usr/src/uts/common/fs/zfs/zfs_zstd.c
+usr/src/uts/common/fs/zfs/sys/zstd/zstd.h

@@ -159,6 +159,13 @@ dsl_dataset_block_born(dsl_dataset_t *ds, const blkptr_t *bp, dmu_tx_t *tx)
 		ds->ds_feature_activation[f] = (void *)(uintptr_t)B_TRUE;
 	}
 
+	f = zio_compress_to_feature(BP_GET_COMPRESS(bp));
+	if (f != SPA_FEATURE_NONE) {
+		ASSERT3S(spa_feature_table[f].fi_type, ==,
+		    ZFEATURE_TYPE_BOOLEAN);
+		ds->ds_feature_activation[f] = (void *)(uintptr_t)B_TRUE;
+	}
+
 	mutex_exit(&ds->ds_lock);
 	dsl_dir_diduse_space(ds->ds_dir, DD_USED_HEAD, delta,
 	    compressed, uncompressed, tx);
@@ -4302,6 +4309,76 @@ dsl_dataset_space_wouldfree(dsl_dataset_t *firstsnap,
  *
  * If non-zero, earlier_txg is used instead of earlier's ds_creation_txg.
  */
+typedef struct dsl_dataset_set_compression_arg {
+	const char *ddsca_name;
+	zprop_source_t ddsca_source;
+	uint64_t ddsca_value;
+} dsl_dataset_set_compression_arg_t;
+
+static int
+dsl_dataset_set_compression_check(void *arg, dmu_tx_t *tx)
+{
+	dsl_dataset_set_compression_arg_t *ddsca = arg;
+	dsl_pool_t *dp = dmu_tx_pool(tx);
+
+	uint64_t compval = ZIO_COMPRESS_ALGO(ddsca->ddsca_value);
+	spa_feature_t f = zio_compress_to_feature(compval);
+
+	if (f == SPA_FEATURE_NONE)
+		return (SET_ERROR(EINVAL));
+
+	if (!spa_feature_is_enabled(dp->dp_spa, f))
+		return (SET_ERROR(ENOTSUP));
+
+	return (0);
+}
+
+static void
+dsl_dataset_set_compression_sync(void *arg, dmu_tx_t *tx)
+{
+	dsl_dataset_set_compression_arg_t *ddsca = arg;
+	dsl_pool_t *dp = dmu_tx_pool(tx);
+	dsl_dataset_t *ds = NULL;
+
+	uint64_t compval = ZIO_COMPRESS_ALGO(ddsca->ddsca_value);
+	spa_feature_t f = zio_compress_to_feature(compval);
+	ASSERT3S(f, !=, SPA_FEATURE_NONE);
+	ASSERT3S(spa_feature_table[f].fi_type, ==, ZFEATURE_TYPE_BOOLEAN);
+
+	VERIFY0(dsl_dataset_hold(dp, ddsca->ddsca_name, FTAG, &ds));
+	if (zfeature_active(f, ds->ds_feature[f]) != B_TRUE) {
+		ds->ds_feature_activation[f] = (void *)(uintptr_t)B_TRUE;
+		dsl_dataset_activate_feature(ds->ds_object, f,
+		    ds->ds_feature_activation[f], tx);
+		ds->ds_feature[f] = ds->ds_feature_activation[f];
+	}
+	dsl_dataset_rele(ds, FTAG);
+}
+
+/*
+ * Setting the compression property to an algorithm that has its own
+ * per-dataset feature (zstd) activates that feature immediately, as
+ * OpenZFS does, rather than only when the first such block is written.
+ */
+int
+dsl_dataset_set_compression(const char *dsname, zprop_source_t source,
+    uint64_t compression)
+{
+	dsl_dataset_set_compression_arg_t ddsca;
+
+	if (zio_compress_to_feature(ZIO_COMPRESS_ALGO(compression)) ==
+	    SPA_FEATURE_NONE)
+		return (0);
+
+	ddsca.ddsca_name = dsname;
+	ddsca.ddsca_source = source;
+	ddsca.ddsca_value = compression;
+
+	return (dsl_sync_task(dsname, dsl_dataset_set_compression_check,
+	    dsl_dataset_set_compression_sync, &ddsca, 0,
+	    ZFS_SPACE_CHECK_EXTRA_RESERVED));
+}
+
 boolean_t
 dsl_dataset_is_before(dsl_dataset_t *later, dsl_dataset_t *earlier,
     uint64_t earlier_txg)

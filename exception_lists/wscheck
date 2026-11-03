@@ -23,6 +23,7 @@ usr/src/lib/libresolv2_joy/common/*
 
 usr/src/cmd/ast/libast/*/FEATURE/*
 usr/src/cmd/cxgbetool/*
+usr/src/common/zstd/lib/*
 usr/src/cmd/smbsrv/testoplock/case*.ref
 usr/src/data/hwdata/pci.ids
 usr/src/data/hwdata/usb.ids

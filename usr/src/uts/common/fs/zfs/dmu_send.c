@@ -641,6 +641,14 @@ backup_do_embed(dmu_sendarg_t *dsp, const blkptr_t *bp)
 		return (B_FALSE);
 
 	/*
+	 * If we have not set the ZSTD feature flag, we can't send ZSTD
+	 * compressed embedded blocks, as the receiver may not support them.
+	 */
+	if ((BP_GET_COMPRESS(bp) == ZIO_COMPRESS_ZSTD &&
+	    !(dsp->dsa_featureflags & DMU_BACKUP_FEATURE_ZSTD)))
+		return (B_FALSE);
+
+	/*
 	 * Embed type must be explicitly enabled.
 	 */
 	switch (BPE_GET_ETYPE(bp)) {
@@ -1035,6 +1043,18 @@ dmu_send_impl(void *tag, dsl_pool_t *dp, dsl_dataset_t *to_ds,
 	    DMU_BACKUP_FEATURE_RAW)) != 0 &&
 	    spa_feature_is_active(dp->dp_spa, SPA_FEATURE_LZ4_COMPRESS)) {
 		featureflags |= DMU_BACKUP_FEATURE_LZ4;
+	}
+
+	/*
+	 * zstd blocks are sent compressed only in compressed or raw streams
+	 * (as in OpenZFS, embedded data alone does not set this flag, so that
+	 * zstd datasets can still be sent to receivers without zstd; such
+	 * embedded blocks are sent as plain WRITE records instead).
+	 */
+	if ((featureflags &
+	    (DMU_BACKUP_FEATURE_COMPRESSED | DMU_BACKUP_FEATURE_RAW)) != 0 &&
+	    dsl_dataset_feature_is_active(to_ds, SPA_FEATURE_ZSTD_COMPRESS)) {
+		featureflags |= DMU_BACKUP_FEATURE_ZSTD;
 	}
 
 	if (resumeobj != 0 || resumeoff != 0) {

@@ -162,6 +162,9 @@ typedef struct zio_compress_info {
 #include "lzjb.c"
 #include "zle.c"
 
+/* zstd decompression, in libsa/zfs/zstd_boot.c */
+extern int zfs_zstd_decompress(void *, void *, size_t, size_t, int);
+
 /*
  * Compression vectors.
  */
@@ -182,6 +185,7 @@ static zio_compress_info_t zio_compress_table[ZIO_COMPRESS_FUNCTIONS] = {
 	{NULL,			gzip_decompress,	9,	"gzip-9"},
 	{NULL,			zle_decompress,		64,	"zle"},
 	{NULL,			lz4_decompress,		0,	"lz4"},
+	{NULL,			zfs_zstd_decompress,	3,	"zstd"},
 };
 
 static void

@@ -26,6 +26,9 @@
 /*
  * Copyright (c) 2013 by Saso Kiselkov. All rights reserved.
  * Copyright (c) 2013, 2018 by Delphix. All rights reserved.
+ * Copyright (c) 2019, 2020, Klara Inc.
+ * Copyright (c) 2019, Allan Jude
+ * Copyright 2026 Gernot Strasser
  */
 
 #include <sys/zfs_context.h>
@@ -60,8 +63,26 @@ zio_compress_info_t zio_compress_table[ZIO_COMPRESS_FUNCTIONS] = {
 	{"gzip-8",		8,	gzip_compress,	gzip_decompress},
 	{"gzip-9",		9,	gzip_compress,	gzip_decompress},
 	{"zle",			64,	zle_compress,	zle_decompress},
-	{"lz4",			0,	lz4_compress,	lz4_decompress}
+	{"lz4",			0,	lz4_compress,	lz4_decompress},
+	{"zstd",		ZIO_ZSTD_LEVEL_DEFAULT,
+	    zfs_zstd_compress,	zfs_zstd_decompress}
 };
+
+uint8_t
+zio_complevel_select(spa_t *spa, enum zio_compress compress, uint8_t child,
+    uint8_t parent)
+{
+	uint8_t result;
+
+	if (!ZIO_COMPRESS_HASLEVEL(compress))
+		return (0);
+
+	result = child;
+	if (result == ZIO_COMPLEVEL_INHERIT)
+		result = parent;
+
+	return (result);
+}
 
 enum zio_compress
 zio_compress_select(spa_t *spa, enum zio_compress child,
@@ -100,9 +121,11 @@ zio_compress_zeroed_cb(void *data, size_t len, void *private)
 }
 
 size_t
-zio_compress_data(enum zio_compress c, abd_t *src, void *dst, size_t s_len)
+zio_compress_data(enum zio_compress c, abd_t *src, void *dst, size_t s_len,
+    uint8_t level)
 {
 	size_t c_len, d_len;
+	int complevel;
 	zio_compress_info_t *ci = &zio_compress_table[c];
 
 	ASSERT((uint_t)c < ZIO_COMPRESS_FUNCTIONS);
@@ -118,12 +141,28 @@ zio_compress_data(enum zio_compress c, abd_t *src, void *dst, size_t s_len)
 	if (c == ZIO_COMPRESS_EMPTY)
 		return (s_len);
 
+	complevel = ci->ci_level;
+	if (c == ZIO_COMPRESS_ZSTD) {
+		/*
+		 * The level is part of what is written (it is recorded in the
+		 * block header and changes the compressed bytes), so a block
+		 * whose level is unknown must not be compressed.
+		 */
+		if (level == ZIO_COMPLEVEL_INHERIT)
+			return (s_len);
+
+		if (level == ZIO_COMPLEVEL_DEFAULT)
+			complevel = ZIO_ZSTD_LEVEL_DEFAULT;
+		else
+			complevel = level;
+	}
+
 	/* Compress at least 12.5% */
 	d_len = s_len - (s_len >> 3);
 
 	/* No compression algorithms can read from ABDs directly */
 	void *tmp = abd_borrow_buf_copy(src, s_len);
-	c_len = ci->ci_compress(tmp, dst, s_len, d_len, ci->ci_level);
+	c_len = ci->ci_compress(tmp, dst, s_len, d_len, complevel);
 	abd_return_buf(src, tmp, s_len);
 
 	if (c_len > d_len)
@@ -146,12 +185,21 @@ zio_decompress_data_buf(enum zio_compress c, void *src, void *dst,
 
 void *zio_decompress_failed_buf;
 
+/*
+ * Decompress, and if level is not NULL and the algorithm records one,
+ * return the level the block was compressed with.
+ */
 int
-zio_decompress_data(enum zio_compress c, abd_t *src, void *dst,
-    size_t s_len, size_t d_len)
+zio_decompress_data_level(enum zio_compress c, abd_t *src, void *dst,
+    size_t s_len, size_t d_len, uint8_t *level)
 {
 	void *tmp = abd_borrow_buf_copy(src, s_len);
-	int ret = zio_decompress_data_buf(c, tmp, dst, s_len, d_len);
+	int ret;
+
+	if (c == ZIO_COMPRESS_ZSTD && level != NULL)
+		ret = zfs_zstd_decompress_level(tmp, dst, s_len, d_len, level);
+	else
+		ret = zio_decompress_data_buf(c, tmp, dst, s_len, d_len);
 
 	/*
 	 * Decompression shouldn't fail, because we've already verified
@@ -174,4 +222,27 @@ zio_decompress_data(enum zio_compress c, abd_t *src, void *dst,
 		ret = SET_ERROR(EINVAL);
 
 	return (ret);
+}
+
+int
+zio_decompress_data(enum zio_compress c, abd_t *src, void *dst,
+    size_t s_len, size_t d_len)
+{
+	return (zio_decompress_data_level(c, src, dst, s_len, d_len, NULL));
+}
+
+/*
+ * Return the per-dataset feature that must be active for blocks compressed
+ * with the given algorithm to exist in a dataset, or SPA_FEATURE_NONE.
+ */
+int
+zio_compress_to_feature(enum zio_compress comp)
+{
+	switch (comp) {
+	case ZIO_COMPRESS_ZSTD:
+		return (SPA_FEATURE_ZSTD_COMPRESS);
+	default:
+		break;
+	}
+	return (SPA_FEATURE_NONE);
 }

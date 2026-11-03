@@ -244,6 +244,9 @@ dmu_recv_begin_check(void *arg, dmu_tx_t *tx)
 	if ((featureflags & DMU_BACKUP_FEATURE_LZ4) &&
 	    !spa_feature_is_enabled(dp->dp_spa, SPA_FEATURE_LZ4_COMPRESS))
 		return (SET_ERROR(ENOTSUP));
+	if ((featureflags & DMU_BACKUP_FEATURE_ZSTD) &&
+	    !spa_feature_is_enabled(dp->dp_spa, SPA_FEATURE_ZSTD_COMPRESS))
+		return (SET_ERROR(ENOTSUP));
 
 	/*
 	 * The receiving code doesn't know how to translate large blocks
@@ -580,6 +583,9 @@ dmu_recv_resume_begin_check(void *arg, dmu_tx_t *tx)
 		return (SET_ERROR(ENOTSUP));
 	if ((featureflags & DMU_BACKUP_FEATURE_LZ4) &&
 	    !spa_feature_is_enabled(dp->dp_spa, SPA_FEATURE_LZ4_COMPRESS))
+		return (SET_ERROR(ENOTSUP));
+	if ((featureflags & DMU_BACKUP_FEATURE_ZSTD) &&
+	    !spa_feature_is_enabled(dp->dp_spa, SPA_FEATURE_ZSTD_COMPRESS))
 		return (SET_ERROR(ENOTSUP));
 
 	/*
@@ -2096,6 +2102,11 @@ receive_read_record(struct receive_arg *ra)
 		arc_buf_t *abuf;
 		boolean_t is_meta = DMU_OT_IS_METADATA(drrw->drr_type);
 
+		/* zstd records are valid only in streams that announce them */
+		if (drrw->drr_compressiontype == ZIO_COMPRESS_ZSTD &&
+		    !(ra->featureflags & DMU_BACKUP_FEATURE_ZSTD))
+			return (SET_ERROR(EINVAL));
+
 		if (ra->raw) {
 			boolean_t byteorder = ZFS_HOST_BYTEORDER ^
 			    !!DRR_IS_RAW_BYTESWAPPED(drrw->drr_flags) ^
@@ -2145,6 +2156,11 @@ receive_read_record(struct receive_arg *ra)
 		struct drr_write_embedded *drrwe =
 		    &ra->rrd->header.drr_u.drr_write_embedded;
 		uint32_t size = P2ROUNDUP(drrwe->drr_psize, 8);
+
+		if (drrwe->drr_compression == ZIO_COMPRESS_ZSTD &&
+		    !(ra->featureflags & DMU_BACKUP_FEATURE_ZSTD))
+			return (SET_ERROR(EINVAL));
+
 		void *buf = kmem_zalloc(size, KM_SLEEP);
 
 		err = receive_read_payload_and_next_header(ra, size, buf);
@@ -2178,6 +2194,10 @@ receive_read_record(struct receive_arg *ra)
 		struct drr_spill *drrs = &ra->rrd->header.drr_u.drr_spill;
 		arc_buf_t *abuf;
 		int len = DRR_SPILL_PAYLOAD_SIZE(drrs);
+
+		if (drrs->drr_compressiontype == ZIO_COMPRESS_ZSTD &&
+		    !(ra->featureflags & DMU_BACKUP_FEATURE_ZSTD))
+			return (SET_ERROR(EINVAL));
 
 		/* DRR_SPILL records are either raw or uncompressed */
 		if (ra->raw) {
