@@ -77,13 +77,10 @@ record to repair; every record for that object beginning at that offset
 is decompressed, where possible. A record may not be repairable if it is
 corrupted in some, but not all, of the stream's snapshots.
 .sp
-\fItype\fR is one of \fBoff\fR, \fBgzip\fR, \fBlz4\fR, \fBlzjb\fR, or
-\fBzle\fR, and defaults to \fBlz4\fR if omitted. A type of
+\fItype\fR is one of \fBoff\fR, \fBgzip\fR, \fBlz4\fR, \fBlzjb\fR,
+\fBzle\fR, or \fBzstd\fR, and defaults to \fBlz4\fR if omitted. A type of
 \fBoff\fR corrects the stream's metadata to indicate the record is
 already uncompressed, without attempting decompression.
-.sp
-Note: \fBzstd\fR is not supported on this platform and is not accepted
-as a \fItype\fR.
 .sp
 The repaired stream is written to standard output.
 .sp
@@ -126,12 +123,13 @@ Verbose. Print a summary of the records that were dropped.
 Reads a send stream from \fIfile\fR, or from standard input, and writes
 it to standard output with every \fBWRITE\fR record recompressed using
 \fItype\fR, which is one of \fBoff\fR, \fBlzjb\fR, \fBgzip\fR,
-\fBgzip-\fR\fIN\fR (\fIN\fR from 1 to 9), \fBzle\fR, or \fBlz4\fR.
+\fBgzip-\fR\fIN\fR (\fIN\fR from 1 to 9), \fBzle\fR, \fBlz4\fR, \fBzstd\fR,
+or \fBzstd-\fR\fIN\fR (\fIN\fR from 1 to 19). A stream recompressed with
+\fBzstd\fR can only be received into a pool with the \fBzstd_compress\fR
+feature enabled.
 Records that do not compress usefully are left uncompressed. Encrypted
 (raw) records are passed through unchanged. Compression and
 decompression run in parallel.
-.sp
-Note: \fBzstd\fR is not supported on this platform.
 .sp
 .ne 2
 .na

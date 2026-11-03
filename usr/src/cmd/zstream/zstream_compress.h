@@ -29,12 +29,12 @@ extern "C" {
 #include "zstream_io.h"
 
 /*
- * illumos port: illumos encodes the compression level in the algorithm
- * itself (gzip-1 ... gzip-9 are distinct enum zio_compress values) and has
- * no zstd, so the upstream cs_level field is not needed.
+ * illumos encodes gzip levels in the algorithm itself (gzip-1 ... gzip-9
+ * are distinct enum zio_compress values); cs_level is used only for zstd.
  */
 typedef struct {
 	enum zio_compress	cs_type;
+	uint8_t			cs_level;	/* zstd only */
 } compression_spec_t;
 
 /*
