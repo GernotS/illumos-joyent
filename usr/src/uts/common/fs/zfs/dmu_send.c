@@ -634,6 +634,19 @@ backup_do_embed(dmu_sendarg_t *dsp, const blkptr_t *bp)
 		return (B_FALSE);
 
 	/*
+	 * Without DMU_BACKUP_FEATURE_LARGE_BLOCKS the object's block size is
+	 * clamped to SPA_OLD_MAXBLOCKSIZE in the DRR_OBJECT record (see
+	 * dump_dnode()), so a larger embedded block cannot be represented on
+	 * the receiving side. Decline it here, so that it is sent as regular
+	 * WRITE records split into SPA_OLD_MAXBLOCKSIZE chunks. Such blocks
+	 * arise with zstd, which can compress a large record into the
+	 * BPE_PAYLOAD_SIZE bytes of an embedded block pointer.
+	 */
+	if (BP_GET_LSIZE(bp) > SPA_OLD_MAXBLOCKSIZE &&
+	    !(dsp->dsa_featureflags & DMU_BACKUP_FEATURE_LARGE_BLOCKS))
+		return (B_FALSE);
+
+	/*
 	 * Compression function must be legacy, or explicitly enabled.
 	 */
 	if ((BP_GET_COMPRESS(bp) >= ZIO_COMPRESS_LEGACY_FUNCTIONS &&

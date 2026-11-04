@@ -1810,7 +1810,8 @@ receive_write_embedded(struct receive_writer_arg *rwa,
 	if (drrwe->drr_psize > BPE_PAYLOAD_SIZE)
 		return (EINVAL);
 
-	if (drrwe->drr_etype >= NUM_BP_EMBEDDED_TYPES)
+	/* BP_EMBEDDED_TYPE_DATA is the only one this record can have */
+	if (drrwe->drr_etype != BP_EMBEDDED_TYPE_DATA)
 		return (EINVAL);
 	if (drrwe->drr_compression >= ZIO_COMPRESS_FUNCTIONS)
 		return (EINVAL);
