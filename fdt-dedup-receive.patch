@@ -1,0 +1,65 @@
+From 9cd6f3ab53fa90fb93f7d2c57babfa0537c746ae Mon Sep 17 00:00:00 2001
+From: Gernot Strasser <gernot1.strasser@gmail.com>
+Date: Wed, 4 Nov 2026 13:31:05 +0000
+Subject: [PATCH] zfs receive: restore support for deduplicated streams
+
+The FDT backport brought in the newer OpenZFS receive code, which no
+longer handles DRR_WRITE_BYREF records: receive_read_record() rejected
+them with EINVAL and byteswap_record() did not swap them. libzfs still
+creates such streams with 'zfs send -D' (and zstream dedup does too),
+so every deduplicated stream failed with 'invalid backup stream'
+(zfs_receive_013_pos).
+
+Restore both cases as in illumos-gate. receive_write_byref() is still
+present and unchanged, and receive_process_record() flushes the pending
+write batch before any non-WRITE record, so a reference to a block
+written earlier in the same stream sees its data.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011HXikEM59xGYM1j9m45oj6
+---
+ usr/src/uts/common/fs/zfs/dmu_recv.c | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/usr/src/uts/common/fs/zfs/dmu_recv.c b/usr/src/uts/common/fs/zfs/dmu_recv.c
+index a9658224..5e02c239 100644
+--- a/usr/src/uts/common/fs/zfs/dmu_recv.c
++++ b/usr/src/uts/common/fs/zfs/dmu_recv.c
+@@ -1005,6 +1005,18 @@ byteswap_record(dmu_replay_record_t *drr)
+ 		DO64(drr_write.drr_key.ddk_prop);
+ 		DO64(drr_write.drr_compressed_size);
+ 		break;
++	case DRR_WRITE_BYREF:
++		DO64(drr_write_byref.drr_object);
++		DO64(drr_write_byref.drr_offset);
++		DO64(drr_write_byref.drr_length);
++		DO64(drr_write_byref.drr_toguid);
++		DO64(drr_write_byref.drr_refguid);
++		DO64(drr_write_byref.drr_refobject);
++		DO64(drr_write_byref.drr_refoffset);
++		ZIO_CHECKSUM_BSWAP(&drr->drr_u.drr_write_byref.
++		    drr_key.ddk_cksum);
++		DO64(drr_write_byref.drr_key.ddk_prop);
++		break;
+ 	case DRR_WRITE_EMBEDDED:
+ 		DO64(drr_write_embedded.drr_object);
+ 		DO64(drr_write_embedded.drr_offset);
+@@ -2271,6 +2283,15 @@ receive_read_record(struct receive_arg *ra)
+ 		    drrw->drr_logical_size);
+ 		return (err);
+ 	}
++	case DRR_WRITE_BYREF:
++	{
++		struct drr_write_byref *drrwb =
++		    &ra->rrd->header.drr_u.drr_write_byref;
++		err = receive_read_payload_and_next_header(ra, 0, NULL);
++		receive_read_prefetch(ra, drrwb->drr_object, drrwb->drr_offset,
++		    drrwb->drr_length);
++		return (err);
++	}
+ 	case DRR_WRITE_EMBEDDED:
+ 	{
+ 		struct drr_write_embedded *drrwe =
+-- 
+2.43.0
+
