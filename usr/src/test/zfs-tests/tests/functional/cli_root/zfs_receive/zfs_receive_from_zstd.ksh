@@ -65,7 +65,7 @@ read -r obj _ < <(ls -i /$TESTPOOL/$TESTFS1/$TESTFILE0)
 log_note "file /$TESTPOOL/$TESTFS1/$TESTFILE0 has object number $obj"
 
 output=$(zdb -Zddddddbbbbbb $TESTPOOL/$TESTFS1 $obj 2> /dev/null \
-    | grep -m 1 "L0 DVA")
+    | grep "L0 DVA" | head -1)
 dva=$(sed -Ene 's/^.+DVA\[0\]=<([^>]+)>.*$/\1/p' <<< "$output")
 log_note "block 0 of /$TESTPOOL/$TESTFS1/$TESTFILE0 has a DVA of $dva"
 
@@ -85,7 +85,7 @@ read -r obj _ < <(ls -i /$TESTPOOL/$TESTFS2/$TESTFILE0)
 log_note "file /$TESTPOOL/$TESTFS2/$TESTFILE0 has object number $obj"
 
 output=$(zdb -Zddddddbbbbbb $TESTPOOL/$TESTFS2 $obj 2> /dev/null \
-    | grep -m 1 "L0 DVA")
+    | grep "L0 DVA" | head -1)
 dva=$(sed -Ene 's/^.+DVA\[0\]=<([^>]+)>.*$/\1/p' <<< "$output")
 log_note "block 0 of /$TESTPOOL/$TESTFS2/$TESTFILE0 has a DVA of $dva"
 
