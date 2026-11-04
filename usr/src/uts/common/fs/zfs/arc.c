@@ -8638,16 +8638,37 @@ l2arc_apply_transforms(spa_t *spa, arc_buf_hdr_t *hdr, uint64_t asize,
 	}
 
 	if (compress != ZIO_COMPRESS_OFF && !HDR_COMPRESSION_ENABLED(hdr)) {
-		cabd = abd_alloc_for_io(asize, ismd);
-		tmp = abd_borrow_buf(cabd, asize);
+		uint64_t csize;
 
-		psize = zio_compress_data(compress, to_write, tmp, size,
+		/*
+		 * zio_compress_data() lets the compressor write up to
+		 * 7/8 of size bytes, and compressors may use the whole
+		 * destination as scratch space before settling on the
+		 * final length (zstd does), so compress into a buffer of
+		 * size bytes rather than straight into the asize buffer.
+		 */
+		cabd = abd_alloc_for_io(asize, ismd);
+		tmp = zio_buf_alloc(size);
+
+		csize = zio_compress_data(compress, to_write, tmp, size,
 		    hdr->b_complevel);
-		ASSERT3U(psize, <=, HDR_GET_PSIZE(hdr));
-		if (psize < asize)
-			bzero((char *)tmp + psize, asize - psize);
+
+		/*
+		 * The block can only be cached if it recompresses to its
+		 * original physical size; otherwise its checksum would
+		 * never match on read.
+		 */
+		if (csize == 0 || csize >= size ||
+		    csize > HDR_GET_PSIZE(hdr)) {
+			zio_buf_free(tmp, size);
+			ret = SET_ERROR(EIO);
+			goto error;
+		}
+		abd_copy_from_buf(cabd, tmp, csize);
+		if (csize < asize)
+			abd_zero_off(cabd, csize, asize - csize);
+		zio_buf_free(tmp, size);
 		psize = HDR_GET_PSIZE(hdr);
-		abd_return_buf_copy(cabd, tmp, asize);
 		to_write = cabd;
 	}
 
