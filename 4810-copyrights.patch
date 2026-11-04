@@ -1,0 +1,325 @@
+From 2e63a7fdc079cfe41e01f8b96370deb389737fb8 Mon Sep 17 00:00:00 2001
+From: Gernot Strasser <gernot1.strasser@gmail.com>
+Date: Wed, 4 Nov 2026 15:45:16 +0000
+Subject: [PATCH] 18150 ZFS fast deduplication: copyright notices
+
+Add the copyright notices that the ported OpenZFS commits carry
+(PRs 15888-15895 and 16277, as of their merge in September 2024) and
+use their exact wording; replace placeholder author names in the new
+tests.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011HXikEM59xGYM1j9m45oj6
+---
+ usr/src/cmd/zdb/zdb.c                                          | 1 +
+ usr/src/common/zfs/zpool_prop.c                                | 2 +-
+ usr/src/lib/libzfs/common/libzfs_pool.c                        | 1 +
+ usr/src/man/man7/zpool-features.7                              | 1 +
+ usr/src/man/man8/zpool.8                                       | 2 ++
+ .../zfs-tests/tests/functional/dedup/dedup_ddt_stray_class.ksh | 2 +-
+ .../test/zfs-tests/tests/functional/dedup/dedup_fdt_create.ksh | 3 ++-
+ .../test/zfs-tests/tests/functional/dedup/dedup_fdt_import.ksh | 3 ++-
+ .../test/zfs-tests/tests/functional/dedup/dedup_fdt_pacing.ksh | 2 +-
+ .../zfs-tests/tests/functional/dedup/dedup_legacy_create.ksh   | 3 ++-
+ .../tests/functional/dedup/dedup_legacy_fdt_mixed.ksh          | 3 ++-
+ .../tests/functional/dedup/dedup_legacy_fdt_upgrade.ksh        | 3 ++-
+ .../zfs-tests/tests/functional/dedup/dedup_legacy_import.ksh   | 3 ++-
+ .../zfs-tests/tests/functional/dedup/dedup_prune_deadlock.ksh  | 2 +-
+ usr/src/test/zfs-tests/tests/functional/dedup/dedup_quota.ksh  | 3 ++-
+ usr/src/uts/common/fs/zfs/ddt.c                                | 2 +-
+ usr/src/uts/common/fs/zfs/ddt_stats.c                          | 1 +
+ usr/src/uts/common/fs/zfs/dmu.c                                | 2 +-
+ usr/src/uts/common/fs/zfs/spa_misc.c                           | 1 +
+ usr/src/uts/common/fs/zfs/sys/ddt.h                            | 1 +
+ usr/src/uts/common/fs/zfs/zfs_ioctl.c                          | 1 +
+ usr/src/uts/common/fs/zfs/zio.c                                | 1 +
+ 22 files changed, 30 insertions(+), 13 deletions(-)
+
+diff --git a/usr/src/cmd/zdb/zdb.c b/usr/src/cmd/zdb/zdb.c
+index f0212793..e8c17152 100644
+--- a/usr/src/cmd/zdb/zdb.c
++++ b/usr/src/cmd/zdb/zdb.c
+@@ -28,6 +28,7 @@
+  * Copyright 2017 RackTop Systems.
+  * Copyright 2026 Edgecast Cloud LLC.
+  * Copyright 2026 Gernot Strasser
++ * Copyright (c) 2023, 2024, Klara Inc.
+  */
+ 
+ #include <stdio.h>
+diff --git a/usr/src/common/zfs/zpool_prop.c b/usr/src/common/zfs/zpool_prop.c
+index 72b4e580..e0ce9a4d 100644
+--- a/usr/src/common/zfs/zpool_prop.c
++++ b/usr/src/common/zfs/zpool_prop.c
+@@ -22,7 +22,7 @@
+  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright 2011 Nexenta Systems, Inc. All rights reserved.
+  * Copyright (c) 2012, 2017 by Delphix. All rights reserved.
+- * Portions Copyright (c) 2024, Klara, Inc.
++ * Copyright (c) 2021, 2023, Klara Inc.
+  * Portions Copyright (c) 2024, iXsystems, Inc.
+  * Copyright (c) 2014 Integros [integros.com]
+  */
+diff --git a/usr/src/lib/libzfs/common/libzfs_pool.c b/usr/src/lib/libzfs/common/libzfs_pool.c
+index 896aaf3a..75a4f39b 100644
+--- a/usr/src/lib/libzfs/common/libzfs_pool.c
++++ b/usr/src/lib/libzfs/common/libzfs_pool.c
+@@ -30,6 +30,7 @@
+  * Copyright 2022 OmniOS Community Edition (OmniOSce) Association.
+  * Copyright 2022 Oxide Computer Company
+  * Copyright 2026 Gernot Strasser
++ * Copyright (c) 2021, 2023, Klara Inc.
+  */
+ 
+ #include <ctype.h>
+diff --git a/usr/src/man/man7/zpool-features.7 b/usr/src/man/man7/zpool-features.7
+index e033838a..b8b6a27f 100644
+--- a/usr/src/man/man7/zpool-features.7
++++ b/usr/src/man/man7/zpool-features.7
+@@ -16,6 +16,7 @@
+ .\" own identifying information:
+ .\" Portions Copyright [yyyy] [name of copyright owner]
+ .\" Copyright (c) 2019, Klara Inc.
++.\" Copyright (c) 2023, Klara Inc.
+ .\" Copyright (c) 2019, Allan Jude
+ .Dd June 21, 2022
+ .Dt ZPOOL-FEATURES 7
+diff --git a/usr/src/man/man8/zpool.8 b/usr/src/man/man8/zpool.8
+index a9644c9e..ce7b286a 100644
+--- a/usr/src/man/man8/zpool.8
++++ b/usr/src/man/man8/zpool.8
+@@ -29,6 +29,8 @@
+ .\" Copyright 2024 OmniOS Community Edition (OmniOSce) Association.
+ .\" Copyright 2025 Hans Rosenfeld
+ .\" Copyright 2026 Gernot Strasser
++.\" Copyright (c) 2023, Klara Inc.
++.\" Copyright (c) 2024, Klara Inc.
+ .\"
+ .Dd October 25, 2026
+ .Dt ZPOOL 8
+diff --git a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_ddt_stray_class.ksh b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_ddt_stray_class.ksh
+index e69635b6..5819c4f2 100644
+--- a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_ddt_stray_class.ksh
++++ b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_ddt_stray_class.ksh
+@@ -20,7 +20,7 @@
+ #
+ 
+ #
+-# Copyright (c) 2026, the FDT port author.
++# Copyright (c) 2026, Gernot Strasser
+ #
+ 
+ # DESCRIPTION:
+diff --git a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_fdt_create.ksh b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_fdt_create.ksh
+index 675f9424..a9cf047f 100644
+--- a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_fdt_create.ksh
++++ b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_fdt_create.ksh
+@@ -21,7 +21,8 @@
+ #
+ 
+ #
+-# Copyright (c) 2024 by Klara Inc. (ported to illumos)
++# Copyright (c) 2024 Klara, Inc.
++# Ported to illumos by Gernot Strasser.
+ #
+ 
+ # Simple test of dedup table operations (FDT)
+diff --git a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_fdt_import.ksh b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_fdt_import.ksh
+index 19ce2a4e..7f4712a0 100644
+--- a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_fdt_import.ksh
++++ b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_fdt_import.ksh
+@@ -21,7 +21,8 @@
+ #
+ 
+ #
+-# Copyright (c) 2024 by Klara Inc. (ported to illumos)
++# Copyright (c) 2024 Klara, Inc.
++# Ported to illumos by Gernot Strasser.
+ #
+ 
+ # Ensure dedup retains version after import (FDT)
+diff --git a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_fdt_pacing.ksh b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_fdt_pacing.ksh
+index 6296646f..81280428 100644
+--- a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_fdt_pacing.ksh
++++ b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_fdt_pacing.ksh
+@@ -21,7 +21,7 @@
+ 
+ #
+ # Copyright (c) 2025 Klara, Inc.
+-# Ported to illumos by the FDT port author.
++# Ported to illumos by Gernot Strasser.
+ #
+ 
+ # DESCRIPTION:
+diff --git a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_legacy_create.ksh b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_legacy_create.ksh
+index 54e469fc..af202bd8 100644
+--- a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_legacy_create.ksh
++++ b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_legacy_create.ksh
+@@ -21,7 +21,8 @@
+ #
+ 
+ #
+-# Copyright (c) 2024 by Klara Inc. (ported to illumos)
++# Copyright (c) 2024 Klara, Inc.
++# Ported to illumos by Gernot Strasser.
+ #
+ 
+ # Simple test of dedup table operations (legacy)
+diff --git a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_legacy_fdt_mixed.ksh b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_legacy_fdt_mixed.ksh
+index dffae086..3e59976a 100644
+--- a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_legacy_fdt_mixed.ksh
++++ b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_legacy_fdt_mixed.ksh
+@@ -21,7 +21,8 @@
+ #
+ 
+ #
+-# Copyright (c) 2024 by Klara Inc. (ported to illumos)
++# Copyright (c) 2024 Klara, Inc.
++# Ported to illumos by Gernot Strasser.
+ #
+ 
+ # Check legacy dedup table continues to work after pool upgrade to fast_dedup,
+diff --git a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_legacy_fdt_upgrade.ksh b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_legacy_fdt_upgrade.ksh
+index 8bd63dae..711ba787 100644
+--- a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_legacy_fdt_upgrade.ksh
++++ b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_legacy_fdt_upgrade.ksh
+@@ -21,7 +21,8 @@
+ #
+ 
+ #
+-# Copyright (c) 2024 by Klara Inc. (ported to illumos)
++# Copyright (c) 2024 Klara, Inc.
++# Ported to illumos by Gernot Strasser.
+ #
+ 
+ # Check legacy dedup table continues to work after pool upgrade to fast_dedup,
+diff --git a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_legacy_import.ksh b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_legacy_import.ksh
+index 4fdcfe14..7ea832ee 100644
+--- a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_legacy_import.ksh
++++ b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_legacy_import.ksh
+@@ -21,7 +21,8 @@
+ #
+ 
+ #
+-# Copyright (c) 2024 by Klara Inc. (ported to illumos)
++# Copyright (c) 2024 Klara, Inc.
++# Ported to illumos by Gernot Strasser.
+ #
+ 
+ # Ensure dedup retains version after import (legacy)
+diff --git a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_deadlock.ksh b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_deadlock.ksh
+index b43ea2f5..25dbba90 100644
+--- a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_deadlock.ksh
++++ b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_prune_deadlock.ksh
+@@ -20,7 +20,7 @@
+ #
+ 
+ #
+-# Copyright (c) 2026, (port author).
++# Copyright (c) 2026, Gernot Strasser
+ #
+ 
+ # DESCRIPTION:
+diff --git a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_quota.ksh b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_quota.ksh
+index 67538189..4ee13463 100644
+--- a/usr/src/test/zfs-tests/tests/functional/dedup/dedup_quota.ksh
++++ b/usr/src/test/zfs-tests/tests/functional/dedup/dedup_quota.ksh
+@@ -21,7 +21,8 @@
+ #
+ 
+ #
+-# Copyright (c) 2023 by Klara Inc. (ported to illumos)
++# Copyright (c) 2023, Klara Inc.
++# Ported to illumos by Gernot Strasser.
+ #
+ 
+ # DESCRIPTION:
+diff --git a/usr/src/uts/common/fs/zfs/ddt.c b/usr/src/uts/common/fs/zfs/ddt.c
+index 07473117..fc899768 100644
+--- a/usr/src/uts/common/fs/zfs/ddt.c
++++ b/usr/src/uts/common/fs/zfs/ddt.c
+@@ -23,7 +23,7 @@
+  * Copyright (c) 2009, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2012, 2016 by Delphix. All rights reserved.
+  * Copyright (c) 2022 by Pawel Jakub Dawidek
+- * Portions Copyright (c) 2024, Klara, Inc.
++ * Copyright (c) 2019, 2023, Klara Inc.
+  * Portions Copyright (c) 2024, iXsystems, Inc.
+  * Copyright 2026 Gernot Strasser
+  */
+diff --git a/usr/src/uts/common/fs/zfs/ddt_stats.c b/usr/src/uts/common/fs/zfs/ddt_stats.c
+index 24c9f137..ea0d0b08 100644
+--- a/usr/src/uts/common/fs/zfs/ddt_stats.c
++++ b/usr/src/uts/common/fs/zfs/ddt_stats.c
+@@ -21,6 +21,7 @@
+ /*
+  * Copyright (c) 2009, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2016 by Delphix. All rights reserved.
++ * Copyright (c) 2022 by Pawel Jakub Dawidek
+  * Copyright (c) 2023, Klara Inc.
+  * Copyright 2026 Gernot Strasser
+  */
+diff --git a/usr/src/uts/common/fs/zfs/dmu.c b/usr/src/uts/common/fs/zfs/dmu.c
+index 5108e8f6..0b03b809 100644
+--- a/usr/src/uts/common/fs/zfs/dmu.c
++++ b/usr/src/uts/common/fs/zfs/dmu.c
+@@ -28,7 +28,7 @@
+  * Copyright (c) 2011, 2017 by Delphix. All rights reserved.
+  * Copyright (c) 2018 DilOS
+  * Copyright 2026 Oxide Computer Company
+- * Portions Copyright (c) 2024, Klara, Inc.
++ * Copyright (c) 2019, 2023, Klara Inc.
+  * Portions Copyright (c) 2024, iXsystems, Inc.
+  */
+ 
+diff --git a/usr/src/uts/common/fs/zfs/spa_misc.c b/usr/src/uts/common/fs/zfs/spa_misc.c
+index cac77c8d..1cba4894 100644
+--- a/usr/src/uts/common/fs/zfs/spa_misc.c
++++ b/usr/src/uts/common/fs/zfs/spa_misc.c
+@@ -30,6 +30,7 @@
+  * Copyright (c) 2017, Intel Corporation.
+  * Copyright 2020 Joyent, Inc.
+  * Copyright 2022 Oxide Computer Company
++ * Copyright (c) 2023, 2024, Klara Inc.
+  */
+ 
+ #include <sys/zfs_context.h>
+diff --git a/usr/src/uts/common/fs/zfs/sys/ddt.h b/usr/src/uts/common/fs/zfs/sys/ddt.h
+index ab010735..cc280591 100644
+--- a/usr/src/uts/common/fs/zfs/sys/ddt.h
++++ b/usr/src/uts/common/fs/zfs/sys/ddt.h
+@@ -22,6 +22,7 @@
+  * Copyright (c) 2009, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2016 by Delphix. All rights reserved.
+  * Copyright 2026 Gernot Strasser
++ * Copyright (c) 2023, Klara Inc.
+  */
+ 
+ #ifndef _SYS_DDT_H
+diff --git a/usr/src/uts/common/fs/zfs/zfs_ioctl.c b/usr/src/uts/common/fs/zfs/zfs_ioctl.c
+index 0ff12559..4113d1e1 100644
+--- a/usr/src/uts/common/fs/zfs/zfs_ioctl.c
++++ b/usr/src/uts/common/fs/zfs/zfs_ioctl.c
+@@ -39,6 +39,7 @@
+  * Copyright (c) 2017, Datto, Inc. All rights reserved.
+  * Copyright 2021 The University of Queensland
+  * Copyright 2026 Oxide Computer Company
++ * Copyright (c) 2019, 2021, 2023, 2024, Klara Inc.
+  */
+ 
+ /*
+diff --git a/usr/src/uts/common/fs/zfs/zio.c b/usr/src/uts/common/fs/zfs/zio.c
+index f107fa7f..fb8a3b33 100644
+--- a/usr/src/uts/common/fs/zfs/zio.c
++++ b/usr/src/uts/common/fs/zfs/zio.c
+@@ -29,6 +29,7 @@
+  * Copyright (c) 2021, Datto, Inc.
+  * Copyright (c) 2021, 2024 by George Melikov. All rights reserved.
+  * Copyright 2026 Gernot Strasser
++ * Copyright (c) 2019, 2023, 2024, Klara Inc.
+  */
+ 
+ #include <sys/sysmacros.h>
+-- 
+2.43.0
+
