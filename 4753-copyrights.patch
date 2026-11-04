@@ -1,0 +1,124 @@
+From 3aa2a7e0ae1bbf8eeb380b4b266a7c427b82b1c1 Mon Sep 17 00:00:00 2001
+From: Gernot Strasser <gernot1.strasser@gmail.com>
+Date: Wed, 4 Nov 2026 15:58:57 +0000
+Subject: [PATCH] 4896 Performance improvements for KCF AES modes: test
+ copyright notices
+
+The new AES ktests are adapted from RackTop's GMAC tests: keep RackTop's
+notice as it appears there and add the adapter's own. Restore the year
+of RackTop's existing notice in the aes test Makefile, which this change
+had altered.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011HXikEM59xGYM1j9m45oj6
+---
+ usr/src/test/crypto-tests/tests/modes/aes/Makefile             | 3 ++-
+ usr/src/test/crypto-tests/tests/modes/aes/ktest/Makefile       | 3 ++-
+ .../test/crypto-tests/tests/modes/aes/ktest/aes_ctr_ktest.c    | 3 ++-
+ .../test/crypto-tests/tests/modes/aes/ktest/aes_gcm_ktest.c    | 3 ++-
+ usr/src/test/crypto-tests/tests/modes/aes/ktest/aes_ktest.ksh  | 3 ++-
+ .../test/crypto-tests/tests/modes/aes/ktest/aes_modes_ktest.c  | 3 ++-
+ usr/src/uts/intel/aes_ktest/Makefile                           | 3 ++-
+ 7 files changed, 14 insertions(+), 7 deletions(-)
+
+diff --git a/usr/src/test/crypto-tests/tests/modes/aes/Makefile b/usr/src/test/crypto-tests/tests/modes/aes/Makefile
+index 2de764f8..ece8a684 100644
+--- a/usr/src/test/crypto-tests/tests/modes/aes/Makefile
++++ b/usr/src/test/crypto-tests/tests/modes/aes/Makefile
+@@ -13,7 +13,8 @@
+ # Copyright (c) 2012 by Delphix. All rights reserved.
+ # Copyright 2015 Nexenta Systems, Inc.  All rights reserved.
+ # Copyright 2019 Joyent, Inc.
+-# Copyright 2026 RackTop Systems, Inc.
++# Copyright 2023 RackTop Systems, Inc.
++# Copyright 2026 Gernot Strasser
+ #
+ 
+ .PARALLEL: $(SUBDIRS)
+diff --git a/usr/src/test/crypto-tests/tests/modes/aes/ktest/Makefile b/usr/src/test/crypto-tests/tests/modes/aes/ktest/Makefile
+index 022f7da7..53d7f9f1 100644
+--- a/usr/src/test/crypto-tests/tests/modes/aes/ktest/Makefile
++++ b/usr/src/test/crypto-tests/tests/modes/aes/ktest/Makefile
+@@ -10,7 +10,8 @@
+ #
+ 
+ #
+-# Copyright 2026 RackTop Systems, Inc.  All rights reserved.
++# Copyright 2023-2025 RackTop Systems, Inc.
++# Copyright 2026 Gernot Strasser
+ #
+ 
+ #
+diff --git a/usr/src/test/crypto-tests/tests/modes/aes/ktest/aes_ctr_ktest.c b/usr/src/test/crypto-tests/tests/modes/aes/ktest/aes_ctr_ktest.c
+index 9dc4dd49..82a2980a 100644
+--- a/usr/src/test/crypto-tests/tests/modes/aes/ktest/aes_ctr_ktest.c
++++ b/usr/src/test/crypto-tests/tests/modes/aes/ktest/aes_ctr_ktest.c
+@@ -10,7 +10,8 @@
+  */
+ 
+ /*
+- * Copyright 2026 RackTop Systems, Inc.  All rights reserved.
++ * Copyright 2023-2026 RackTop Systems, Inc.
++ * Copyright 2026 Gernot Strasser
+  */
+ 
+ /*
+diff --git a/usr/src/test/crypto-tests/tests/modes/aes/ktest/aes_gcm_ktest.c b/usr/src/test/crypto-tests/tests/modes/aes/ktest/aes_gcm_ktest.c
+index f9e98966..a895420b 100644
+--- a/usr/src/test/crypto-tests/tests/modes/aes/ktest/aes_gcm_ktest.c
++++ b/usr/src/test/crypto-tests/tests/modes/aes/ktest/aes_gcm_ktest.c
+@@ -10,7 +10,8 @@
+  */
+ 
+ /*
+- * Copyright 2026 RackTop Systems, Inc.  All rights reserved.
++ * Copyright 2023-2026 RackTop Systems, Inc.
++ * Copyright 2026 Gernot Strasser
+  */
+ 
+ /*
+diff --git a/usr/src/test/crypto-tests/tests/modes/aes/ktest/aes_ktest.ksh b/usr/src/test/crypto-tests/tests/modes/aes/ktest/aes_ktest.ksh
+index 18365746..73d8b968 100644
+--- a/usr/src/test/crypto-tests/tests/modes/aes/ktest/aes_ktest.ksh
++++ b/usr/src/test/crypto-tests/tests/modes/aes/ktest/aes_ktest.ksh
+@@ -11,7 +11,8 @@
+ #
+ 
+ #
+-# Copyright 2026 RackTop Systems, Inc.  All rights reserved.
++# Copyright 2023-2025 RackTop Systems, Inc.
++# Copyright 2026 Gernot Strasser
+ #
+ 
+ if ! ktest load aes; then
+diff --git a/usr/src/test/crypto-tests/tests/modes/aes/ktest/aes_modes_ktest.c b/usr/src/test/crypto-tests/tests/modes/aes/ktest/aes_modes_ktest.c
+index 9bf5eb4f..d522d159 100644
+--- a/usr/src/test/crypto-tests/tests/modes/aes/ktest/aes_modes_ktest.c
++++ b/usr/src/test/crypto-tests/tests/modes/aes/ktest/aes_modes_ktest.c
+@@ -10,7 +10,8 @@
+  */
+ 
+ /*
+- * Copyright 2026 RackTop Systems, Inc.  All rights reserved.
++ * Copyright 2023-2026 RackTop Systems, Inc.
++ * Copyright 2026 Gernot Strasser
+  */
+ 
+ /*
+diff --git a/usr/src/uts/intel/aes_ktest/Makefile b/usr/src/uts/intel/aes_ktest/Makefile
+index 0012d53f..4e875ea4 100644
+--- a/usr/src/uts/intel/aes_ktest/Makefile
++++ b/usr/src/uts/intel/aes_ktest/Makefile
+@@ -10,7 +10,8 @@
+ #
+ 
+ #
+-# Copyright 2026 RackTop Systems, Inc.  All rights reserved.
++# Copyright 2023-2025 RackTop Systems, Inc.
++# Copyright 2026 Gernot Strasser
+ #
+ 
+ #
+-- 
+2.43.0
+
