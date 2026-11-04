@@ -1011,6 +1011,18 @@ byteswap_record(dmu_replay_record_t *drr)
 		DO64(drr_write.drr_key.ddk_prop);
 		DO64(drr_write.drr_compressed_size);
 		break;
+	case DRR_WRITE_BYREF:
+		DO64(drr_write_byref.drr_object);
+		DO64(drr_write_byref.drr_offset);
+		DO64(drr_write_byref.drr_length);
+		DO64(drr_write_byref.drr_toguid);
+		DO64(drr_write_byref.drr_refguid);
+		DO64(drr_write_byref.drr_refobject);
+		DO64(drr_write_byref.drr_refoffset);
+		ZIO_CHECKSUM_BSWAP(&drr->drr_u.drr_write_byref.
+		    drr_key.ddk_cksum);
+		DO64(drr_write_byref.drr_key.ddk_prop);
+		break;
 	case DRR_WRITE_EMBEDDED:
 		DO64(drr_write_embedded.drr_object);
 		DO64(drr_write_embedded.drr_offset);
@@ -2281,6 +2293,15 @@ receive_read_record(struct receive_arg *ra)
 		ra->rrd->abd = abd;
 		receive_read_prefetch(ra, drrw->drr_object, drrw->drr_offset,
 		    drrw->drr_logical_size);
+		return (err);
+	}
+	case DRR_WRITE_BYREF:
+	{
+		struct drr_write_byref *drrwb =
+		    &ra->rrd->header.drr_u.drr_write_byref;
+		err = receive_read_payload_and_next_header(ra, 0, NULL);
+		receive_read_prefetch(ra, drrwb->drr_object, drrwb->drr_offset,
+		    drrwb->drr_length);
 		return (err);
 	}
 	case DRR_WRITE_EMBEDDED:
