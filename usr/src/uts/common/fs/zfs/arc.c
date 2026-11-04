@@ -1665,7 +1665,16 @@ arc_hdr_authenticate(arc_buf_hdr_t *hdr, spa_t *spa, uint64_t dsobj)
 
 		csize = zio_compress_data(HDR_GET_COMPRESS(hdr),
 		    hdr->b_l1hdr.b_pabd, tmpbuf, lsize, hdr->b_complevel);
-		ASSERT3U(csize, <=, psize);
+		/*
+		 * The MAC covers the data as stored on disk. If the block
+		 * does not recompress to its original size (e.g. it was
+		 * written by another version of the compressor), it
+		 * cannot be authenticated this way.
+		 */
+		if (csize == 0 || csize >= lsize || csize > psize) {
+			ret = SET_ERROR(EIO);
+			goto error;
+		}
 		abd_zero_off(abd, csize, psize - csize);
 	}
 
@@ -8699,8 +8708,17 @@ l2arc_apply_transforms(spa_t *spa, arc_buf_hdr_t *hdr, uint64_t asize,
 		if (psize != asize)
 			abd_zero_off(eabd, psize, asize - psize);
 
-		/* assert that the MAC we got here matches the one we saved */
-		ASSERT0(bcmp(mac, hdr->b_crypt_hdr.b_mac, ZIO_DATA_MAC_LEN));
+		/*
+		 * Only a recompression can give another MAC: one that differs
+		 * from the block on disk (e.g. written by another version of
+		 * the compressor). Such a copy would never pass its checksum
+		 * on read, so do not write it.
+		 */
+		if (bcmp(mac, hdr->b_crypt_hdr.b_mac, ZIO_DATA_MAC_LEN) != 0) {
+			ASSERT3P(to_write, ==, cabd);
+			ret = SET_ERROR(EIO);
+			goto error;
+		}
 		spa_keystore_dsl_key_rele(spa, dck, FTAG);
 
 		if (to_write == cabd)
