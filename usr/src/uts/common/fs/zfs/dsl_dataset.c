@@ -236,9 +236,42 @@ dsl_dataset_block_kill(dsl_dataset_t *ds, const blkptr_t *bp, dmu_tx_t *tx,
 
 	if (bp->blk_birth > dsl_dataset_phys(ds)->ds_prev_snap_txg) {
 		int64_t delta;
+		boolean_t defer;
 
-		dprintf_bp(bp, "freeing ds=%llu", ds->ds_object);
-		dsl_free(tx->tx_pool, tx->tx_txg, bp);
+		/*
+		 * For most blocks dsl_free() -> zio_free() just calls
+		 * metaslab_free() and does no I/O.  Gang and deduplicated
+		 * blocks need more than that: for those a ZIO_TYPE_FREE zio
+		 * is issued, and it stays allocated until the end of the
+		 * sync pass.
+		 *
+		 * Freeing a large object calls us once per block, so every
+		 * such block puts another zio_t on the pipeline.  For a big
+		 * enough object that is more memory than the kernel has, and
+		 * the same happens again on the next import.
+		 *
+		 * Put those blocks on the pool's free bpobj instead.  That is
+		 * where blocks from destroyed datasets already go; the async
+		 * destroy code in dsl_scan.c frees them at a bounded rate
+		 * (see zfs_max_async_dedup_frees).
+		 *
+		 * Don't defer when async: then we are in a zio write-done
+		 * callback, and bpobj_enqueue() may have to read the bpobj's
+		 * tail block, which we can't wait for there.  Those frees
+		 * come from overwrites, one per block written, so they are
+		 * bounded by the write itself.
+		 */
+		defer = !async && spa_version(spa) >= SPA_VERSION_DEADLISTS &&
+		    (BP_IS_GANG(bp) || BP_GET_DEDUP(bp));
+
+		if (defer) {
+			dprintf_bp(bp, "putting on free list: %s", "");
+			bpobj_enqueue(&ds->ds_dir->dd_pool->dp_free_bpobj,
+			    bp, tx);
+		} else {
+			dprintf_bp(bp, "freeing ds=%llu", ds->ds_object);
+			dsl_free(tx->tx_pool, tx->tx_txg, bp);
+		}
 
 		mutex_enter(&ds->ds_lock);
 		ASSERT(dsl_dataset_phys(ds)->ds_unique_bytes >= used ||
@@ -250,6 +283,17 @@ dsl_dataset_block_kill(dsl_dataset_t *ds, const blkptr_t *bp, dmu_tx_t *tx,
 		    delta, -compressed, -uncompressed, tx);
 		dsl_dir_transfer_space(ds->ds_dir, -used - delta,
 		    DD_USED_REFRSRV, DD_USED_HEAD, tx);
+
+		/*
+		 * The block is now owned by the free bpobj rather than by
+		 * this dataset, so charge it to the free dir.  The async
+		 * destroy pass credits it back in dsl_scan_free_block_cb()
+		 * when it actually frees the block.
+		 */
+		if (defer) {
+			dsl_dir_diduse_space(tx->tx_pool->dp_free_dir,
+			    DD_USED_HEAD, used, compressed, uncompressed, tx);
+		}
 	} else {
 		dprintf_bp(bp, "putting on dead list: %s", "");
 		if (async) {

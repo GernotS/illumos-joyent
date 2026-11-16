@@ -178,7 +178,7 @@ int zfs_scan_mem_lim_fact = 20;		/* fraction of physmem */
 int zfs_scan_mem_lim_soft_fact = 20;	/* fraction of mem lim above */
 
 unsigned int zfs_scrub_min_time_ms = 1000; /* min millisecs to scrub per txg */
-unsigned int zfs_free_min_time_ms = 1000; /* min millisecs to free per txg */
+unsigned int zfs_free_min_time_ms = 500; /* min millisecs to free per txg */
 /* min millisecs to obsolete per txg */
 unsigned int zfs_obsolete_min_time_ms = 500;
 /* min millisecs to resilver per txg */
@@ -189,20 +189,31 @@ boolean_t zfs_no_scrub_prefetch = B_FALSE; /* set to disable scrub prefetch */
 enum ddt_class zfs_scrub_ddt_class_max = DDT_CLASS_DUPLICATE;
 /* max number of blocks to free in a single TXG */
 uint64_t zfs_async_block_max_blocks = UINT64_MAX;
+/*
+ * Max number of gang or dedup blocks to free in a single TXG.  Each of
+ * these frees is a ZIO_TYPE_FREE zio that may have to read the gang header
+ * or the DDT, so the count has to be bounded.  0 means no limit.
+ */
+uint64_t zfs_max_async_dedup_frees = 250000;
+/*
+ * After issuing this many gang or dedup frees, wait for them to complete
+ * before continuing.  This makes the time limits apply to the time the
+ * frees take, not just to the time it takes to queue them.  0 disables.
+ */
+uint64_t zfs_async_free_zio_wait_interval = 2000;
 
 int zfs_resilver_disable_defer = 0; /* set to disable resilver deferring */
 
 /*
- * We wait a few txgs after importing a pool to begin scanning so that
- * the import / mounting code isn't held up by scrub / resilver IO.
- * Unfortunately, it is a bit difficult to determine exactly how long
- * this will take since userspace will trigger fs mounts asynchronously
- * and the kernel will create zvol minors asynchronously. As a result,
- * the value provided here is a bit arbitrary, but represents a
- * reasonable estimate of how many txgs it will take to finish fully
- * importing a pool
+ * Number of txgs to wait after importing a pool before starting background
+ * work (async destroys and scrub / resilver), so that the import / mounting
+ * code isn't held up by it.  It is a bit difficult to determine exactly how
+ * long this will take since userspace will trigger fs mounts asynchronously
+ * and the kernel will create zvol minors asynchronously.  As a result, the
+ * value provided here is a bit arbitrary, but represents a reasonable
+ * estimate of how many txgs it will take to finish fully importing a pool.
  */
-#define	SCAN_IMPORT_WAIT_TXGS		5
+unsigned int zfs_import_defer_txgs = 5;
 
 
 #define	DSL_SCAN_IS_SCRUB_RESILVER(scn) \
@@ -3092,8 +3103,16 @@ dsl_scan_async_block_should_pause(dsl_scan_t *scn)
 	if (scn->scn_visited_this_txg >= zfs_async_block_max_blocks)
 		return (B_TRUE);
 
+	if (zfs_max_async_dedup_frees != 0 &&
+	    scn->scn_async_frees_this_txg >= zfs_max_async_dedup_frees)
+		return (B_TRUE);
+
+	/*
+	 * Use at most half of the txg timeout: the frees we issued still
+	 * have to complete, and the DDT has to be synced after them.
+	 */
 	elapsed_nanosecs = gethrtime() - scn->scn_sync_start_time;
-	return (elapsed_nanosecs / NANOSEC > zfs_txg_timeout ||
+	return (elapsed_nanosecs / (NANOSEC / 2) > zfs_txg_timeout ||
 	    (NSEC2MSEC(elapsed_nanosecs) > scn->scn_async_block_min_time_ms &&
 	    txg_sync_waiting(scn->scn_dp)) ||
 	    spa_shutting_down(scn->scn_dp->dp_spa));
@@ -3116,6 +3135,18 @@ dsl_scan_free_block_cb(void *arg, const blkptr_t *bp, dmu_tx_t *tx)
 	    -bp_get_dsize_sync(scn->scn_dp->dp_spa, bp),
 	    -BP_GET_PSIZE(bp), -BP_GET_UCSIZE(bp), tx);
 	scn->scn_visited_this_txg++;
+
+	/* These are the frees for which zio_free_sync() has to issue I/O. */
+	if (BP_IS_GANG(bp) || BP_GET_DEDUP(bp)) {
+		uint64_t i = zfs_async_free_zio_wait_interval;
+
+		scn->scn_async_frees_this_txg++;
+		if (i != 0 && (scn->scn_async_frees_this_txg % i) == 0) {
+			VERIFY0(zio_wait(scn->scn_zio_root));
+			scn->scn_zio_root = zio_root(scn->scn_dp->dp_spa, NULL,
+			    NULL, ZIO_FLAG_MUSTSUCCEED);
+		}
+	}
 	return (0);
 }
 
@@ -3344,6 +3375,7 @@ dsl_process_async_destroys(dsl_pool_t *dp, dmu_tx_t *tx)
 		    NSEC2MSEC(gethrtime() - scn->scn_sync_start_time),
 		    (longlong_t)tx->tx_txg, err);
 		scn->scn_visited_this_txg = 0;
+		scn->scn_async_frees_this_txg = 0;
 
 		/*
 		 * Write out changes to the DDT that may be required as a
@@ -3465,6 +3497,14 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 		return;
 
 	/*
+	 * Wait a few txgs after importing before doing background work
+	 * (async destroys and scanning).  This should help the import
+	 * command to complete quickly.
+	 */
+	if (spa->spa_syncing_txg < spa->spa_first_txg + zfs_import_defer_txgs)
+		return;
+
+	/*
 	 * If the scan is inactive due to a stalled async destroy, try again.
 	 */
 	if (!scn->scn_async_stalled && !dsl_scan_active(scn))
@@ -3472,6 +3512,7 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 
 	/* reset scan statistics */
 	scn->scn_visited_this_txg = 0;
+	scn->scn_async_frees_this_txg = 0;
 	scn->scn_holes_this_txg = 0;
 	scn->scn_lt_min_this_txg = 0;
 	scn->scn_gt_max_this_txg = 0;
@@ -3497,13 +3538,6 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 		return;
 
 	if (!dsl_scan_is_running(scn) || dsl_scan_is_paused_scrub(scn))
-		return;
-
-	/*
-	 * Wait a few txgs after importing to begin scanning so that
-	 * we can get the pool imported quickly.
-	 */
-	if (spa->spa_syncing_txg < spa->spa_first_txg + SCAN_IMPORT_WAIT_TXGS)
 		return;
 
 	/*
