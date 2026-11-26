@@ -2989,3 +2989,19 @@ dmu_objset_willuse_space(objset_t *os, int64_t space, dmu_tx_t *tx)
 		dsl_pool_dirty_space(dmu_tx_pool(tx), space, tx);
 	}
 }
+
+/*
+ * Return B_TRUE if the block was born at or before this dataset's most
+ * recent snapshot, i.e. it is still referenced by that snapshot, so
+ * rewriting it would allocate new space rather than replace old space.
+ */
+boolean_t
+dmu_objset_block_is_shared(objset_t *os, const blkptr_t *bp)
+{
+	dsl_dataset_t *ds = os->os_dsl_dataset;
+
+	if (BP_IS_HOLE(bp) || ds == NULL)
+		return (B_FALSE);
+
+	return (bp->blk_birth <= dsl_dataset_phys(ds)->ds_prev_snap_txg);
+}

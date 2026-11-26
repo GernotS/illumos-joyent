@@ -358,6 +358,27 @@ zfs_ioctl_setxattr(vnode_t *vp, intptr_t data, int flags, cred_t *cr,
 }
 
 /*
+ * Decide whether zfs_rewrite() should leave a block alone.  The block
+ * pointer may be slightly stale, which is fine for this advisory check.
+ */
+static boolean_t
+zfs_rewrite_skip(dmu_buf_t *db, objset_t *os, uint64_t flags)
+{
+	blkptr_t *bp = dmu_buf_get_blkptr(db);
+
+	if (bp == NULL)
+		return (B_TRUE);
+
+	if ((flags & ZFS_REWRITE_SKIP_SNAPSHOT) &&
+	    dmu_objset_block_is_shared(os, bp))
+		return (B_TRUE);
+
+	return (B_FALSE);
+}
+
+#define	ZFS_REWRITE_VALID_FLAGS	(ZFS_REWRITE_SKIP_SNAPSHOT)
+
+/*
  * ZFS_IOC_REWRITE: rewrite the existing data of a regular file in place.
  *
  * Every allocated block within [off, off + len) is read and dirtied without
@@ -382,7 +403,9 @@ zfs_rewrite(vnode_t *vp, uint64_t off, uint64_t len, uint64_t flags,
 	uint64_t end, noff;
 	int error = 0;
 
-	if (flags != 0 || arg != 0)
+	if (flags & ZFS_REWRITE_SKIP_BRT)
+		return (SET_ERROR(ENOTSUP));
+	if ((flags & ~ZFS_REWRITE_VALID_FLAGS) != 0 || arg != 0)
 		return (SET_ERROR(EINVAL));
 
 	if (vp->v_type != VREG)
@@ -490,8 +513,12 @@ zfs_rewrite(vnode_t *vp, uint64_t off, uint64_t len, uint64_t flags,
 			dmu_tx_commit(tx);
 			break;
 		}
-		for (int i = 0; i < numbufs; i++)
+		for (int i = 0; i < numbufs; i++) {
+			if (flags != 0 &&
+			    zfs_rewrite_skip(dbp[i], zfsvfs->z_os, flags))
+				continue;
 			dmu_buf_will_dirty(dbp[i], tx);
+		}
 		dmu_buf_rele_array(dbp, numbufs, FTAG);
 
 		dmu_tx_commit(tx);

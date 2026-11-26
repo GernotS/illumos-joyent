@@ -179,7 +179,7 @@
 .Ar file Ns | Ns Ar directory Ns ...
 .Nm
 .Cm rewrite
-.Op Fl rvx
+.Op Fl Srvx
 .Op Fl l Ar length
 .Op Fl o Ar offset
 .Ar file Ns | Ns Ar directory Ns ...
@@ -3212,7 +3212,7 @@ option explicitly.
 .It Xo
 .Nm
 .Cm rewrite
-.Op Fl rvx
+.Op Fl Srvx
 .Op Fl l Ar length
 .Op Fl o Ar offset
 .Ar file Ns | Ns Ar directory Ns ...
@@ -3244,6 +3244,11 @@ is in effect, or if no relevant property changed and
 applies, some blocks may not be physically relocated.
 The caller must be able to open each file for writing.
 .Bl -tag -width "-l length"
+.It Fl S
+Skip blocks that are shared with the most recent snapshot of the file
+system.
+Rewriting such blocks allocates new space while the snapshot keeps the
+old copies.
 .It Fl l Ar length
 Rewrite at most
 .Ar length

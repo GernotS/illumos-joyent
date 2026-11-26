@@ -1517,9 +1517,16 @@ typedef enum {
 typedef struct zfs_rewrite_args {
 	uint64_t	off;
 	uint64_t	len;
-	uint64_t	flags;	/* must be zero */
+	uint64_t	flags;	/* ZFS_REWRITE_* flags */
 	uint64_t	arg;	/* reserved, must be zero */
 } zfs_rewrite_args_t;
+
+/*
+ * zfs_rewrite_args_t flags.  The values match OpenZFS.  Block cloning
+ * (ZFS_REWRITE_SKIP_BRT) is not supported on illumos and is rejected.
+ */
+#define	ZFS_REWRITE_SKIP_SNAPSHOT	0x2 /* Skip snapshot-shared blocks. */
+#define	ZFS_REWRITE_SKIP_BRT		0x4 /* Skip BRT-cloned blocks. */
 
 #define	ZFS_IOC_REWRITE		_IOW(0x83, 3, zfs_rewrite_args_t)
 

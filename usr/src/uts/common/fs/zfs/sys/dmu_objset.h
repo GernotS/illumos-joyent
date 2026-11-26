@@ -257,6 +257,7 @@ int dmu_fsname(const char *snapname, char *buf);
 
 void dmu_objset_evict_done(objset_t *os);
 void dmu_objset_willuse_space(objset_t *os, int64_t space, dmu_tx_t *tx);
+boolean_t dmu_objset_block_is_shared(objset_t *os, const blkptr_t *bp);
 
 void dmu_objset_init(void);
 void dmu_objset_fini(void);
