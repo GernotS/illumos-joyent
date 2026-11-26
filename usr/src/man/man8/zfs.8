@@ -179,7 +179,7 @@
 .Ar file Ns | Ns Ar directory Ns ...
 .Nm
 .Cm rewrite
-.Op Fl SWrvx
+.Op Fl PSWrvx
 .Op Fl l Ar length
 .Op Fl o Ar offset
 .Ar file Ns | Ns Ar directory Ns ...
@@ -3212,7 +3212,7 @@ option explicitly.
 .It Xo
 .Nm
 .Cm rewrite
-.Op Fl SWrvx
+.Op Fl PSWrvx
 .Op Fl l Ar length
 .Op Fl o Ar offset
 .Ar file Ns | Ns Ar directory Ns ...
@@ -3234,9 +3234,12 @@ The block size of existing files is not changed, so a modified
 does not take effect.
 Holes in sparse files are preserved.
 .Pp
-Rewritten blocks receive a new birth time, so they are included in
-subsequent incremental sends, and blocks still referenced by snapshots are
-not freed, which can increase space usage.
+Unless
+.Fl P
+is given, rewritten blocks receive a new birth time, so they are included
+in subsequent incremental sends.
+Blocks still referenced by snapshots are not freed, which can increase
+space usage.
 Blocks are rewritten even when nothing changed that would alter them;
 .Sy nopwrite
 does not apply to rewrites.
@@ -3247,6 +3250,20 @@ gains a reference to that entry instead of being written to a new
 location.
 The caller must be able to open each file for writing.
 .Bl -tag -width "-l length"
+.It Fl P
+Physical rewrite: keep each block's logical birth time, so that the data
+is not considered changed.
+Incremental sends and
+.Nm zfs Cm diff
+skip the rewritten blocks, except raw sends of encrypted datasets, which
+must include them because rewriting gives them new encryption parameters.
+Requires the
+.Sy physical_rewrite
+pool feature, which becomes active on first use; see
+.Xr zpool-features 7 .
+A deduplicated block keeps its logical birth time only if the rewrite
+writes new copies of it; one that ends up referencing copies already in
+the dedup table is treated as modified.
 .It Fl S
 Skip blocks that are shared with the most recent snapshot of the file
 system.

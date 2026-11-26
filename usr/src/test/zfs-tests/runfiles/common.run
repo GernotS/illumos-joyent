@@ -242,7 +242,8 @@ tags = ['functional', 'cli_root', 'zfs_rename']
 
 [tests/functional/cli_root/zfs_rewrite]
 tests = ['zfs_rewrite_basic', 'zfs_rewrite_cliargs', 'zfs_rewrite_nopwrite',
-    'zfs_rewrite_skip_current', 'zfs_rewrite_skip_snapshot']
+    'zfs_rewrite_physical', 'zfs_rewrite_skip_current',
+    'zfs_rewrite_skip_snapshot']
 tags = ['functional', 'cli_root', 'zfs_rewrite']
 
 [tests/functional/cli_root/zfs_reservation]

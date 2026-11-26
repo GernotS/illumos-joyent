@@ -17,7 +17,7 @@
 .\" Portions Copyright [yyyy] [name of copyright owner]
 .\" Copyright (c) 2019, Klara Inc.
 .\" Copyright (c) 2019, Allan Jude
-.Dd June 21, 2022
+.Dd November 26, 2026
 .Dt ZPOOL-FEATURES 7
 .Os
 .
@@ -535,6 +535,23 @@ when the
 .Nm zpool Cm remove
 command is used on a top-level vdev, and will never return to being
 .Sy enabled .
+.
+.feature com.truenas physical_rewrite yes extensible_dataset
+This feature lets
+.Nm zfs Cm rewrite Fl P
+move file data to new locations while keeping each block's logical birth
+time, so that incremental sends and
+.Nm zfs Cm diff
+do not treat the rewritten blocks as changed.
+The block pointers of such blocks carry a flag that records that their
+space was allocated when they were rewritten.
+.Pp
+This feature becomes
+.Sy active
+on a dataset the first time a physical rewrite is done on it, and returns
+to being
+.Sy enabled
+once all datasets that used it have been destroyed.
 .
 .feature org.zfsonlinux project_quota yes extensible_dataset
 This feature allows administrators to account the spaces and objects usage

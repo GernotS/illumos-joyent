@@ -389,7 +389,7 @@ get_usage(zfs_help_t idx)
 		    "\t    <filesystem|volume>\n"
 		    "\tchange-key -i [-l] <filesystem|volume>\n"));
 	case HELP_REWRITE:
-		return (gettext("\trewrite [-SWrvx] [-o <offset>] "
+		return (gettext("\trewrite [-PSWrvx] [-o <offset>] "
 		    "[-l <length>] <directory|file>...\n"));
 	}
 
@@ -7443,7 +7443,7 @@ zfs_do_diff(int argc, char **argv)
 }
 
 /*
- * zfs rewrite [-SWrvx] [-o offset] [-l length] <directory|file>...
+ * zfs rewrite [-PSWrvx] [-o offset] [-l length] <directory|file>...
  *
  * Rewrite the data of the given files in place, using the current dataset
  * properties and pool layout.  With -r, descend into directories.
@@ -7580,8 +7580,11 @@ zfs_do_rewrite(int argc, char **argv)
 	uint64_t val;
 	int c, err = 0;
 
-	while ((c = getopt(argc, argv, "SWl:o:rvx")) != -1) {
+	while ((c = getopt(argc, argv, "PSWl:o:rvx")) != -1) {
 		switch (c) {
+		case 'P':
+			cb.rc_args.flags |= ZFS_REWRITE_PHYSICAL;
+			break;
 		case 'S':
 			cb.rc_args.flags |= ZFS_REWRITE_SKIP_SNAPSHOT;
 			break;

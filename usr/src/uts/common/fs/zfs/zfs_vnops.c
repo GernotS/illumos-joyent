@@ -88,6 +88,7 @@
 #include <sys/zil.h>
 #include <sys/sa_impl.h>
 #include <sys/zfs_project.h>
+#include <sys/zfeature.h>
 
 /*
  * Programming rules.
@@ -382,7 +383,8 @@ zfs_rewrite_skip(dmu_buf_t *db, objset_t *os, uint64_t flags,
 }
 
 #define	ZFS_REWRITE_VALID_FLAGS	\
-	(ZFS_REWRITE_SKIP_SNAPSHOT | ZFS_REWRITE_SKIP_CURRENT)
+	(ZFS_REWRITE_PHYSICAL | ZFS_REWRITE_SKIP_SNAPSHOT | \
+	ZFS_REWRITE_SKIP_CURRENT)
 
 /*
  * ZFS_IOC_REWRITE: rewrite the existing data of a regular file in place.
@@ -434,6 +436,13 @@ zfs_rewrite(vnode_t *vp, uint64_t off, uint64_t len, uint64_t flags,
 	if (zfsvfs->z_vfs->vfs_flag & VFS_RDONLY) {
 		ZFS_EXIT(zfsvfs);
 		return (SET_ERROR(EROFS));
+	}
+
+	if ((flags & ZFS_REWRITE_PHYSICAL) &&
+	    !spa_feature_is_enabled(dmu_objset_spa(zfsvfs->z_os),
+	    SPA_FEATURE_PHYSICAL_REWRITE)) {
+		ZFS_EXIT(zfsvfs);
+		return (SET_ERROR(ENOTSUP));
 	}
 
 	if (off >= zp->z_size) {
@@ -525,10 +534,11 @@ zfs_rewrite(vnode_t *vp, uint64_t off, uint64_t len, uint64_t flags,
 			break;
 		}
 		for (int i = 0; i < numbufs; i++) {
-			if (flags != 0 &&
+			if ((flags & ~ZFS_REWRITE_PHYSICAL) != 0 &&
 			    zfs_rewrite_skip(dbp[i], zfsvfs->z_os, flags, &wp))
 				continue;
-			dmu_buf_will_rewrite(dbp[i], tx);
+			dmu_buf_will_rewrite(dbp[i], tx,
+			    (flags & ZFS_REWRITE_PHYSICAL) != 0);
 		}
 		dmu_buf_rele_array(dbp, numbufs, FTAG);
 

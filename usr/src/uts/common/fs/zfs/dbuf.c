@@ -1697,11 +1697,36 @@ dbuf_redirty(dbuf_dirty_record_t *dr)
 		 * an unchanged rewrite.
 		 */
 		dr->dt.dl.dr_rewrite = B_FALSE;
+		dr->dt.dl.dr_physical_rewrite = B_FALSE;
 	}
 }
 
+/*
+ * How dbuf_dirty_impl() marks a new dirty record for zfs rewrite.
+ */
+typedef enum dbuf_dirty_rewrite {
+	DBUF_DIRTY_NORMAL,	/* an ordinary modification */
+	DBUF_DIRTY_REWRITE,	/* data unchanged; write it out again */
+	DBUF_DIRTY_PHYS_REWRITE	/* as above, keeping the logical birth */
+} dbuf_dirty_rewrite_t;
+
+static dbuf_dirty_record_t *dbuf_dirty_impl(dmu_buf_impl_t *db, dmu_tx_t *tx,
+    dbuf_dirty_rewrite_t rewrite);
+
 dbuf_dirty_record_t *
 dbuf_dirty(dmu_buf_impl_t *db, dmu_tx_t *tx)
+{
+	return (dbuf_dirty_impl(db, tx, DBUF_DIRTY_NORMAL));
+}
+
+/*
+ * A rewrite marks the dirty record when it creates it, under db_mtx, so
+ * that a concurrent modification cannot be mistaken for a rewrite: had
+ * another thread dirtied the buffer first, it is left as it is, and a
+ * later modification clears the mark in dbuf_redirty().
+ */
+static dbuf_dirty_record_t *
+dbuf_dirty_impl(dmu_buf_impl_t *db, dmu_tx_t *tx, dbuf_dirty_rewrite_t rewrite)
 {
 	dnode_t *dn;
 	objset_t *os;
@@ -1791,7 +1816,8 @@ dbuf_dirty(dmu_buf_impl_t *db, dmu_tx_t *tx)
 	if (dr && dr->dr_txg == tx->tx_txg) {
 		DB_DNODE_EXIT(db);
 
-		dbuf_redirty(dr);
+		if (rewrite == DBUF_DIRTY_NORMAL)
+			dbuf_redirty(dr);
 		mutex_exit(&db->db_mtx);
 		return (dr);
 	}
@@ -1872,6 +1898,13 @@ dbuf_dirty(dmu_buf_impl_t *db, dmu_tx_t *tx)
 	dr->dr_txg = tx->tx_txg;
 	dr->dr_next = *drp;
 	*drp = dr;
+
+	if (rewrite != DBUF_DIRTY_NORMAL && db->db_level == 0 &&
+	    db->db_blkid != DMU_BONUS_BLKID) {
+		dr->dt.dl.dr_rewrite = B_TRUE;
+		dr->dt.dl.dr_physical_rewrite =
+		    (rewrite == DBUF_DIRTY_PHYS_REWRITE);
+	}
 
 	/*
 	 * We could have been freed_in_flight between the dbuf_noread
@@ -2141,10 +2174,11 @@ dmu_buf_will_dirty(dmu_buf_t *db_fake, dmu_tx_t *tx)
  * anyway and is left as is.
  */
 void
-dmu_buf_will_rewrite(dmu_buf_t *db_fake, dmu_tx_t *tx)
+dmu_buf_will_rewrite(dmu_buf_t *db_fake, dmu_tx_t *tx, boolean_t physical)
 {
 	dmu_buf_impl_t *db = (dmu_buf_impl_t *)db_fake;
 	dbuf_dirty_record_t *dr;
+	int flags = DB_RF_MUST_SUCCEED | DB_RF_NOPREFETCH;
 
 	ASSERT(tx->tx_txg != 0);
 	ASSERT(!zfs_refcount_is_zero(&db->db_holds));
@@ -2157,14 +2191,13 @@ dmu_buf_will_rewrite(dmu_buf_t *db_fake, dmu_tx_t *tx)
 	}
 	mutex_exit(&db->db_mtx);
 
-	dmu_buf_will_dirty_impl(db_fake, DB_RF_MUST_SUCCEED |
-	    DB_RF_NOPREFETCH, tx);
-
-	mutex_enter(&db->db_mtx);
-	dr = db->db_last_dirty;
-	if (dr != NULL && dr->dr_txg == tx->tx_txg && db->db_level == 0)
-		dr->dt.dl.dr_rewrite = B_TRUE;
-	mutex_exit(&db->db_mtx);
+	DB_DNODE_ENTER(db);
+	if (RW_WRITE_HELD(&DB_DNODE(db)->dn_struct_rwlock))
+		flags |= DB_RF_HAVESTRUCT;
+	DB_DNODE_EXIT(db);
+	(void) dbuf_read(db, NULL, flags);
+	(void) dbuf_dirty_impl(db, tx, physical ?
+	    DBUF_DIRTY_PHYS_REWRITE : DBUF_DIRTY_REWRITE);
 }
 
 void
@@ -4258,6 +4291,21 @@ dbuf_write(dbuf_dirty_record_t *dr, arc_buf_t *data, dmu_tx_t *tx)
 	 */
 	if (db->db_level == 0 && dr->dt.dl.dr_rewrite)
 		zp.zp_nopwrite = B_FALSE;
+
+	/*
+	 * zfs rewrite -P keeps the logical birth time.  Note the
+	 * physical_rewrite feature for activation when the dataset syncs.
+	 */
+	if (db->db_level == 0 && dr->dt.dl.dr_physical_rewrite) {
+		dsl_dataset_t *ds = os->os_dsl_dataset;
+
+		zp.zp_rewrite = B_TRUE;
+		if (ds != NULL && !dsl_dataset_feature_is_active(ds,
+		    SPA_FEATURE_PHYSICAL_REWRITE)) {
+			ds->ds_feature_activation[
+			    SPA_FEATURE_PHYSICAL_REWRITE] = (void *)B_TRUE;
+		}
+	}
 
 	/*
 	 * We copy the blkptr now (rather than when we instantiate the dirty

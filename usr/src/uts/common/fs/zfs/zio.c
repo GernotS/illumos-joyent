@@ -2564,19 +2564,17 @@ zio_write_gang_block(zio_t *pio)
 		    SPA_MINBLOCKSIZE);
 		ASSERT(lsize >= SPA_MINBLOCKSIZE && lsize <= resid);
 
+		/*
+		 * Start from zero, so that properties such as zp_rewrite,
+		 * and any added later, do not apply to gang children.
+		 */
+		bzero(&zp, sizeof (zp));
 		zp.zp_checksum = gio->io_prop.zp_checksum;
 		zp.zp_compress = ZIO_COMPRESS_OFF;
 		zp.zp_type = DMU_OT_NONE;
-		zp.zp_level = 0;
 		zp.zp_copies = gio->io_prop.zp_copies;
-		zp.zp_dedup = B_FALSE;
-		zp.zp_dedup_verify = B_FALSE;
-		zp.zp_nopwrite = B_FALSE;
 		zp.zp_encrypt = gio->io_prop.zp_encrypt;
 		zp.zp_byteorder = gio->io_prop.zp_byteorder;
-		bzero(zp.zp_salt, ZIO_DATA_SALT_LEN);
-		bzero(zp.zp_iv, ZIO_DATA_IV_LEN);
-		bzero(zp.zp_mac, ZIO_DATA_MAC_LEN);
 
 		zio_t *cio = zio_write(zio, spa, txg, &gbh->zg_blkptr[g],
 		    has_data ? abd_get_offset(pio->io_abd, pio->io_size -
@@ -2903,6 +2901,26 @@ zio_ddt_collision(zio_t *zio, ddt_t *ddt, ddt_entry_t *dde)
 	return (B_FALSE);
 }
 
+/*
+ * Fill a dedup block pointer from its DDT entry.  A dedup bp must carry
+ * the entry's physical birth, which ddt_phys_select() matches when the
+ * block is freed.  For zfs rewrite -P the logical birth is kept, with the
+ * rewrite flag, only when the entry was written in this txg, i.e. the
+ * rewrite allocated the copies itself; a block that ends up pointing at
+ * older copies gets the current txg as its logical birth, as any write.
+ */
+static void
+zio_ddt_bp_fill(zio_t *zio, const ddt_phys_t *ddp)
+{
+	uint64_t txg = zio->io_txg;
+	uint64_t logical_birth = BP_GET_LOGICAL_BIRTH(&zio->io_bp_orig);
+	boolean_t rewrite = zio->io_prop.zp_rewrite && logical_birth != 0 &&
+	    logical_birth < txg && ddp->ddp_phys_birth == txg;
+
+	ddt_bp_fill(ddp, zio->io_bp, rewrite ? logical_birth : txg);
+	BP_SET_REWRITE(zio->io_bp, rewrite);
+}
+
 static void
 zio_ddt_child_write_ready(zio_t *zio)
 {
@@ -2923,7 +2941,7 @@ zio_ddt_child_write_ready(zio_t *zio)
 
 	zio_link_t *zl = NULL;
 	while ((pio = zio_walk_parents(zio, &zl)) != NULL)
-		ddt_bp_fill(ddp, pio->io_bp, zio->io_txg);
+		zio_ddt_bp_fill(pio, ddp);
 
 	ddt_exit(ddt);
 }
@@ -3064,9 +3082,29 @@ zio_ddt_write(zio_t *zio)
 		dde->dde_lead_zio[DDT_PHYS_DITTO] = dio;
 	}
 
+	if (ddp->ddp_phys_birth != 0 && dde->dde_lead_zio[p] == NULL &&
+	    zp->zp_rewrite) {
+		/*
+		 * zfs rewrite -P of a block the DDT already holds.  If
+		 * filling it from the entry with its own logical birth gives
+		 * back the block pointer it had, nothing changes: keep it,
+		 * with its rewrite flag, and skip the reference accounting,
+		 * as for a nopwrite.
+		 */
+		ddt_bp_fill(ddp, bp, BP_GET_LOGICAL_BIRTH(&zio->io_bp_orig));
+		if (BP_EQUAL(bp, &zio->io_bp_orig)) {
+			BP_SET_REWRITE(bp, BP_GET_REWRITE(&zio->io_bp_orig));
+			zio->io_flags |= ZIO_FLAG_NOPWRITE;
+			ddt_exit(ddt);
+			if (dio != NULL)
+				zio_nowait(dio);
+			return (zio);
+		}
+	}
+
 	if (ddp->ddp_phys_birth != 0 || dde->dde_lead_zio[p] != NULL) {
 		if (ddp->ddp_phys_birth != 0)
-			ddt_bp_fill(ddp, bp, txg);
+			zio_ddt_bp_fill(zio, ddp);
 		if (dde->dde_lead_zio[p] != NULL)
 			zio_add_child(zio, dde->dde_lead_zio[p]);
 		else
@@ -3292,6 +3330,19 @@ zio_dva_allocate(zio_t *zio)
 		if (error == ENOSPC && zio->io_size > SPA_MINBLOCKSIZE)
 			return (zio_write_gang_block(zio));
 		zio->io_error = error;
+	} else if (zio->io_prop.zp_rewrite) {
+		/*
+		 * zfs rewrite -P: the data did not change, so keep the
+		 * original logical birth, and record with the rewrite flag
+		 * that the space was allocated at the physical birth.
+		 */
+		uint64_t logical_birth =
+		    BP_GET_LOGICAL_BIRTH(&zio->io_bp_orig);
+
+		if (logical_birth != 0 && logical_birth < zio->io_txg) {
+			BP_SET_BIRTH(bp, logical_birth, zio->io_txg);
+			BP_SET_REWRITE(bp, 1);
+		}
 	}
 
 	return (zio);

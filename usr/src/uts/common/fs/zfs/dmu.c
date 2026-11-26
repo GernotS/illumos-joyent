@@ -2455,6 +2455,7 @@ dmu_write_policy(objset_t *os, dnode_t *dn, int level, int wp, zio_prop_t *zp)
 	    os->os_zpl_special_smallblock : 0;
 	zp->zp_encrypt = encrypt;
 	zp->zp_byteorder = ZFS_HOST_BYTEORDER;
+	zp->zp_rewrite = B_FALSE;
 	bzero(zp->zp_salt, ZIO_DATA_SALT_LEN);
 	bzero(zp->zp_iv, ZIO_DATA_IV_LEN);
 	bzero(zp->zp_mac, ZIO_DATA_MAC_LEN);

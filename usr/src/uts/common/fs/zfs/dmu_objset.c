@@ -3003,5 +3003,5 @@ dmu_objset_block_is_shared(objset_t *os, const blkptr_t *bp)
 	if (BP_IS_HOLE(bp) || ds == NULL)
 		return (B_FALSE);
 
-	return (bp->blk_birth <= dsl_dataset_phys(ds)->ds_prev_snap_txg);
+	return (BP_GET_BIRTH(bp) <= dsl_dataset_phys(ds)->ds_prev_snap_txg);
 }

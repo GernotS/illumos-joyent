@@ -173,6 +173,12 @@ typedef struct dbuf_dirty_record {
 			 * must not elide the write.
 			 */
 			boolean_t dr_rewrite;
+			/*
+			 * Set with dr_rewrite for zfs rewrite -P: keep the
+			 * logical birth time and set the rewrite flag in
+			 * the new block pointer.
+			 */
+			boolean_t dr_physical_rewrite;
 			boolean_t dr_has_raw_params;
 
 			/*

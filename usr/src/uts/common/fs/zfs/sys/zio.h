@@ -327,6 +327,7 @@ typedef struct zio_prop {
 	uint32_t		zp_zpl_smallblk;
 	boolean_t		zp_encrypt;
 	boolean_t		zp_byteorder;
+	boolean_t		zp_rewrite;	/* zfs rewrite -P */
 	uint8_t			zp_salt[ZIO_DATA_SALT_LEN];
 	uint8_t			zp_iv[ZIO_DATA_IV_LEN];
 	uint8_t			zp_mac[ZIO_DATA_MAC_LEN];

@@ -1108,6 +1108,9 @@ file \
     path=opt/zfs-tests/tests/functional/cli_root/zfs_rewrite/zfs_rewrite_nopwrite \
     mode=0555
 file \
+    path=opt/zfs-tests/tests/functional/cli_root/zfs_rewrite/zfs_rewrite_physical \
+    mode=0555
+file \
     path=opt/zfs-tests/tests/functional/cli_root/zfs_rewrite/zfs_rewrite_skip_current \
     mode=0555
 file \
