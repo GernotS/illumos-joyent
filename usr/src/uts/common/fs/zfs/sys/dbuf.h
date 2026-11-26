@@ -167,6 +167,12 @@ typedef struct dbuf_dirty_record {
 			struct dmu_sync_arg *dr_sync_arg;
 			uint8_t dr_copies;
 			boolean_t dr_nopwrite;
+			/*
+			 * Set by dmu_buf_will_rewrite(): the block is being
+			 * written back unchanged by zfs rewrite, so nopwrite
+			 * must not elide the write.
+			 */
+			boolean_t dr_rewrite;
 			boolean_t dr_has_raw_params;
 
 			/*

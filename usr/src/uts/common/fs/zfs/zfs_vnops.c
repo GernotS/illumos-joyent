@@ -387,9 +387,9 @@ zfs_rewrite_skip(dmu_buf_t *db, objset_t *os, uint64_t flags)
  * (compression, checksum, copies, dedup; the block size is not changed) and
  * allocated according to the pool's current vdev layout.  This is useful
  * e.g. after adding vdevs or changing compression.  Holes are skipped.
- * Blocks whose rewrite would be byte-identical may still be elided by
- * nopwrite.  Snapshots keep referencing the old copies, so space usage
- * may grow.
+ * nopwrite is disabled for these writes (see dmu_buf_will_rewrite()), so
+ * blocks move even when their contents and properties are unchanged.
+ * Snapshots keep referencing the old copies, so space usage may grow.
  */
 static int
 zfs_rewrite(vnode_t *vp, uint64_t off, uint64_t len, uint64_t flags,
@@ -517,7 +517,7 @@ zfs_rewrite(vnode_t *vp, uint64_t off, uint64_t len, uint64_t flags,
 			if (flags != 0 &&
 			    zfs_rewrite_skip(dbp[i], zfsvfs->z_os, flags))
 				continue;
-			dmu_buf_will_dirty(dbp[i], tx);
+			dmu_buf_will_rewrite(dbp[i], tx);
 		}
 		dmu_buf_rele_array(dbp, numbufs, FTAG);
 

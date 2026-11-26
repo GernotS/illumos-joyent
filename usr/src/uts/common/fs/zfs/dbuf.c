@@ -1693,6 +1693,12 @@ dbuf_redirty(dbuf_dirty_record_t *dr)
 			ASSERT(arc_released(db->db_buf));
 			arc_buf_thaw(db->db_buf);
 		}
+
+		/*
+		 * The buffer is being modified again, so this is no longer
+		 * an unchanged rewrite.
+		 */
+		dr->dt.dl.dr_rewrite = B_FALSE;
 	}
 }
 
@@ -2128,6 +2134,39 @@ dmu_buf_will_dirty(dmu_buf_t *db_fake, dmu_tx_t *tx)
 {
 	dmu_buf_will_dirty_impl(db_fake,
 	    DB_RF_MUST_SUCCEED | DB_RF_NOPREFETCH, tx);
+}
+
+/*
+ * Dirty a buffer without changing its contents, so that zfs rewrite can
+ * have it written out again with the current properties and allocation
+ * policy.  If the buffer is already dirty in this txg, it will be written
+ * anyway and is left as is.
+ */
+void
+dmu_buf_will_rewrite(dmu_buf_t *db_fake, dmu_tx_t *tx)
+{
+	dmu_buf_impl_t *db = (dmu_buf_impl_t *)db_fake;
+	dbuf_dirty_record_t *dr;
+
+	ASSERT(tx->tx_txg != 0);
+	ASSERT(!zfs_refcount_is_zero(&db->db_holds));
+
+	mutex_enter(&db->db_mtx);
+	dr = db->db_last_dirty;
+	if (dr != NULL && dr->dr_txg == tx->tx_txg) {
+		mutex_exit(&db->db_mtx);
+		return;
+	}
+	mutex_exit(&db->db_mtx);
+
+	dmu_buf_will_dirty_impl(db_fake, DB_RF_MUST_SUCCEED |
+	    DB_RF_NOPREFETCH, tx);
+
+	mutex_enter(&db->db_mtx);
+	dr = db->db_last_dirty;
+	if (dr != NULL && dr->dr_txg == tx->tx_txg && db->db_level == 0)
+		dr->dt.dl.dr_rewrite = B_TRUE;
+	mutex_exit(&db->db_mtx);
 }
 
 void
@@ -4214,6 +4253,13 @@ dbuf_write(dbuf_dirty_record_t *dr, arc_buf_t *data, dmu_tx_t *tx)
 	dmu_write_policy(os, dn, db->db_level, wp_flag, &zp);
 
 	DB_DNODE_EXIT(db);
+
+	/*
+	 * zfs rewrite writes the data back unchanged; nopwrite would find
+	 * the same checksum and keep the old block where it is.
+	 */
+	if (db->db_level == 0 && dr->dt.dl.dr_rewrite)
+		zp.zp_nopwrite = B_FALSE;
 
 	/*
 	 * We copy the blkptr now (rather than when we instantiate the dirty

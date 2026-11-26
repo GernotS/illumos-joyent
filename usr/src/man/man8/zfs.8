@@ -3237,11 +3237,14 @@ Holes in sparse files are preserved.
 Rewritten blocks receive a new birth time, so they are included in
 subsequent incremental sends, and blocks still referenced by snapshots are
 not freed, which can increase space usage.
+Blocks are rewritten even when nothing changed that would alter them;
+.Sy nopwrite
+does not apply to rewrites.
 If
 .Sy dedup
-is in effect, or if no relevant property changed and
-.Sy nopwrite
-applies, some blocks may not be physically relocated.
+is in effect, a block that matches an existing entry in the dedup table
+gains a reference to that entry instead of being written to a new
+location.
 The caller must be able to open each file for writing.
 .Bl -tag -width "-l length"
 .It Fl S
