@@ -979,6 +979,9 @@ extern boolean_t spa_has_spare(spa_t *, uint64_t guid);
 extern uint64_t dva_get_dsize_sync(spa_t *spa, const dva_t *dva);
 extern uint64_t bp_get_dsize_sync(spa_t *spa, const blkptr_t *bp);
 extern uint64_t bp_get_dsize(spa_t *spa, const blkptr_t *bp);
+struct zio_prop;
+extern boolean_t bp_rewrite_is_current(spa_t *spa, const blkptr_t *bp,
+    const struct zio_prop *zp);
 extern boolean_t spa_has_slogs(spa_t *spa);
 extern boolean_t spa_is_root(spa_t *spa);
 extern boolean_t spa_writeable(spa_t *spa);

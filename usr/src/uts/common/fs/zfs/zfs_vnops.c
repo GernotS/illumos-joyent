@@ -362,7 +362,8 @@ zfs_ioctl_setxattr(vnode_t *vp, intptr_t data, int flags, cred_t *cr,
  * pointer may be slightly stale, which is fine for this advisory check.
  */
 static boolean_t
-zfs_rewrite_skip(dmu_buf_t *db, objset_t *os, uint64_t flags)
+zfs_rewrite_skip(dmu_buf_t *db, objset_t *os, uint64_t flags,
+    const zio_prop_t *wp)
 {
 	blkptr_t *bp = dmu_buf_get_blkptr(db);
 
@@ -373,10 +374,15 @@ zfs_rewrite_skip(dmu_buf_t *db, objset_t *os, uint64_t flags)
 	    dmu_objset_block_is_shared(os, bp))
 		return (B_TRUE);
 
+	if ((flags & ZFS_REWRITE_SKIP_CURRENT) &&
+	    bp_rewrite_is_current(os->os_spa, bp, wp))
+		return (B_TRUE);
+
 	return (B_FALSE);
 }
 
-#define	ZFS_REWRITE_VALID_FLAGS	(ZFS_REWRITE_SKIP_SNAPSHOT)
+#define	ZFS_REWRITE_VALID_FLAGS	\
+	(ZFS_REWRITE_SKIP_SNAPSHOT | ZFS_REWRITE_SKIP_CURRENT)
 
 /*
  * ZFS_IOC_REWRITE: rewrite the existing data of a regular file in place.
@@ -503,6 +509,11 @@ zfs_rewrite(vnode_t *vp, uint64_t off, uint64_t len, uint64_t flags,
 			break;
 		}
 
+		/* The properties a new write would give this file's blocks. */
+		zio_prop_t wp;
+		if (flags & ZFS_REWRITE_SKIP_CURRENT)
+			dmu_write_policy(zfsvfs->z_os, dn, 0, 0, &wp);
+
 		/*
 		 * Read in and dirty every block in the range, unchanged.
 		 * Dirtying is what causes the block to be rewritten.
@@ -515,7 +526,7 @@ zfs_rewrite(vnode_t *vp, uint64_t off, uint64_t len, uint64_t flags,
 		}
 		for (int i = 0; i < numbufs; i++) {
 			if (flags != 0 &&
-			    zfs_rewrite_skip(dbp[i], zfsvfs->z_os, flags))
+			    zfs_rewrite_skip(dbp[i], zfsvfs->z_os, flags, &wp))
 				continue;
 			dmu_buf_will_rewrite(dbp[i], tx);
 		}

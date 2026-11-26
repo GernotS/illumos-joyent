@@ -179,7 +179,7 @@
 .Ar file Ns | Ns Ar directory Ns ...
 .Nm
 .Cm rewrite
-.Op Fl Srvx
+.Op Fl SWrvx
 .Op Fl l Ar length
 .Op Fl o Ar offset
 .Ar file Ns | Ns Ar directory Ns ...
@@ -3212,7 +3212,7 @@ option explicitly.
 .It Xo
 .Nm
 .Cm rewrite
-.Op Fl Srvx
+.Op Fl SWrvx
 .Op Fl l Ar length
 .Op Fl o Ar offset
 .Ar file Ns | Ns Ar directory Ns ...
@@ -3252,6 +3252,15 @@ Skip blocks that are shared with the most recent snapshot of the file
 system.
 Rewriting such blocks allocates new space while the snapshot keeps the
 old copies.
+.It Fl W
+Skip blocks that a rewrite would leave as they are: blocks already written
+with the current checksum, compression and dedup settings and number of
+copies, on top-level vdevs of the allocation class a new write would use
+and not being removed.
+Blocks stored uncompressed are not rewritten merely because compression
+is now enabled, and a change of compression level alone is not detected.
+This makes it cheap to run the same rewrite again, for example after it
+was interrupted.
 .It Fl l Ar length
 Rewrite at most
 .Ar length

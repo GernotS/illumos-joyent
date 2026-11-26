@@ -2061,6 +2061,66 @@ bp_get_dsize(spa_t *spa, const blkptr_t *bp)
 	return (dsize);
 }
 
+/*
+ * Return B_TRUE if a rewrite of this block in the current pool state, with
+ * write properties zp, would produce an equivalent block: same checksum,
+ * compression and dedup setting, the requested number of copies, and every
+ * DVA on a concrete, allocatable top-level vdev of the class a new write
+ * would use.  Used by zfs rewrite -W to skip blocks that are already
+ * current, so that repeated runs do not rewrite the same data again.
+ *
+ * A block stored uncompressed may simply not have compressed well, so it
+ * is not treated as stale just because compression is now enabled; the
+ * compression level is not recorded in the block pointer and is ignored.
+ * Gang blocks always count as stale.  illumos has no RAID-Z expansion, so
+ * a RAID-Z vdev's width never differs from the width at the block's birth.
+ */
+boolean_t
+bp_rewrite_is_current(spa_t *spa, const blkptr_t *bp, const zio_prop_t *zp)
+{
+	enum zio_compress compress;
+	boolean_t compress_ok, current = B_TRUE;
+	metaslab_class_t *mc;
+	int ndvas;
+
+	if (BP_IS_HOLE(bp))
+		return (B_TRUE);
+	if (BP_IS_GANG(bp))
+		return (B_FALSE);
+
+	compress = BP_GET_COMPRESS(bp);
+	compress_ok = (compress == ZIO_COMPRESS_OFF ||
+	    compress == zp->zp_compress);
+
+	if (BP_IS_EMBEDDED(bp)) {
+		return (BPE_GET_ETYPE(bp) != BP_EMBEDDED_TYPE_DATA ||
+		    compress_ok);
+	}
+
+	if (BP_GET_CHECKSUM(bp) != zp->zp_checksum || !compress_ok ||
+	    BP_GET_DEDUP(bp) != zp->zp_dedup)
+		return (B_FALSE);
+
+	ndvas = BP_GET_NDVAS(bp);
+	if (ndvas != zp->zp_copies)
+		return (B_FALSE);
+
+	spa_config_enter(spa, SCL_VDEV, FTAG, RW_READER);
+	mc = spa_preferred_class(spa, BP_GET_PSIZE(bp), zp->zp_type,
+	    zp->zp_level, zp->zp_zpl_smallblk);
+	for (int d = 0; current && d < ndvas; d++) {
+		vdev_t *vd = vdev_lookup_top(spa,
+		    DVA_GET_VDEV(&bp->blk_dva[d]));
+
+		current = (vd != NULL && vdev_is_concrete(vd) &&
+		    !vd->vdev_removing && vd->vdev_mg != NULL &&
+		    vd->vdev_mg->mg_class == mc);
+	}
+	spa_config_exit(spa, SCL_VDEV, FTAG);
+
+	return (current);
+}
+
 uint64_t
 spa_dirty_data(spa_t *spa)
 {

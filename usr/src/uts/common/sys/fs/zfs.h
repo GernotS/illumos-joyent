@@ -1527,6 +1527,7 @@ typedef struct zfs_rewrite_args {
  */
 #define	ZFS_REWRITE_SKIP_SNAPSHOT	0x2 /* Skip snapshot-shared blocks. */
 #define	ZFS_REWRITE_SKIP_BRT		0x4 /* Skip BRT-cloned blocks. */
+#define	ZFS_REWRITE_SKIP_CURRENT	0x8 /* Skip blocks already current. */
 
 #define	ZFS_IOC_REWRITE		_IOW(0x83, 3, zfs_rewrite_args_t)
 
