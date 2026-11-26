@@ -388,6 +388,17 @@ zfs_rewrite(vnode_t *vp, uint64_t off, uint64_t len, uint64_t flags,
 	if (vp->v_type != VREG)
 		return (SET_ERROR(EINVAL));
 
+	/*
+	 * Push out any dirty mmap()ed pages first, so that the data we
+	 * rewrite is current.  As in zfs_fsync(), this is done before
+	 * ZFS_ENTER() and before taking the range lock, since zfs_putpage()
+	 * acquires both itself; z_teardown_lock does not track readers, so
+	 * re-entering it could deadlock against a pending unmount.  A len
+	 * of zero flushes through the end of the file.
+	 */
+	if (vn_has_cached_data(vp))
+		(void) VOP_PUTPAGE(vp, (offset_t)off, (size_t)len, 0, cr, ct);
+
 	ZFS_ENTER(zfsvfs);
 	ZFS_VERIFY_ZP(zp);
 
@@ -402,16 +413,6 @@ zfs_rewrite(vnode_t *vp, uint64_t off, uint64_t len, uint64_t flags,
 	}
 	if (len == 0 || len > zp->z_size - off)
 		len = zp->z_size - off;
-
-	/*
-	 * Push out any dirty mmap()ed pages first, so that the data we
-	 * rewrite is current.  This must be done before taking the range
-	 * lock, as zfs_putpage() takes it as well.
-	 */
-	if (vn_has_cached_data(vp)) {
-		(void) VOP_PUTPAGE(vp, (offset_t)off, (size_t)len, 0, cr,
-		    ct);
-	}
 
 	lr = rangelock_enter(&zp->z_rangelock, off, len, RL_WRITER);
 
