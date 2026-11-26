@@ -53,6 +53,7 @@
 #include <grp.h>
 #include <pwd.h>
 #include <signal.h>
+#include <dirent.h>
 #include <sys/debug.h>
 #include <sys/list.h>
 #include <sys/sysmacros.h>
@@ -121,6 +122,7 @@ static int zfs_do_load_key(int argc, char **argv);
 static int zfs_do_unload_key(int argc, char **argv);
 static int zfs_do_change_key(int argc, char **argv);
 static int zfs_do_project(int argc, char **argv);
+static int zfs_do_rewrite(int argc, char **argv);
 
 /*
  * Enable a reasonable set of defaults for libumem debugging on DEBUG builds.
@@ -175,6 +177,7 @@ typedef enum {
 	HELP_LOAD_KEY,
 	HELP_UNLOAD_KEY,
 	HELP_CHANGE_KEY,
+	HELP_REWRITE,
 } zfs_help_t;
 
 typedef struct zfs_command {
@@ -216,6 +219,8 @@ static zfs_command_t command_table[] = {
 	{ "projectspace", zfs_do_userspace,	HELP_PROJECTSPACE	},
 	{ NULL },
 	{ "project",	zfs_do_project,		HELP_PROJECT		},
+	{ NULL },
+	{ "rewrite",	zfs_do_rewrite,		HELP_REWRITE		},
 	{ NULL },
 	{ "mount",	zfs_do_mount,		HELP_MOUNT		},
 	{ "unmount",	zfs_do_unmount,		HELP_UNMOUNT		},
@@ -383,6 +388,9 @@ get_usage(zfs_help_t idx)
 		    "\t    [-o keylocation=<value>] [-o pbkfd2iters=<value>]\n"
 		    "\t    <filesystem|volume>\n"
 		    "\tchange-key -i [-l] <filesystem|volume>\n"));
+	case HELP_REWRITE:
+		return (gettext("\trewrite [-rvx] [-o <offset>] [-l <length>] "
+		    "<directory|file>...\n"));
 	}
 
 	abort();
@@ -7430,6 +7438,198 @@ zfs_do_diff(int argc, char **argv)
 	err = zfs_show_diffs(zhp, STDOUT_FILENO, fromsnap, tosnap, flags);
 
 	zfs_close(zhp);
+
+	return (err != 0);
+}
+
+/*
+ * zfs rewrite [-rvx] [-o offset] [-l length] <directory|file>...
+ *
+ * Rewrite the data of the given files in place, using the current dataset
+ * properties and pool layout.  With -r, descend into directories.
+ */
+typedef struct rewrite_cbdata {
+	zfs_rewrite_args_t	rc_args;
+	boolean_t		rc_recurse;
+	boolean_t		rc_verbose;
+	boolean_t		rc_xdev;
+	dev_t			rc_dev;
+} rewrite_cbdata_t;
+
+static int rewrite_path(rewrite_cbdata_t *, const char *, boolean_t);
+
+static int
+rewrite_file(rewrite_cbdata_t *cb, const char *path)
+{
+	int fd, err = 0;
+
+	if ((fd = open(path, O_WRONLY | O_NOFOLLOW | O_NONBLOCK)) < 0) {
+		err = errno;
+		(void) fprintf(stderr, gettext("cannot open '%s': %s\n"),
+		    path, strerror(err));
+		return (err);
+	}
+
+	if (ioctl(fd, ZFS_IOC_REWRITE, &cb->rc_args) != 0) {
+		err = errno;
+		if (err == ENOTTY) {
+			(void) fprintf(stderr, gettext("cannot rewrite '%s': "
+			    "not a ZFS file\n"), path);
+		} else {
+			(void) fprintf(stderr, gettext("cannot rewrite '%s': "
+			    "%s\n"), path, strerror(err));
+		}
+	} else if (cb->rc_verbose) {
+		(void) printf("%s\n", path);
+	}
+
+	(void) close(fd);
+	return (err);
+}
+
+static int
+rewrite_dir(rewrite_cbdata_t *cb, const char *path)
+{
+	DIR *dir;
+	struct dirent *ent;
+	int err = 0;
+
+	if ((dir = opendir(path)) == NULL) {
+		err = errno;
+		(void) fprintf(stderr, gettext("cannot open directory '%s': "
+		    "%s\n"), path, strerror(err));
+		return (err);
+	}
+
+	while ((ent = readdir(dir)) != NULL) {
+		char *child;
+		int ret;
+
+		if (strcmp(ent->d_name, ".") == 0 ||
+		    strcmp(ent->d_name, "..") == 0)
+			continue;
+
+		if (asprintf(&child, "%s%s%s", path,
+		    path[strlen(path) - 1] == '/' ? "" : "/",
+		    ent->d_name) == -1) {
+			nomem();
+		}
+		ret = rewrite_path(cb, child, B_FALSE);
+		if (ret != 0)
+			err = ret;
+		free(child);
+	}
+
+	(void) closedir(dir);
+	return (err);
+}
+
+/*
+ * Rewrite one path.  Paths given explicitly on the command line ("toplevel")
+ * are reported if they cannot be rewritten; while descending a directory
+ * tree we silently skip anything that is not a regular file or directory
+ * on a ZFS file system.
+ */
+static int
+rewrite_path(rewrite_cbdata_t *cb, const char *path, boolean_t toplevel)
+{
+	struct stat st;
+	int err;
+
+	if (lstat(path, &st) != 0) {
+		err = errno;
+		(void) fprintf(stderr, gettext("cannot stat '%s': %s\n"),
+		    path, strerror(err));
+		return (err);
+	}
+
+	if (toplevel) {
+		cb->rc_dev = st.st_dev;
+	} else {
+		if (cb->rc_xdev && st.st_dev != cb->rc_dev)
+			return (0);
+		if (strcmp(st.st_fstype, MNTTYPE_ZFS) != 0 &&
+		    !S_ISDIR(st.st_mode))
+			return (0);
+	}
+
+	if (S_ISREG(st.st_mode))
+		return (rewrite_file(cb, path));
+
+	if (S_ISDIR(st.st_mode)) {
+		if (!cb->rc_recurse) {
+			(void) fprintf(stderr, gettext("cannot rewrite '%s': "
+			    "is a directory (use -r)\n"), path);
+			return (EISDIR);
+		}
+		return (rewrite_dir(cb, path));
+	}
+
+	if (toplevel) {
+		(void) fprintf(stderr, gettext("cannot rewrite '%s': "
+		    "not a regular file or directory\n"), path);
+		return (EINVAL);
+	}
+	return (0);
+}
+
+static int
+zfs_do_rewrite(int argc, char **argv)
+{
+	rewrite_cbdata_t cb = { 0 };
+	uint64_t val;
+	int c, err = 0;
+
+	while ((c = getopt(argc, argv, "l:o:rvx")) != -1) {
+		switch (c) {
+		case 'l':
+			if (zfs_nicestrtonum(g_zfs, optarg, &val) != 0) {
+				(void) fprintf(stderr, gettext("invalid "
+				    "length '%s': %s\n"), optarg,
+				    libzfs_error_description(g_zfs));
+				usage(B_FALSE);
+			}
+			cb.rc_args.len = val;
+			break;
+		case 'o':
+			if (zfs_nicestrtonum(g_zfs, optarg, &val) != 0) {
+				(void) fprintf(stderr, gettext("invalid "
+				    "offset '%s': %s\n"), optarg,
+				    libzfs_error_description(g_zfs));
+				usage(B_FALSE);
+			}
+			cb.rc_args.off = val;
+			break;
+		case 'r':
+			cb.rc_recurse = B_TRUE;
+			break;
+		case 'v':
+			cb.rc_verbose = B_TRUE;
+			break;
+		case 'x':
+			cb.rc_xdev = B_TRUE;
+			break;
+		case '?':
+			(void) fprintf(stderr,
+			    gettext("invalid option '%c'\n"), optopt);
+			usage(B_FALSE);
+		}
+	}
+
+	argc -= optind;
+	argv += optind;
+
+	if (argc < 1) {
+		(void) fprintf(stderr,
+		    gettext("missing file or directory argument\n"));
+		usage(B_FALSE);
+	}
+
+	for (int i = 0; i < argc; i++) {
+		int ret = rewrite_path(&cb, argv[i], B_TRUE);
+		if (ret != 0)
+			err = ret;
+	}
 
 	return (err != 0);
 }

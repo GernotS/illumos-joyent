@@ -36,6 +36,7 @@
 #define	_SYS_FS_ZFS_H
 
 #include <sys/time.h>
+#include <sys/ioccom.h>
 /*
  * In OpenZFS we include sys/zio_priority.h to get the enum value of
  * ZIO_PRIORITY_NUM_QUEUEABLE, which is used for the various array sizes in
@@ -1504,6 +1505,23 @@ typedef enum {
 #define	ZFS_EV_HIST_IOCTL	"history_ioctl"
 #define	ZFS_EV_HIST_DSNAME	"history_dsname"
 #define	ZFS_EV_HIST_DSID	"history_dsid"
+
+/*
+ * Argument for the ZFS_IOC_REWRITE file ioctl, which is issued against an
+ * open file descriptor (not /dev/zfs).  It rewrites the given byte range of
+ * a regular file in place, so that the data is written out again using the
+ * dataset's current properties (compression, checksum, copies, etc.) and
+ * the pool's current vdev layout.  A len of zero means "to end of file".
+ * The file contents are not changed.
+ */
+typedef struct zfs_rewrite_args {
+	uint64_t	off;
+	uint64_t	len;
+	uint64_t	flags;	/* must be zero */
+	uint64_t	arg;	/* reserved, must be zero */
+} zfs_rewrite_args_t;
+
+#define	ZFS_IOC_REWRITE		_IOW(0x83, 3, zfs_rewrite_args_t)
 
 #ifdef	__cplusplus
 }

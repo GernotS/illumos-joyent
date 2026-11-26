@@ -357,6 +357,158 @@ zfs_ioctl_setxattr(vnode_t *vp, intptr_t data, int flags, cred_t *cr,
 	return (zfs_setattr(vp, (vattr_t *)&xva, flags, cr, ct));
 }
 
+/*
+ * ZFS_IOC_REWRITE: rewrite the existing data of a regular file in place.
+ *
+ * Every allocated block within [off, off + len) is read and dirtied without
+ * modifying its contents, so that it is written out again during the next
+ * txg sync.  The new copy is written with the dataset's current properties
+ * (compression, checksum, copies, dedup; the block size is not changed) and
+ * allocated according to the pool's current vdev layout.  This is useful
+ * e.g. after adding vdevs or changing compression.  Holes are skipped.
+ * Blocks whose rewrite would be byte-identical may still be elided by
+ * nopwrite.  Snapshots keep referencing the old copies, so space usage
+ * may grow.
+ */
+static int
+zfs_rewrite(vnode_t *vp, uint64_t off, uint64_t len, uint64_t flags,
+    uint64_t arg, cred_t *cr, caller_context_t *ct)
+{
+	znode_t *zp = VTOZ(vp);
+	zfsvfs_t *zfsvfs = zp->z_zfsvfs;
+	dmu_buf_impl_t *db;
+	dnode_t *dn;
+	locked_range_t *lr;
+	uint64_t end, noff;
+	int error = 0;
+
+	if (flags != 0 || arg != 0)
+		return (SET_ERROR(EINVAL));
+
+	if (vp->v_type != VREG)
+		return (SET_ERROR(EINVAL));
+
+	ZFS_ENTER(zfsvfs);
+	ZFS_VERIFY_ZP(zp);
+
+	if (zfsvfs->z_vfs->vfs_flag & VFS_RDONLY) {
+		ZFS_EXIT(zfsvfs);
+		return (SET_ERROR(EROFS));
+	}
+
+	if (off >= zp->z_size) {
+		ZFS_EXIT(zfsvfs);
+		return (0);
+	}
+	if (len == 0 || len > zp->z_size - off)
+		len = zp->z_size - off;
+
+	/*
+	 * Push out any dirty mmap()ed pages first, so that the data we
+	 * rewrite is current.  This must be done before taking the range
+	 * lock, as zfs_putpage() takes it as well.
+	 */
+	if (vn_has_cached_data(vp)) {
+		(void) VOP_PUTPAGE(vp, (offset_t)off, (size_t)len, 0, cr,
+		    ct);
+	}
+
+	lr = rangelock_enter(&zp->z_rangelock, off, len, RL_WRITER);
+
+	/* The file may have been truncated while we waited for the lock. */
+	if (off >= zp->z_size) {
+		rangelock_exit(lr);
+		ZFS_EXIT(zfsvfs);
+		return (0);
+	}
+	end = MIN(off + len, zp->z_size);
+
+	db = (dmu_buf_impl_t *)sa_get_db(zp->z_sa_hdl);
+	DB_DNODE_ENTER(db);
+	dn = DB_DNODE(db);
+
+	noff = off;
+	while (off < end) {
+		uint64_t n;
+		int numbufs;
+		dmu_buf_t **dbp;
+		dmu_tx_t *tx;
+
+		/*
+		 * When we reach the end of the current data extent, look for
+		 * the next one and skip over the hole in between.  This only
+		 * looks at on-disk block pointers, so it may be imprecise for
+		 * data that is still dirty in memory; that is harmless.
+		 */
+		if (off == noff) {
+			error = dnode_next_offset(dn, 0, &noff, 1, 1, 0);
+			if (error != 0 || noff >= end) {
+				if (error == ESRCH)
+					error = 0;
+				break;
+			}
+			ASSERT3U(noff, >=, off);
+			off = noff;
+
+			if (dnode_next_offset(dn, DNODE_FIND_HOLE, &noff,
+			    1, 1, 0) != 0 || noff > end)
+				noff = end;
+			if (noff <= off)
+				noff = end;
+		}
+
+		if (zfs_id_overblockquota(zfsvfs, DMU_USERUSED_OBJECT,
+		    zp->z_uid) ||
+		    zfs_id_overblockquota(zfsvfs, DMU_GROUPUSED_OBJECT,
+		    zp->z_gid) ||
+		    (zp->z_projid != ZFS_DEFAULT_PROJID &&
+		    zfs_id_overblockquota(zfsvfs, DMU_PROJECTUSED_OBJECT,
+		    zp->z_projid))) {
+			error = SET_ERROR(EDQUOT);
+			break;
+		}
+
+		n = MIN(noff - off,
+		    DMU_MAX_ACCESS / 2 - P2PHASE(off, (uint64_t)zp->z_blksz));
+
+		tx = dmu_tx_create(zfsvfs->z_os);
+		dmu_tx_hold_write_by_dnode(tx, dn, off, n);
+		error = dmu_tx_assign(tx, TXG_WAIT);
+		if (error != 0) {
+			dmu_tx_abort(tx);
+			break;
+		}
+
+		/*
+		 * Read in and dirty every block in the range, unchanged.
+		 * Dirtying is what causes the block to be rewritten.
+		 */
+		error = dmu_buf_hold_array_by_dnode(dn, off, n, B_TRUE, FTAG,
+		    &numbufs, &dbp, DMU_READ_PREFETCH);
+		if (error != 0) {
+			dmu_tx_commit(tx);
+			break;
+		}
+		for (int i = 0; i < numbufs; i++)
+			dmu_buf_will_dirty(dbp[i], tx);
+		dmu_buf_rele_array(dbp, numbufs, FTAG);
+
+		dmu_tx_commit(tx);
+
+		off += n;
+
+		if (issig(JUSTLOOKING) && issig(FORREAL)) {
+			error = SET_ERROR(EINTR);
+			break;
+		}
+	}
+
+	DB_DNODE_EXIT(db);
+	rangelock_exit(lr);
+	ZFS_EXIT(zfsvfs);
+	return (error);
+}
+
 /* ARGSUSED */
 static int
 zfs_ioctl(vnode_t *vp, int com, intptr_t data, int flag, cred_t *cred,
@@ -488,6 +640,17 @@ zfs_ioctl(vnode_t *vp, int com, intptr_t data, int flag, cred_t *cred,
 		return (zfs_ioctl_getxattr(vp, data, flag, cred, ct));
 	case ZFS_IOC_FSSETXATTR:
 		return (zfs_ioctl_setxattr(vp, data, flag, cred, ct));
+	case ZFS_IOC_REWRITE:
+	{
+		zfs_rewrite_args_t args;
+
+		if ((flag & FWRITE) == 0)
+			return (SET_ERROR(EBADF));
+		if (ddi_copyin((void *)data, &args, sizeof (args), flag))
+			return (SET_ERROR(EFAULT));
+		return (zfs_rewrite(vp, args.off, args.len, args.flags,
+		    args.arg, cred, ct));
+	}
 	}
 	return (SET_ERROR(ENOTTY));
 }

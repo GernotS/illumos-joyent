@@ -31,7 +31,7 @@
 .\" Copyright 2023 RackTop Systems, Inc.
 .\" Copyright 2026 Oxide Computer Company
 .\"
-.Dd January 30, 2026
+.Dd November 26, 2026
 .Dt ZFS 8
 .Os
 .Sh NAME
@@ -176,6 +176,12 @@
 .Cm project
 .Op Fl p Ar id
 .Oo Fl rs Ns Oc
+.Ar file Ns | Ns Ar directory Ns ...
+.Nm
+.Cm rewrite
+.Op Fl rvx
+.Op Fl l Ar length
+.Op Fl o Ar offset
 .Ar file Ns | Ns Ar directory Ns ...
 .Nm
 .Cm mount
@@ -3202,6 +3208,58 @@ When setup tree quota, by default the directory's project ID will be set to
 all its descendants unless you specify the project ID via
 .Fl p
 option explicitly.
+.El
+.It Xo
+.Nm
+.Cm rewrite
+.Op Fl rvx
+.Op Fl l Ar length
+.Op Fl o Ar offset
+.Ar file Ns | Ns Ar directory Ns ...
+.Xc
+Rewrite the contents of the given regular files in place.
+The file data is not changed, but every allocated block in the requested
+range is read and written out again, as if it had been modified by the
+application.
+The new copies are written using the current values of properties such as
+.Sy compression ,
+.Sy checksum ,
+.Sy copies
+and
+.Sy dedup ,
+and are allocated according to the current pool layout, for example
+spreading data onto newly added top-level vdevs.
+The block size of existing files is not changed, so a modified
+.Sy recordsize
+does not take effect.
+Holes in sparse files are preserved.
+.Pp
+Rewritten blocks receive a new birth time, so they are included in
+subsequent incremental sends, and blocks still referenced by snapshots are
+not freed, which can increase space usage.
+If
+.Sy dedup
+is in effect, or if no relevant property changed and
+.Sy nopwrite
+applies, some blocks may not be physically relocated.
+The caller must be able to open each file for writing.
+.Bl -tag -width "-l length"
+.It Fl l Ar length
+Rewrite at most
+.Ar length
+bytes.
+The default is to rewrite through the end of the file.
+.It Fl o Ar offset
+Start rewriting at byte
+.Ar offset
+of the file.
+The default is the beginning of the file.
+.It Fl r
+Recurse into the given directories, rewriting all regular files found.
+.It Fl v
+Print the name of each file after it has been rewritten.
+.It Fl x
+When recursing, do not cross into other file systems.
 .El
 .It Xo
 .Nm
