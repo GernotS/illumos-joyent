@@ -155,7 +155,7 @@ typedef struct zio_cksum_salt {
  *	+-------+-------+-------+-------+-------+-------+-------+-------+
  * 6	|BDX|lvl| type	| cksum |E| comp|    PSIZE	|     LSIZE	|
  *	+-------+-------+-------+-------+-------+-------+-------+-------+
- * 7	|			padding					|
+ * 7	|R|			padding					|
  *	+-------+-------+-------+-------+-------+-------+-------+-------+
  * 8	|			padding					|
  *	+-------+-------+-------+-------+-------+-------+-------+-------+
@@ -191,6 +191,7 @@ typedef struct zio_cksum_salt {
  * E		blkptr_t contains embedded data (see below)
  * lvl		level of indirection
  * type		DMU object type
+ * R		rewrite (block was reallocated at its physical birth txg)
  * phys birth	txg when dva[0] was written; zero if same as logical birth txg
  *              note that typically all the dva's would be written in this
  *              txg, but they could be different if they were moved by
@@ -220,7 +221,7 @@ typedef struct zio_cksum_salt {
  *	+-------+-------+-------+-------+-------+-------+-------+-------+
  * 6	|BDX|lvl| type	| cksum |E| comp|    PSIZE	|     LSIZE	|
  *	+-------+-------+-------+-------+-------+-------+-------+-------+
- * 7	|			padding					|
+ * 7	|R|			padding					|
  *	+-------+-------+-------+-------+-------+-------+-------+-------+
  * 8	|			padding					|
  *	+-------+-------+-------+-------+-------+-------+-------+-------+
@@ -388,7 +389,8 @@ typedef enum bp_embedded_type {
 typedef struct blkptr {
 	dva_t		blk_dva[SPA_DVAS_PER_BP]; /* Data Virtual Addresses */
 	uint64_t	blk_prop;	/* size, compression, type, etc	    */
-	uint64_t	blk_pad[2];	/* Extra space for the future	    */
+	uint64_t	blk_prop2;	/* additional properties	    */
+	uint64_t	blk_pad;	/* Extra space for the future	    */
 	uint64_t	blk_phys_birth;	/* txg when block was allocated	    */
 	uint64_t	blk_birth;	/* transaction group at birth	    */
 	uint64_t	blk_fill;	/* fill count			    */
@@ -486,9 +488,50 @@ _NOTE(CONSTCOND) } while (0)
 #define	BP_GET_BYTEORDER(bp)		BF64_GET((bp)->blk_prop, 63, 1)
 #define	BP_SET_BYTEORDER(bp, x)		BF64_SET((bp)->blk_prop, 63, 1, x)
 
-#define	BP_PHYSICAL_BIRTH(bp)		\
+/*
+ * Block birth times:
+ *
+ * BP_GET_LOGICAL_BIRTH()	txg in which the data was last logically
+ *				modified.  Used where user-visible changes
+ *				matter, e.g. incremental send and zfs diff.
+ * BP_GET_PHYSICAL_BIRTH()	txg in which the data was written to disk.
+ *				Equal to the logical birth for regular
+ *				writes, older for dedup, newer for blocks
+ *				remapped by device removal or moved by a
+ *				physical zfs rewrite.  Used where on-disk
+ *				contents matter: ARC, DDT, scrub, error log.
+ * BP_GET_RAW_PHYSICAL_BIRTH()	the stored physical birth, zero when equal
+ *				to the logical birth.  For copying and
+ *				debugging only.
+ * BP_GET_BIRTH()		txg in which the space was allocated: the
+ *				physical birth for a block with the rewrite
+ *				flag set, else the logical birth.  Used for
+ *				space accounting (deadlists, snapshots).
+ *
+ * BP_PHYSICAL_BIRTH() is the historical name of BP_GET_PHYSICAL_BIRTH().
+ */
+#define	BP_GET_LOGICAL_BIRTH(bp)	((bp)->blk_birth)
+#define	BP_SET_LOGICAL_BIRTH(bp, x)	((bp)->blk_birth = (x))
+
+#define	BP_GET_RAW_PHYSICAL_BIRTH(bp)	((bp)->blk_phys_birth)
+#define	BP_SET_PHYSICAL_BIRTH(bp, x)	((bp)->blk_phys_birth = (x))
+
+#define	BP_GET_PHYSICAL_BIRTH(bp)		\
 	(BP_IS_EMBEDDED(bp) ? 0 : \
 	(bp)->blk_phys_birth ? (bp)->blk_phys_birth : (bp)->blk_birth)
+#define	BP_PHYSICAL_BIRTH(bp)		BP_GET_PHYSICAL_BIRTH(bp)
+
+#define	BP_GET_REWRITE(bp)			\
+	(BP_IS_EMBEDDED(bp) ? 0 : BF64_GET((bp)->blk_prop2, 63, 1))
+#define	BP_SET_REWRITE(bp, x)			\
+{						\
+	ASSERT(!BP_IS_EMBEDDED(bp));		\
+	BF64_SET((bp)->blk_prop2, 63, 1, x);	\
+}
+
+#define	BP_GET_BIRTH(bp)				\
+	((BP_IS_EMBEDDED(bp) || !BP_GET_REWRITE(bp)) ?	\
+	BP_GET_LOGICAL_BIRTH(bp) : BP_GET_PHYSICAL_BIRTH(bp))
 
 #define	BP_SET_BIRTH(bp, logical, physical)	\
 {						\
@@ -576,8 +619,8 @@ _NOTE(CONSTCOND) } while (0)
 	(bp)->blk_dva[2].dva_word[0] = 0;	\
 	(bp)->blk_dva[2].dva_word[1] = 0;	\
 	(bp)->blk_prop = 0;			\
-	(bp)->blk_pad[0] = 0;			\
-	(bp)->blk_pad[1] = 0;			\
+	(bp)->blk_prop2 = 0;			\
+	(bp)->blk_pad = 0;			\
 	(bp)->blk_phys_birth = 0;		\
 	(bp)->blk_birth = 0;			\
 	(bp)->blk_fill = 0;			\

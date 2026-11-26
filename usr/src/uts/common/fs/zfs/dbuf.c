@@ -846,11 +846,9 @@ dbuf_verify(dmu_buf_impl_t *db)
 					    DVA_IS_EMPTY(&bp->blk_dva[1]) &&
 					    DVA_IS_EMPTY(&bp->blk_dva[2]));
 					ASSERT0(bp->blk_fill);
-					ASSERT0(bp->blk_pad[0]);
-					ASSERT0(bp->blk_pad[1]);
 					ASSERT(!BP_IS_EMBEDDED(bp));
 					ASSERT(BP_IS_HOLE(bp));
-					ASSERT0(bp->blk_phys_birth);
+					ASSERT0(BP_GET_RAW_PHYSICAL_BIRTH(bp));
 				}
 			}
 		}
@@ -3765,7 +3763,7 @@ dbuf_write_ready(zio_t *zio, arc_buf_t *buf, void *vdb)
 	dnode_diduse_space(dn, delta - zio->io_prev_space_delta);
 	zio->io_prev_space_delta = delta;
 
-	if (bp->blk_birth != 0) {
+	if (BP_GET_BIRTH(bp) != 0) {
 		ASSERT((db->db_blkid != DMU_SPILL_BLKID &&
 		    BP_GET_TYPE(bp) == dn->dn_type) ||
 		    (db->db_blkid == DMU_SPILL_BLKID &&
@@ -4073,7 +4071,7 @@ dbuf_remap_impl(dnode_t *dn, blkptr_t *bp, krwlock_t *rw, dmu_tx_t *tx)
 	ASSERT(dsl_pool_sync_context(spa_get_dsl(spa)));
 
 	drica.drica_os = dn->dn_objset;
-	drica.drica_blk_birth = bp->blk_birth;
+	drica.drica_blk_birth = BP_GET_BIRTH(bp);
 	drica.drica_tx = tx;
 	if (spa_remap_blkptr(spa, &bp_copy, dbuf_remap_impl_callback,
 	    &drica)) {
@@ -4239,7 +4237,7 @@ dbuf_write(dbuf_dirty_record_t *dr, arc_buf_t *data, dmu_tx_t *tx)
 	}
 
 	ASSERT(db->db_level == 0 || data == db->db_buf);
-	ASSERT3U(db->db_blkptr->blk_birth, <=, txg);
+	ASSERT3U(BP_GET_BIRTH(db->db_blkptr), <=, txg);
 	ASSERT(zio);
 
 	SET_BOOKMARK(&zb, os->os_dsl_dataset ?

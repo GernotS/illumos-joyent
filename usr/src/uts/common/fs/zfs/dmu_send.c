@@ -710,7 +710,7 @@ send_traverse_thread(void *arg)
 	if (st_arg->ds != NULL) {
 		err = traverse_dataset_resume(st_arg->ds,
 		    st_arg->fromtxg, &st_arg->resume,
-		    st_arg->flags, send_cb, st_arg);
+		    st_arg->flags | TRAVERSE_LOGICAL, send_cb, st_arg);
 
 		if (err != EINTR)
 			st_arg->error_code = err;
@@ -1529,7 +1529,7 @@ dmu_send_estimate_from_txg(dsl_dataset_t *ds, uint64_t from_txg,
 	 * from_txg, summing their uncompressed size
 	 */
 	err = traverse_dataset(ds, from_txg,
-	    TRAVERSE_POST | TRAVERSE_NO_DECRYPT,
+	    TRAVERSE_POST | TRAVERSE_NO_DECRYPT | TRAVERSE_LOGICAL,
 	    dmu_calculate_send_traversal, &size);
 	if (err)
 		return (err);

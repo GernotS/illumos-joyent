@@ -457,7 +457,7 @@ zil_clear_log_block(zilog_t *zilog, blkptr_t *bp, void *tx, uint64_t first_txg)
 	 * that we rewind to is invalid. Thus, we return -1 so
 	 * zil_parse() doesn't attempt to read it.
 	 */
-	if (bp->blk_birth >= first_txg)
+	if (BP_GET_BIRTH(bp) >= first_txg)
 		return (-1);
 
 	if (zil_bp_tree_add(zilog, bp) != 0)
@@ -481,7 +481,7 @@ zil_claim_log_block(zilog_t *zilog, blkptr_t *bp, void *tx, uint64_t first_txg)
 	 * Claim log block if not already committed and not already claimed.
 	 * If tx == NULL, just verify that the block is claimable.
 	 */
-	if (BP_IS_HOLE(bp) || bp->blk_birth < first_txg ||
+	if (BP_IS_HOLE(bp) || BP_GET_BIRTH(bp) < first_txg ||
 	    zil_bp_tree_add(zilog, bp) != 0)
 		return (0);
 
@@ -507,7 +507,7 @@ zil_claim_log_record(zilog_t *zilog, lr_t *lrc, void *tx, uint64_t first_txg)
 	 * waited for all writes to be stable first), so it is semantically
 	 * correct to declare this the end of the log.
 	 */
-	if (lr->lr_blkptr.blk_birth >= first_txg) {
+	if (BP_GET_BIRTH(&lr->lr_blkptr) >= first_txg) {
 		error = zil_read_log_data(zilog, lr, NULL);
 		if (error != 0)
 			return (error);
@@ -535,7 +535,7 @@ zil_free_log_record(zilog_t *zilog, lr_t *lrc, void *tx, uint64_t claim_txg)
 	 * If we previously claimed it, we need to free it.
 	 */
 	if (claim_txg != 0 && lrc->lrc_txtype == TX_WRITE &&
-	    bp->blk_birth >= claim_txg && zil_bp_tree_add(zilog, bp) == 0 &&
+	    BP_GET_BIRTH(bp) >= claim_txg && zil_bp_tree_add(zilog, bp) == 0 &&
 	    !BP_IS_HOLE(bp))
 		zio_free(zilog->zl_spa, dmu_tx_get_txg(tx), bp);
 
@@ -1578,7 +1578,7 @@ zil_lwb_write_issue(zilog_t *zilog, lwb_t *lwb)
 	bp->blk_cksum.zc_word[ZIL_ZC_SEQ]++;
 
 	if (error == 0) {
-		ASSERT3U(bp->blk_birth, ==, txg);
+		ASSERT3U(BP_GET_BIRTH(bp), ==, txg);
 
 		/*
 		 * Allocate a new log write block (lwb).

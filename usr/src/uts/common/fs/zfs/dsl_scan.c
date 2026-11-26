@@ -421,7 +421,7 @@ static inline void
 bp2sio(const blkptr_t *bp, scan_io_t *sio, int dva_i)
 {
 	sio->sio_blk_prop = bp->blk_prop;
-	sio->sio_phys_birth = bp->blk_phys_birth;
+	sio->sio_phys_birth = BP_GET_RAW_PHYSICAL_BIRTH(bp);
 	sio->sio_birth = bp->blk_birth;
 	sio->sio_cksum = bp->blk_cksum;
 	sio->sio_nr_dvas = BP_GET_NDVAS(bp);
@@ -1355,7 +1355,7 @@ dsl_scan_zil_block(zilog_t *zilog, blkptr_t *bp, void *arg, uint64_t claim_txg)
 	zil_header_t *zh = zsa->zsa_zh;
 	zbookmark_phys_t zb;
 
-	if (BP_IS_HOLE(bp) || bp->blk_birth <= scn->scn_phys.scn_cur_min_txg)
+	if (BP_IS_HOLE(bp) || BP_GET_BIRTH(bp) <= scn->scn_phys.scn_cur_min_txg)
 		return (0);
 
 	/*
@@ -1364,7 +1364,7 @@ dsl_scan_zil_block(zilog_t *zilog, blkptr_t *bp, void *arg, uint64_t claim_txg)
 	 * (on-disk) even if it hasn't been claimed (even though for
 	 * scrub there's nothing to do to it).
 	 */
-	if (claim_txg == 0 && bp->blk_birth >= spa_min_claim_txg(dp->dp_spa))
+	if (claim_txg == 0 && BP_GET_BIRTH(bp) >= spa_min_claim_txg(dp->dp_spa))
 		return (0);
 
 	SET_BOOKMARK(&zb, zh->zh_log.blk_cksum.zc_word[ZIL_ZC_OBJSET],
@@ -1388,7 +1388,7 @@ dsl_scan_zil_record(zilog_t *zilog, lr_t *lrc, void *arg, uint64_t claim_txg)
 		zbookmark_phys_t zb;
 
 		if (BP_IS_HOLE(bp) ||
-		    bp->blk_birth <= scn->scn_phys.scn_cur_min_txg)
+		    BP_GET_BIRTH(bp) <= scn->scn_phys.scn_cur_min_txg)
 			return (0);
 
 		/*
@@ -1396,7 +1396,7 @@ dsl_scan_zil_record(zilog_t *zilog, lr_t *lrc, void *arg, uint64_t claim_txg)
 		 * already txg sync'ed (but this log block contains
 		 * other records that are not synced)
 		 */
-		if (claim_txg == 0 || bp->blk_birth < claim_txg)
+		if (claim_txg == 0 || BP_GET_BIRTH(bp) < claim_txg)
 			return (0);
 
 		/* Several records can share a dmu_sync() block. */
@@ -1522,7 +1522,8 @@ dsl_scan_prefetch(scan_prefetch_ctx_t *spc, blkptr_t *bp, zbookmark_phys_t *zb)
 	if (zfs_no_scrub_prefetch)
 		return;
 
-	if (BP_IS_HOLE(bp) || bp->blk_birth <= scn->scn_phys.scn_cur_min_txg ||
+	if (BP_IS_HOLE(bp) ||
+	    BP_GET_BIRTH(bp) <= scn->scn_phys.scn_cur_min_txg ||
 	    (BP_GET_LEVEL(bp) == 0 && BP_GET_TYPE(bp) != DMU_OT_DNODE &&
 	    BP_GET_TYPE(bp) != DMU_OT_OBJSET))
 		return;
@@ -1926,7 +1927,12 @@ dsl_scan_visitbp(blkptr_t *bp, const zbookmark_phys_t *zb,
 		return;
 	}
 
-	if (bp->blk_birth <= scn->scn_phys.scn_cur_min_txg) {
+	/*
+	 * Visit blocks allocated (logically or, for rewritten blocks,
+	 * physically) after cur_min_txg; the check against cur_max_txg
+	 * below uses the physical birth, which is what the scan reads.
+	 */
+	if (BP_GET_BIRTH(bp) <= scn->scn_phys.scn_cur_min_txg) {
 		scn->scn_lt_min_this_txg++;
 		return;
 	}

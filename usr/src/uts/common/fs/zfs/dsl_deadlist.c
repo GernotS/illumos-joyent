@@ -242,7 +242,7 @@ dsl_deadlist_insert(dsl_deadlist_t *dl, const blkptr_t *bp, dmu_tx_t *tx)
 	dl->dl_phys->dl_comp += BP_GET_PSIZE(bp);
 	dl->dl_phys->dl_uncomp += BP_GET_UCSIZE(bp);
 
-	dle_tofind.dle_mintxg = bp->blk_birth;
+	dle_tofind.dle_mintxg = BP_GET_BIRTH(bp);
 	dle = avl_find(&dl->dl_tree, &dle_tofind, &where);
 	if (dle == NULL)
 		dle = avl_nearest(&dl->dl_tree, where, AVL_BEFORE);

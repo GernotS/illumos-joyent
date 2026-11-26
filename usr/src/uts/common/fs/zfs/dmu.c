@@ -1962,7 +1962,7 @@ dmu_sync_late_arrival_done(zio_t *zio)
 		if (!BP_IS_HOLE(bp)) {
 			ASSERT(!(zio->io_flags & ZIO_FLAG_NOPWRITE));
 			ASSERT(BP_IS_HOLE(bp_orig) || !BP_EQUAL(bp, bp_orig));
-			ASSERT(zio->io_bp->blk_birth == zio->io_txg);
+			ASSERT(BP_GET_BIRTH(zio->io_bp) == zio->io_txg);
 			ASSERT(zio->io_txg > spa_syncing_txg(zio->io_spa));
 			zio_free(zio->io_spa, zio->io_txg, zio->io_bp);
 		}

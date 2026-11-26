@@ -555,7 +555,8 @@ space_range_cb(void *arg, const blkptr_t *bp, dmu_tx_t *tx)
 {
 	struct space_range_arg *sra = arg;
 
-	if (bp->blk_birth > sra->mintxg && bp->blk_birth <= sra->maxtxg) {
+	if (BP_GET_BIRTH(bp) > sra->mintxg &&
+	    BP_GET_BIRTH(bp) <= sra->maxtxg) {
 		if (dsl_pool_sync_context(spa_get_dsl(sra->spa)))
 			sra->used += bp_get_dsize_sync(sra->spa, bp);
 		else

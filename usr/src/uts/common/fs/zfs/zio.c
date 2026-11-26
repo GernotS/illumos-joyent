@@ -1443,7 +1443,7 @@ zio_write_bp_init(zio_t *zio)
 		blkptr_t *bp = zio->io_bp;
 		zio_prop_t *zp = &zio->io_prop;
 
-		ASSERT(bp->blk_birth != zio->io_txg);
+		ASSERT(BP_GET_BIRTH(bp) != zio->io_txg);
 		ASSERT(BP_GET_DEDUP(zio->io_bp_override) == 0);
 
 		*bp = *zio->io_bp_override;
@@ -3072,7 +3072,7 @@ zio_ddt_write(zio_t *zio)
 		else
 			ddt_phys_addref(ddp);
 	} else if (zio->io_bp_override) {
-		ASSERT(bp->blk_birth == txg);
+		ASSERT(BP_GET_BIRTH(bp) == txg);
 		ASSERT(BP_EQUAL(bp, zio->io_bp_override));
 		ddt_phys_fill(ddp, bp);
 		ddt_phys_addref(ddp);
@@ -3325,11 +3325,11 @@ zio_dva_claim(zio_t *zio)
 static void
 zio_dva_unallocate(zio_t *zio, zio_gang_node_t *gn, blkptr_t *bp)
 {
-	ASSERT(bp->blk_birth == zio->io_txg || BP_IS_HOLE(bp));
+	ASSERT(BP_GET_BIRTH(bp) == zio->io_txg || BP_IS_HOLE(bp));
 	ASSERT(zio->io_bp_override == NULL);
 
 	if (!BP_IS_HOLE(bp))
-		metaslab_free(zio->io_spa, bp, bp->blk_birth, B_TRUE);
+		metaslab_free(zio->io_spa, bp, BP_GET_BIRTH(bp), B_TRUE);
 
 	if (gn != NULL) {
 		for (int g = 0; g < SPA_GBH_NBLKPTRS; g++) {
@@ -4058,7 +4058,7 @@ zio_ready(zio_t *zio)
 
 	if (zio->io_ready) {
 		ASSERT(IO_IS_ALLOCATING(zio));
-		ASSERT(bp->blk_birth == zio->io_txg || BP_IS_HOLE(bp) ||
+		ASSERT(BP_GET_BIRTH(bp) == zio->io_txg || BP_IS_HOLE(bp) ||
 		    (zio->io_flags & ZIO_FLAG_NOPWRITE));
 		ASSERT(zio->io_children[ZIO_CHILD_GANG][ZIO_WAIT_READY] == 0);
 
@@ -4236,8 +4236,6 @@ zio_done(zio_t *zio)
 			ASSERT(zio->io_children[c][w] == 0);
 
 	if (bp != NULL && !BP_IS_EMBEDDED(bp)) {
-		ASSERT(bp->blk_pad[0] == 0);
-		ASSERT(bp->blk_pad[1] == 0);
 		ASSERT(bcmp(bp, &zio->io_bp_copy, sizeof (blkptr_t)) == 0 ||
 		    (bp == zio_unique_parent(zio)->io_bp));
 		if (zio->io_type == ZIO_TYPE_WRITE && !BP_IS_HOLE(bp) &&
