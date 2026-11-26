@@ -1,0 +1,58 @@
+#
+# This file and its contents are supplied under the terms of the
+# Common Development and Distribution License ("CDDL"), version 1.0.
+# You may only use this file in accordance with the terms of version
+# 1.0 of the CDDL.
+#
+# A full copy of the text of the CDDL should have accompanied this
+# source.  A copy of the CDDL is also available via the Internet at
+# http://www.illumos.org/license/CDDL.
+#
+
+#
+# Copyright 2026 Gernot Strasser
+#
+
+. $STF_SUITE/include/libtest.shlib
+
+export REWRITE_FILE=$TESTDIR/rewrite.file
+
+#
+# Print the DVA of the first level-0 block of a file, after syncing the pool
+# so that the on-disk block pointer is current.
+#
+function rewrite_first_dva # file
+{
+	typeset file=$1
+	typeset obj=$(get_objnum $file)
+
+	sync_pool $TESTPOOL
+	zdb -ddddd $TESTPOOL/$TESTFS $obj | awk '$2 == "L0" { print $3; exit }'
+}
+
+#
+# Create a test file of the given number of 128k blocks, filled with
+# compressible data, and remember its checksum.
+#
+function rewrite_mkfile # nblocks
+{
+	typeset n=${1:-4}
+
+	log_must rm -f $REWRITE_FILE
+	log_must eval "yes rewrite | head -c $((n * 131072)) > $REWRITE_FILE"
+	sync_pool $TESTPOOL
+	REWRITE_SUM=$(digest -a sha256 $REWRITE_FILE)
+}
+
+function rewrite_check_contents
+{
+	[[ $(digest -a sha256 $REWRITE_FILE) == $REWRITE_SUM ]] || \
+	    log_fail "contents of $REWRITE_FILE changed"
+}
+
+function rewrite_reset_props
+{
+	for p in compression checksum dedup copies; do
+		log_must zfs inherit $p $TESTPOOL/$TESTFS
+	done
+}
